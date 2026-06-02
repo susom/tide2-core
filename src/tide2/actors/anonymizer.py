@@ -523,11 +523,19 @@ class AnonymizerWorker:
 
         Called by AnonymizerSupervisor to avoid per-note ray.get() overhead.
 
+        Input columns are read into ``input_*`` locals (e.g. ``input_patient_uids``)
+        and kept distinct from the output accumulators they feed (e.g.
+        ``patient_uids``). This separation is deliberate: collapsing an input column
+        and its output accumulator onto one name appends results back onto the input
+        list, producing a ragged result dict that Ray silently drops at block-build
+        time (0-row output).
+
         Args:
             batch: Dictionary with columnar data (note_text, recognizer_results_json, etc.).
 
         Returns:
-            Dictionary with columnar results for all notes in the batch.
+            Dictionary with columnar results for all notes in the batch. Every list
+            has the same length (one entry per successfully processed note).
         """
         original_text_hashes = []
         patient_uids = []
@@ -541,7 +549,7 @@ class AnonymizerWorker:
         cols = BatchColumns(batch)
         batch_size = len(cols["note_text"])
         jitters = cols.get("jitter", [None] * batch_size)
-        patient_uids = cols.get("patient_uid", [None] * batch_size)
+        input_patient_uids = cols.get("patient_uid", [None] * batch_size)
         input_row_ids = cols.get("row_id", [None] * batch_size)
         recognizer_results_list = cols.get("recognizer_results_json", [None] * batch_size)
 
@@ -549,7 +557,7 @@ class AnonymizerWorker:
         for i in range(batch_size):
             note_text = note_texts[i]
             recognizer_results_json = recognizer_results_list[i] if i < len(recognizer_results_list) else None
-            patient_uid = patient_uids[i] if i < len(patient_uids) else None
+            patient_uid = input_patient_uids[i] if i < len(input_patient_uids) else None
             jitter = jitters[i] if i < len(jitters) else None
 
             original_text_hash = self.compute_text_hash(note_text)
