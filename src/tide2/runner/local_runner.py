@@ -3,7 +3,7 @@ Ray-based job runner for TIDE 2.0.
 
 Execution Environments:
     - Local machine or single GCP VM, using Ray for parallelism.
-    - Prefect flows: each flow task instantiates LocalJobRunner to
+    - Any host or orchestration task that instantiates LocalJobRunner to
       execute recognition, anonymization, or transformer stages.
 
 Examples:
@@ -15,7 +15,7 @@ Examples:
     runner = LocalJobRunner(num_cpus=224, object_store_gb=100)
     runner.run_recognition("gs://bucket/input", "gs://bucket/output")
 
-    # Inside a Prefect task
+    # GPU transformer stage, with explicit shutdown
     runner = LocalJobRunner(num_gpus=1)
     try:
         runner.run_transformer(input_path, output_path, model_name=model)
@@ -54,7 +54,7 @@ KEY_SIZE_BYTES = 32
 
 class LocalJobRunner:
     """
-    Ray-based job runner for single-node execution (local, VM, or Prefect task).
+    Ray-based job runner for single-node execution (local machine or VM).
 
     Features:
     - Ray Data row-level checkpointing for resume capability
