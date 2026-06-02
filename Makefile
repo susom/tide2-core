@@ -1,4 +1,4 @@
-.PHONY: docs docs-serve docs-deploy docker docker-cpu docker-gpu test-docker deploy setup-hooks clean-kubernetes work-pool
+.PHONY: docs docs-serve docker docker-cpu docker-gpu test-docker deploy setup-hooks clean-kubernetes work-pool
 
 -include .env
 export
@@ -17,19 +17,6 @@ docs:
 	python -c "import pyarrow; import pdoc, pdoc.render, pathlib; \
 		pdoc.render.configure(docformat='google'); \
 		pdoc.pdoc('tide2', output_directory=pathlib.Path('docs/'))"
-
-# Build docs, copy into a gh-pages worktree in /tmp, commit and push.
-# Uses git worktree so you never leave your current branch.
-GHPAGES_DIR := $(shell mktemp -d)/gh-pages
-docs-deploy: docs
-	git worktree add $(GHPAGES_DIR) gh-pages
-	rm -rf $(GHPAGES_DIR)/*
-	cp -r docs/* $(GHPAGES_DIR)/
-	cd $(GHPAGES_DIR) && \
-		git add --all && \
-		git diff --cached --quiet || \
-		(git commit --no-verify -m "Update documentation" && git push origin gh-pages)
-	git worktree remove --force $(GHPAGES_DIR)
 
 docs-serve:
 	python -c "import pyarrow; from pdoc.web import DocServer, open_browser; \
