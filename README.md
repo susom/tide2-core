@@ -138,15 +138,13 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Model compilation**: `torch.compile` with mega-cache support for faster inference startup
 
 ### Command Line Tools
-- **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files and dry-run mode.
-- **`tide2-prefect`**: Deploys the TIDE flows to a Prefect work pool (`deploy`, `setup-infra` subcommands). Configures GCS result storage, a zombie-flow automation, and registers the `tide2-main` deployment.
+- **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
 - **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
 
 
 ### Cloud Integration
-- **GCS**: input/output I/O, model caching, Prefect result storage.
-- **BigQuery**: Prefect tasks for exporting notes/recognizer/anonymizer inputs, uploading parquet, importing results back to BigQuery, and cleaning up temp resources (`src/tide2/workflows/tasks/bigquery.py`).
-- **GCP Managed Lustre** PVC mounted at `/data` for fast cross-stage scratch storage.
+- **GCS**: input/output I/O and model caching.
+- **BigQuery**: input/output of notes and recognizer/anonymizer results (e.g. via `ARRAY_AGG`-grouped chunk columns) for the runner and visualizer.
 - **Automatic Caching**: Download and cache models from GCS automatically (`$TIDE_CACHE_DIR`).
 
 ## CLI Usage
@@ -157,8 +155,8 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 # Run recognition locally
 tide2-runner run recognizer -i ./data/input -o ./data/output
 
-# Run on a VM with more resources
-tide2-runner run recognizer --mode vm -i gs://bucket/input -o gs://bucket/output \
+# Run with more resources (e.g. on a large VM), reading/writing from GCS
+tide2-runner run recognizer -i gs://bucket/input -o gs://bucket/output \
     --num-cpus 224 --num-actors 200
 
 # Run transformer NER on GPU
@@ -191,29 +189,32 @@ tide2-visualizer
 
 ## Docker Images
 
-Two production targets are built from a single multi-stage `Dockerfile`:
+Several targets are built from a single multi-stage `Dockerfile`:
 
-- `production-cpu` — slim CPU-only image (no CUDA, no `gpu` dependency group). Used by orchestrator, recognizer, anonymizer, and BigQuery tasks.
-- `production` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`, includes the `gpu` dependency group (`torch`, `transformers`, `spacy`). Used by transformer and diagnostics flows.
+- `production-cpu` — slim CPU-only image (no CUDA, no `gpu` dependency group). Used by recognizer, anonymizer, and BigQuery tasks.
+- `production-gpu` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`, includes the `gpu` dependency group (`torch`, `transformers`, `spacy`). Used by transformer inference.
 - `development` — Dev Container target with `git`, `gcloud`, build tools, and the full dev environment.
+- `test` — extends `development` and runs the test suite (used by `make test-docker`).
 
-Build and push both images (requires `DOCKER_REGISTRY`, `DOCKER_IMAGE_CPU`, `DOCKER_IMAGE_GPU` in `.env`):
+Build and push the GPU image (requires `DOCKER_REGISTRY` and `DOCKER_IMAGE_GPU` in `.env`):
 
 ```bash
-make docker         # build + push both CPU and GPU images
-make docker-cpu     # CPU only
-make docker-gpu     # GPU only
+make docker         # build + push the GPU image (alias for docker-gpu)
+make docker-gpu     # build + push the GPU image
+make test-docker    # build the test target and run the suite in Docker
 ```
 
 ## Dependency Groups
 
-- **`dev`**: Development tools (`pytest`, `pytest-cov`, `mypy`, `ruff`, `pre-commit`), Jupyter, evaluation libraries (`scikit-learn`, `scipy`, `umap-learn`)
+- **`dev`**: Development tools (`pytest`, `pytest-cov`, `ty`, `ruff`, `pre-commit`), Jupyter, and the `evaluation` libraries (`scikit-learn`, `scipy`, `tqdm`, `umap-learn`)
+- **`evaluation`**: Evaluation/analysis libraries (`scikit-learn`, `scipy`, `tqdm`, `umap-learn`)
 - **`test`**: Minimal test dependencies (`pytest`, `pytest-cov`)
+- **`gpu`**: ML inference stack (`torch`, `transformers`, `spacy`, `presidio-analyzer[transformers]`)
 - **`docs`**: API documentation generation (`pdoc`)
 
-Install specific groups with `uv sync --group <name>` or all groups with `uv sync --all-groups`.
+Install an optional group as an extra with `uv sync --extra <name>`, or all extras with `uv sync --all-extras`. (These same sets are also defined as `[dependency-groups]`, usable with `uv sync --group <name>`.)
 
-Note: GCP, CLI, and ML dependencies are included in the main package by default.
+Note: GCP, CLI, and Presidio dependencies ship in the main package by default. The transformer/NER ML stack (`torch`, `transformers`, `spacy`) lives in the `gpu` extra — install it with `uv sync --extra gpu` before running transformer or pipeline jobs.
 
 ## Architecture
 
@@ -262,7 +263,7 @@ uv run pytest
 uv run pytest --no-cov
 
 # Run a specific test file
-uv run pytest tests/test_text_processing.py
+uv run pytest tests/test_masking_anonymizer.py
 
 # Skip slow integration tests
 uv run pytest -m "not integration"
@@ -272,17 +273,7 @@ Coverage is configured in `pyproject.toml` and runs automatically with `pytest`.
 
 - **Terminal**: line-by-line missing coverage printed to stdout
 - **HTML**: detailed report at `htmlcov/index.html`
-- **XML**: `coverage.xml` (Cobertura format, used for badge generation)
-
-### Updating the coverage badge
-
-After running tests, regenerate the badge SVG:
-
-```bash
-genbadge coverage -i coverage.xml -o coverage-badge.svg
-```
-
-The badge in the README references `coverage-badge.svg` at the repo root. Commit the updated SVG to keep the badge current.
+- **XML**: `coverage.xml` (Cobertura format)
 
 ## Documentation
 
@@ -293,18 +284,19 @@ API documentation is hosted via GitHub Pages: [https://susom.github.io/tide2/](h
 To build or preview docs locally (generated with [pdoc](https://pdoc.dev/)):
 
 ```bash
-# Install docs dependencies
-uv sync --group docs
+# Install docs dependencies (pdoc); also needs the gpu extra so all modules import
+uv sync --extra docs --extra gpu
 
 # Live preview (opens a local server with hot reload)
 make docs-serve
 
 # Generate static HTML to docs/
 make docs
-
-# Deploy to GitHub Pages (builds and pushes to gh-pages branch)
-make docs-deploy
 ```
+
+Deployment to GitHub Pages is automated: the [`.github/workflows/docs.yml`](.github/workflows/docs.yml)
+workflow runs `make docs` on every push to `main` and publishes the `docs/` directory as a
+Pages artifact.
 
 ### Other Resources
 
@@ -314,10 +306,10 @@ make docs-deploy
 ## Requirements
 
 - **Dev Container**: Recommended — provides the full environment with no manual setup (requires Docker and VS Code with the Dev Containers extension)
-- **Python**: 3.12 (required, `>=3.12,<3.13`) — constrained to 3.12 because several dependencies (`spacy`, `thinc`, `blis`) are built from source and require 3.12-compatible C extensions. RAPIDS GPU libraries (`cudf`, `cuml`, `cugraph`) also pin to 3.12.
+- **Python**: 3.12 (required, `>=3.12,<3.13`) — constrained to 3.12 for compatibility with the `spacy`/`thinc` C-extension stack and other pinned dependencies.
 - **Package Manager**: uv (not pip or poetry)
 - **Virtual Environment**: `.venv/` (activated automatically in the Dev Container; must be activated manually for local installs)
-- **Core Dependencies**: Presidio, Ray (`>=2.54`), Cryptography, Faker, Google Cloud libraries; `torch`/`transformers`/`spacy` in the optional `gpu` group
+- **Core Dependencies**: Presidio, Ray (`>=2.54`), Cryptography, Faker, Google Cloud libraries; `torch`/`transformers`/`spacy` in the optional `gpu` extra
 
 ## Security Considerations
 
