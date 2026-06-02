@@ -1,9 +1,5 @@
 # TIDE 2.0
 
-This will be the public release repo of TiDE 2.0. It is currently *private*.
-
-Do not make public until repo has been sanitized, validated, and contains the security checks required by sponsor.
-
 A data de-identification and anonymization toolkit that combines multiple anonymization strategies with cryptographic techniques and machine learning-based entity recognition.
 
 ## Get Started
