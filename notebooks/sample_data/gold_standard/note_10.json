@@ -1,0 +1,50 @@
+[
+  {
+    "span_start": 36,
+    "span_end": 58,
+    "span_tag": "PATIENT",
+    "text": "Terrence J. Washington"
+  },
+  {
+    "span_start": 64,
+    "span_end": 71,
+    "span_tag": "MRN",
+    "text": "7193024"
+  },
+  {
+    "span_start": 77,
+    "span_end": 88,
+    "span_tag": "US_SSN",
+    "text": "312-76-4058"
+  },
+  {
+    "span_start": 174,
+    "span_end": 187,
+    "span_tag": "PATIENT",
+    "text": "Dr. Karen Yeh"
+  },
+  {
+    "span_start": 200,
+    "span_end": 229,
+    "span_tag": "LOCATION",
+    "text": "Redwood Clinical Laboratories"
+  },
+  {
+    "span_start": 246,
+    "span_end": 258,
+    "span_tag": "PHONE",
+    "text": "925-471-6382"
+  },
+  {
+    "span_start": 2069,
+    "span_end": 2076,
+    "span_tag": "PATIENT",
+    "text": "Dr. Yeh"
+  },
+  {
+    "span_start": 2333,
+    "span_end": 2362,
+    "span_tag": "LOCATION",
+    "text": "Redwood Clinical Laboratories"
+  }
+]

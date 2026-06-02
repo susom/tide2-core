@@ -1,0 +1,233 @@
+
+Identify and tag ALL patient-identifiable information and organizational information from clinical notes. Return results as JSON.
+
+## TOP PRIORITIES (NEVER MISS THESE)
+
+1. **DATES**: Scan exhaustively for ALL date formats (MM/DD/YYYY, M/D/YY, M/D, Month DD YYYY, etc.). Include short dates like "4/12" without years. Tag every occurrence separately.
+- EXCLUDE times (10:00AM), temporal words (yesterday), day names (Monday). Example: "2023-03-05T03:43:00-08:00" -> "2023-03-05" (exclude T03:43:00-08:00).
+
+2. **COMPLETE ADDRESSES WITH ZIP (CRITICAL PATTERN)**: ALWAYS tag addresses in format "Street Address  City State ZIP" (note: 2+ spaces between street and city). Example: "1234 MAIN STREET  BOSTON MA 02101" is ONE complete entity. This pattern appears frequently and MUST be captured.
+
+3. **ALL DISTINCT MENTIONS**: Tag each occurrence separately:
+   - Complete address: "5678 MAPLE STREET  BOSTON MA 02134" → tag it
+   - Same street appearing alone: "5678 MAPLE STREET" → ALSO tag it separately when occurring in a different part of the text
+   - Do NOT skip any mention just because another version exists elsewhere
+
+4. **EXACT TEXT MATCHING**: Copy text exactly - preserve all case, whitespace, punctuation. Different whitespace = different entity ("Smith, John" vs "Smith,  John" are separate entities).
+
+5. Check carefully for the entities separated by line breaks or several white spaces. Example: "Smith,  John   Albert"
+
+## ENTITY DEFINITIONS
+
+**PATIENT**: Patient names, relatives, friends, guardians, and any person name mentioned that is NOT a healthcare provider.
+- EXCLUDE generic terms: "sister", "mother". EXCLUDE common professional titles that appear alongside the name. Example: John Smith PhD -> "John Smith" (exclude "PhD").
+- EXCLUDE Ms./Mr./Mrs. Example: "Ms. Johnson" -> "Johnson" (exclude "Ms.").
+
+**LOCATION**: ALL address mentions (complete or incomplete). Preserve internal whitespace exactly.
+- Complete with ZIP: "456 OAK DR  Austin TX 78745" (one entity despite multiple spaces)
+- Verbose format: "HealthMart #123 - Chicago, IL - 456 OAK DRIVE at Main St"
+- Standalone street: "456 OAK DRIVE" (even if complete version exists elsewhere)
+- Partial: "Chicago, IL - 456 OAK DRIVE"
+- City/state: "Chicago, IL"
+- Do NOT fragment single mentions. DO tag separate incomplete mentions. Do NOT double tag mentions that are already part of another mention.
+- EXCLUDE generic facility names (PACU, ICU) without room numbers.
+
+**DATE**: Any date format. Past, present, future.
+
+**ID**: MRNs (include hyphens: "1234567-8"), SSNs, account numbers. EXCLUDE generic codes (R07.89), labels without values ("MRN").
+
+**AGE**: Complete expressions with units ("72 Y old", "14 year old"). When units in separate fields ("Age: 14  Units: Years"), tag only number "14".
+- EXCLUDE common female or male terms that accompany the age. Example 72 Y old female -> 72 Y old (exclude "female").
+
+**PHONE**: All formats including pagers. For pagers, tag ONLY number ("12019"), NOT label ("Pgr").
+
+**WEB**: Emails, URLs, social media handles, IPs.
+
+**DOCTOR**: ALL healthcare worker names (providers, nurses, staff, interpreters, coordinators, financial staff, etc..):
+- Formal: Examples:  "Dr. Smith", "Wilson, Anne Marie, MD"  -> "Smith", "Wilson, Anne Marie," (exclude "Dr.", "MD"), "Rn Johnson" -> "Johnson" (exclude "Rn")
+- Informal: "spoke with Jennifer", "called Michael", "coordinator Tom"
+- First names only when referring to healthcare workers
+- If the title appears at the end, EXCLUDE it. Example: Smith, John Michael, MD -> "Smith, John Michael"
+- If the title appears in the middle INCLUDE it. Example: Smith MD, John Michael Trey -> "Smith MD, John Michael Trey"
+
+**HOSPITAL**: Organizations, pharmacies, clinics. Room numbers as number only ("3142", NOT "room 3142"). EXCLUDE generic teams (TT MICU GREEN), generic services (language line).
+
+**OTHER**: Unique identifying characteristics.
+
+## KEY RULES
+
+**Organization + Location Combinations:**
+- Full address: "HealthMart #7842 - Dallas, TX - 4825 Maple Dr" → "HealthMart #7842" (HOSPITAL) + ALL location variants (verbose full, ZIP format if present, standalone street, partial combinations)
+- Shorthand (org + city/state only): "CVS Pharmacy Seattle, WA" → "CVS Pharmacy" (HOSPITAL) + "Seattle, WA" (LOCATION) as separate entities
+- Multiple repetitions like this should be split into their components and tagged separately:
+    - RITE AID-1991 MOUNTAIN BLVD. - OAKLAND, CA - 1991 MOUNTAIN BOULEVARD - > 1991 MOUNTAIN BLVD. - OAKLAND, CA (LOCATION) + 1991 MOUNTAIN BOULEVARD (LOCATION)
+    - RITE AID-1991 MOUNTAIN BLVD. - OAKLAND, CA - 1991 MOUNTAIN BOULEVARD  1991 MOUNTAIN BOULEVARD  OAKLAND CA 94611-2812  -> 1991 MOUNTAIN BLVD. - OAKLAND, CA (LOCATION) + 1991 MOUNTAIN BOULEVARD (LOCATION) + 1991 MOUNTAIN BOULEVARD  OAKLAND CA 94611-2812 (LOCATION)
+
+**Multiple Address Formats:** When same physical location appears in different formats, tag EACH format separately. Don't skip standard ZIP format just because verbose format appeared first.
+
+**Exclusions:** Generic facilities (PACU), generic family terms (sister), generic teams (TT CARDIAC ICU), generic services (language line), medical codes (P245).
+
+## OUTPUT FORMAT
+Return valid JSON only. No markdown, explanations, or extra text.
+```json
+{{
+  "ENTITY_TYPE": [
+    {{"text": "exact text from input", "confidence": 0.95}},
+    {{"text": "another entity", "confidence": 0.87}}
+  ]
+}}
+```
+Entity types: `PATIENT`, `LOCATION`, `PHONE`, `WEB`, `DATE`, `ID`, `HOSPITAL`, `DOCTOR`, `AGE`, `OTHER`
+Confidence: 0.00-1.00 (use 0.90-0.99 for clear PHI)
+No PHI found: return `{{}}`
+Better to over-tag with lower confidence than miss entities.
+
+## EXAMPLES
+
+**Example 1 - Comprehensive Detection:**
+Input: "Patient: Rodriguez, Maria Elena  MRN: 7834521-3  Age: 14  Age Units: Years  DOB: 03/22/2009
+Pharmacy: MedPlus #5847 - Houston, TX - 2340 RIVERSIDE AVENUE at Memorial Drive
+2340 RIVERSIDE AVENUE  Houston TX 77004
+2340 RIVERSIDE AVENUE (standalone)
+Phone: 713-555-8821  Fax: 713-555-8822  Pager Pgr 19304
+Thomas K Williams is a 68 Y old male. Provider: Chen,  Lisa Marie, MD
+Later, Dr. Chen, Lisa Marie (1 space) reviewed. Also consulted Smith, John Michael, MD.
+Referred to Smith MD, John Michael Trey for cardiology. Ms. Johnson visited with family. Room 4217 at PACU.
+Called Dr. Smith about results. Rn Johnson assisted with discharge.
+Labs: HbA1c 07/15/2023, LIPID PANEL 01/08/2024, GLUCOSE  05/12/2024
+Patient's brother visited. Team: TT NEURO ICU RED. Used language line. Code M79.3.
+Spoke with Sandra in radiology. Interpreter Paulo #8472. Coordinator Michelle x6193.
+Additional pharmacy: QuickCare Rx #2109 - Phoenix, AZ - 8765 DESERT BOULEVARD
+8765 DESERT BOULEVARD  Phoenix AZ 85001
+Verify: 8765 DESERT BOULEVARD
+Prior address: 1542 OCEAN DRIVE  MIAMI FL 33139"
+
+Output:
+```json
+{{
+  "PATIENT": [
+    {{"text": "Rodriguez, Maria Elena", "confidence": 0.95}},
+    {{"text": "Thomas K Williams", "confidence": 0.95}},
+    {{"text": "Johnson", "confidence": 0.93}}
+  ],
+  "ID": [
+    {{"text": "7834521-3", "confidence": 0.99}},
+    {{"text": "8472", "confidence": 0.94}}
+  ],
+  "AGE": [
+    {{"text": "14", "confidence": 0.94}},
+    {{"text": "68 Y old", "confidence": 0.94}}
+  ],
+  "DATE": [
+    {{"text": "03/22/2009", "confidence": 0.98}},
+    {{"text": "07/15/2023", "confidence": 0.98}},
+    {{"text": "01/08/2024", "confidence": 0.98}},
+    {{"text": "05/12/2024", "confidence": 0.98}}
+  ],
+  "HOSPITAL": [
+    {{"text": "MedPlus #5847", "confidence": 0.95}},
+    {{"text": "QuickCare Rx #2109", "confidence": 0.95}},
+    {{"text": "4217", "confidence": 0.95}}
+  ],
+  "LOCATION": [
+    {{"text": "Houston, TX - 2340 RIVERSIDE AVENUE at Memorial Drive", "confidence": 0.95}},
+    {{"text": "2340 RIVERSIDE AVENUE  Houston TX 77004", "confidence": 0.97}},
+    {{"text": "2340 RIVERSIDE AVENUE", "confidence": 0.94}},
+    {{"text": "Phoenix, AZ - 8765 DESERT BOULEVARD", "confidence": 0.95}},
+    {{"text": "8765 DESERT BOULEVARD  Phoenix AZ 85001", "confidence": 0.97}},
+    {{"text": "8765 DESERT BOULEVARD", "confidence": 0.94}},
+    {{"text": "1542 OCEAN DRIVE  MIAMI FL 33139", "confidence": 0.97}}
+  ],
+  "PHONE": [
+    {{"text": "713-555-8821", "confidence": 0.98}},
+    {{"text": "713-555-8822", "confidence": 0.98}},
+    {{"text": "19304", "confidence": 0.94}},
+    {{"text": "6193", "confidence": 0.94}}
+  ],
+  "DOCTOR": [
+    {{"text": "Chen,  Lisa Marie,", "confidence": 0.93}},
+    {{"text": "Chen, Lisa Marie", "confidence": 0.93}},
+    {{"text": "Smith, John Michael,", "confidence": 0.93}},
+    {{"text": "Smith MD, John Michael Trey", "confidence": 0.93}},
+    {{"text": "Smith", "confidence": 0.93}},
+    {{"text": "Johnson", "confidence": 0.92}},
+    {{"text": "Sandra", "confidence": 0.91}},
+    {{"text": "Paulo", "confidence": 0.91}},
+    {{"text": "Michelle", "confidence": 0.91}}
+  ]
+}}
+```
+
+**Example 2 - Additional Patterns:**
+Input: "At 0915 contacted Amy in billing x3482. Confirmed coverage.
+Coordinator Jason arranged transport. Connected with interpreter Diana #7621.
+Nurse Marcus reviewed discharge plan.
+Primary pharmacy: CareMed #4783 - Boston, MA - 5123 HARBOR STREET
+5123 HARBOR STREET  Boston MA 02108
+5123 HARBOR STREET (confirm)
+Alternate: WellRx Pharmacy Denver, CO (shorthand - no street)
+Historical address: SupplyPlus - Atlanta, GA - 9876 PEACHTREE ROAD
+9876 PEACHTREE ROAD  Atlanta GA 30303
+Financial advisor Teresa x5247. Follow-up 11/5/2024. Email: patient@health.org"
+
+Output:
+```json
+{{
+  "DOCTOR": [
+    {{"text": "Amy", "confidence": 0.91}},
+    {{"text": "Jason", "confidence": 0.91}},
+    {{"text": "Diana", "confidence": 0.91}},
+    {{"text": "Marcus", "confidence": 0.91}},
+    {{"text": "Teresa", "confidence": 0.91}}
+  ],
+  "PHONE": [
+    {{"text": "3482", "confidence": 0.94}},
+    {{"text": "7621", "confidence": 0.94}},
+    {{"text": "5247", "confidence": 0.94}}
+  ],
+  "ID": [
+    {{"text": "7621", "confidence": 0.94}}
+  ],
+  "HOSPITAL": [
+    {{"text": "CareMed #4783", "confidence": 0.95}},
+  ],
+  "LOCATION": [
+    {{"text": "Boston, MA - 5123 HARBOR STREET", "confidence": 0.96}},
+    {{"text": "5123 HARBOR STREET  Boston MA 02108", "confidence": 0.97}},
+    {{"text": "5123 HARBOR STREET", "confidence": 0.94}},
+    {{"text": "Denver, CO", "confidence": 0.92}},
+    {{"text": "Atlanta, GA - 9876 PEACHTREE ROAD", "confidence": 0.96}},
+    {{"text": "9876 PEACHTREE ROAD  Atlanta GA 30303", "confidence": 0.97}}
+  ],
+  "DATE": [
+    {{"text": "11/5/2024", "confidence": 0.97}}
+  ],
+  "WEB": [
+    {{"text": "patient@health.org", "confidence": 0.98}}
+  ]
+}}
+```
+
+**Key Patterns Demonstrated:**
+- MRNs with hyphens tagged
+- Age with units vs separate field units handled correctly
+- ALL dates captured (multiple years, different formats)
+- **CRITICAL: Standard ZIP format "Street  City State ZIP" (2 spaces) ALWAYS captured** - appears 8 times across examples (including extended ZIP codes like 94301-2302 and concatenated ZIPs like 921284108)
+- **Addresses with suite numbers, floor numbers, mail codes (MC), room/building codes (H310), and directional indicators (South) preserved exactly** - Examples: "4523 Maple Grove Suite 900", "850 Pine Avenue, 2nd Floor", "1250 Oak Boulevard MC 5807", "425 Forest Dr Mc 5208  H310", "9847 Sunset Creek Dr South Ste300"
+- **State names can appear as abbreviations (CA) or full names (California)** - both formats captured
+- Standalone street addresses tagged even when complete versions exist
+- Verbose address formats captured
+- Partial address combinations captured
+- Doctor names with different whitespace variants captured separately
+- **Doctor title handling: "Dr. Smith" → "Smith" (exclude "Dr."), "Wilson, Anne Marie, MD" → "Wilson, Anne Marie," (exclude "MD"), "Rn Johnson" → "Johnson" (exclude "Rn")**
+- Informal healthcare worker first names tagged (billing, coordinators, interpreters, nurses, financial)
+- Pager numbers without "Pgr" label
+- Room numbers without "room" label
+- Extension numbers as phone
+- Shorthand pharmacy format split: "WellRx Pharmacy Denver, CO" → "Denver, CO" separately
+- EXCLUDED: Generic facilities (PACU), generic terms (brother), generic teams (TT NEURO ICU RED), services (language line), medical codes (M79.3)
+
+
+Clinical Text:
+
+{clinical_text}

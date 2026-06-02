@@ -1,0 +1,41 @@
+OPERATIVE NOTE
+
+Patient: Johansson, Erik B.
+MRN: 9501762
+HAR: 50482917630
+Date of Procedure: 05/12/2025
+
+Surgeon: Dr. Catherine Reeves
+First Assist: Dr. Omar Farouk
+Anesthesiologist: Dr. Lisa Tran
+Location: Bayside General Hospital, Operating Room 4
+
+Preoperative Imaging:
+CT abdomen/pelvis (Accession: RAD-2025-09134) dated 04/28/2025 demonstrated a 4.2 cm mass in the cecum. Chest CT (Accession: RAD-2025-09267) showed no evidence of metastatic disease.
+
+PREOPERATIVE DIAGNOSIS:
+Cecal mass, biopsy-proven adenocarcinoma.
+
+POSTOPERATIVE DIAGNOSIS:
+Cecal adenocarcinoma, T3N0 (pending final pathology).
+
+PROCEDURE PERFORMED:
+Laparoscopic right hemicolectomy with primary anastomosis.
+
+ANESTHESIA: General endotracheal.
+
+ESTIMATED BLOOD LOSS: 150 mL
+SPECIMENS: Right colon with cecal mass, sent to pathology.
+DRAINS: One 19-French Blake drain placed in the right paracolic gutter.
+
+OPERATIVE FINDINGS:
+A firm 4 cm mass was palpated in the cecum, consistent with the preoperative imaging. No evidence of peritoneal carcinomatosis or liver metastases on visual inspection. Mesenteric lymph nodes appeared grossly normal.
+
+PROCEDURE IN DETAIL:
+The patient was brought to the operating room and placed supine on the operating table. After induction of general anesthesia with endotracheal intubation and placement of an orogastric tube and Foley catheter, the abdomen was prepped and draped in the standard sterile fashion. Pneumoperitoneum was established via Veress needle at Palmer's point to a pressure of 15 mmHg. A 12 mm trocar was placed at the umbilicus for the camera. Three additional trocars were placed under direct visualization.
+
+The right colon was mobilized by incising the white line of Toldt from the cecum to the hepatic flexure using a Harmonic scalpel. The ileocolic and right colic vessels were identified, clipped, and divided. The duodenum and right ureter were identified and preserved. A window was created in the mesentery at the planned transection sites. The terminal ileum and transverse colon were divided using an endoscopic linear stapler. The specimen was placed in an Endo Catch bag and extracted through a 4 cm Pfannenstiel incision. A functional end-to-end stapled anastomosis was performed extracorporeally using two fires of a GIA 80 stapler. The anastomosis was inspected and found to be hemostatic and patent. The colon was returned to the abdomen, and the mesenteric defect was closed with a running 3-0 V-Loc suture. A Blake drain was placed in the right paracolic gutter. The Pfannenstiel incision was closed in layers. All trocar sites were closed with absorbable suture and skin adhesive.
+
+Sponge, needle, and instrument counts were correct at the end of the case. Mr. Johansson tolerated the procedure well without complications. He was extubated in the operating room and transferred to the PACU in stable condition.
+
+Surgeon: Dr. Catherine Reeves, MD, FACS

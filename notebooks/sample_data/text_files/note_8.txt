@@ -1,0 +1,50 @@
+NURSING ADMISSION ASSESSMENT
+
+Patient: Beatrice L. Fontaine
+MRN: 2059471
+Date of Admission: 07/21/2025
+Time: 08:15
+Unit: 4 West, Room 412B
+Admitting Nurse: Carla Nguyen, RN
+
+PATIENT INFORMATION:
+DOB: 04/09/1947
+Age: 78
+Phone: (510) 834-2716
+Email: b.fontaine@comcast.net
+Home Address: 3961 Claremont Ave, Oakland, CA 94602
+Emergency Contact: Daughter, Sophie Fontaine, 510-834-9203
+
+ADMITTING DIAGNOSIS: Left hip fracture, status post mechanical fall.
+
+HISTORY OF PRESENT ILLNESS:
+Mrs. Fontaine is a 78-year-old female admitted from the emergency department following a fall at home this morning. Beatrice reports she tripped over a rug in her hallway at approximately 06:30 and was unable to bear weight on her left leg. Her daughter Sophie called 911. X-ray in the ED confirmed a displaced left femoral neck fracture. Patient is scheduled for left hip hemiarthroplasty tomorrow with Dr. Raymond Torres.
+
+PAST MEDICAL HISTORY:
+Osteoporosis, hypothyroidism, GERD, mild cognitive impairment.
+
+MEDICATIONS ON ADMISSION:
+1. Alendronate 70 mg weekly
+2. Levothyroxine 75 mcg daily
+3. Omeprazole 20 mg daily
+4. Calcium/Vitamin D 600 mg/400 IU twice daily
+
+ALLERGIES: Codeine (nausea/vomiting), Latex
+
+VITAL SIGNS ON ADMISSION:
+BP: 148/78 mmHg, HR: 88 bpm, RR: 18, SpO2: 97% on RA, Temp: 98.1 F
+Pain: 7/10 left hip, described as sharp with any movement.
+
+ASSESSMENT:
+Neurological: Alert and oriented x3. Speech clear. PERRLA. Follows commands appropriately. Fall risk assessment: Morse score 75 (high risk).
+Cardiovascular: Regular rate and rhythm. Peripheral pulses palpable bilaterally. No edema.
+Respiratory: Clear bilaterally. No cough or dyspnea at rest.
+GI: Abdomen soft, non-tender. Last bowel movement yesterday. NPO after midnight for surgery.
+GU: Voiding without difficulty. Foley catheter placed per surgical protocol.
+Musculoskeletal: Left lower extremity externally rotated and shortened. Neurovascular checks intact distally. Right extremity with full ROM.
+Skin: Intact. Braden score 16 (mild risk). No pressure injuries noted.
+
+PLAN OF CARE:
+Fall precautions initiated. Bed alarm activated. Pain management with morphine 2 mg IV q4h PRN. Pre-operative labs drawn. Type and screen sent. Consent obtained for surgery. NPO after midnight. VTE prophylaxis with SCDs applied.
+
+Assessment completed by Carla Nguyen, RN

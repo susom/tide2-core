@@ -1,0 +1,11 @@
+Patient: Maria Santos, DOB: 03/15/1962
+MRN: 12345678 | SSN: 123-45-6789
+Phone: (650) 723-4000 | Email: msantos@email.com
+
+Seen at Stanford Cancer Center, 875 Blake Wilbur Dr, Palo Alto, CA 94304
+Provider: Dr. James Wilson, MD
+
+Assessment: 62 y/o female with breast cancer. Maria reports mild fatigue.
+Follow-up scheduled 04/22/2025.
+Contact oncology coordinator Sarah at x4521 for questions.
+Visit our portal at https://mychart.stanford.edu for results.

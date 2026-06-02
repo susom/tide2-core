@@ -1,0 +1,266 @@
+[
+  {
+    "span_start": 68,
+    "span_end": 86,
+    "span_tag": "PATIENT",
+    "text": "Robert M. Harrison"
+  },
+  {
+    "span_start": 68,
+    "span_end": 74,
+    "span_tag": "PATIENT",
+    "text": "Robert"
+  },
+  {
+    "span_start": 78,
+    "span_end": 86,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 108,
+    "span_end": 116,
+    "span_tag": "MRN",
+    "text": "87624531"
+  },
+  {
+    "span_start": 155,
+    "span_end": 169,
+    "span_tag": "PATIENT",
+    "text": "Dr. Sarah Chen"
+  },
+  {
+    "span_start": 184,
+    "span_end": 221,
+    "span_tag": "LOCATION",
+    "text": "Stanford Medical Center Cancer Center"
+  },
+  {
+    "span_start": 184,
+    "span_end": 207,
+    "span_tag": "LOCATION",
+    "text": "Stanford Medical Center"
+  },
+  {
+    "span_start": 184,
+    "span_end": 192,
+    "span_tag": "LOCATION",
+    "text": "Stanford"
+  },
+  {
+    "span_start": 223,
+    "span_end": 236,
+    "span_tag": "LOCATION",
+    "text": "Palo Alto, CA"
+  },
+  {
+    "span_start": 250,
+    "span_end": 262,
+    "span_tag": "PATIENT",
+    "text": "Mr. Harrison"
+  },
+  {
+    "span_start": 254,
+    "span_end": 262,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 439,
+    "span_end": 445,
+    "span_tag": "PATIENT",
+    "text": "Robert"
+  },
+  {
+    "span_start": 521,
+    "span_end": 529,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 638,
+    "span_end": 650,
+    "span_tag": "PATIENT",
+    "text": "Mr. Harrison"
+  },
+  {
+    "span_start": 642,
+    "span_end": 650,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 824,
+    "span_end": 827,
+    "span_tag": "PATIENT",
+    "text": "Bob"
+  },
+  {
+    "span_start": 860,
+    "span_end": 868,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 922,
+    "span_end": 933,
+    "span_tag": "PATIENT",
+    "text": "R. Harrison"
+  },
+  {
+    "span_start": 925,
+    "span_end": 933,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 1090,
+    "span_end": 1102,
+    "span_tag": "PATIENT",
+    "text": "Mr. Harrison"
+  },
+  {
+    "span_start": 1094,
+    "span_end": 1102,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 1186,
+    "span_end": 1192,
+    "span_tag": "PATIENT",
+    "text": "Robert"
+  },
+  {
+    "span_start": 1389,
+    "span_end": 1397,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 1597,
+    "span_end": 1600,
+    "span_tag": "PATIENT",
+    "text": "Bob"
+  },
+  {
+    "span_start": 2661,
+    "span_end": 2673,
+    "span_tag": "PATIENT",
+    "text": "Mr. Harrison"
+  },
+  {
+    "span_start": 2665,
+    "span_end": 2673,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 2731,
+    "span_end": 2737,
+    "span_tag": "PATIENT",
+    "text": "Robert"
+  },
+  {
+    "span_start": 2869,
+    "span_end": 2877,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3097,
+    "span_end": 3100,
+    "span_tag": "PATIENT",
+    "text": "Bob"
+  },
+  {
+    "span_start": 3153,
+    "span_end": 3164,
+    "span_tag": "PATIENT",
+    "text": "R. Harrison"
+  },
+  {
+    "span_start": 3156,
+    "span_end": 3164,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3254,
+    "span_end": 3266,
+    "span_tag": "PATIENT",
+    "text": "Mr. Harrison"
+  },
+  {
+    "span_start": 3258,
+    "span_end": 3266,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3352,
+    "span_end": 3358,
+    "span_tag": "PATIENT",
+    "text": "Robert"
+  },
+  {
+    "span_start": 3481,
+    "span_end": 3489,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3501,
+    "span_end": 3504,
+    "span_tag": "PATIENT",
+    "text": "Bob"
+  },
+  {
+    "span_start": 3573,
+    "span_end": 3584,
+    "span_tag": "PATIENT",
+    "text": "R. Harrison"
+  },
+  {
+    "span_start": 3576,
+    "span_end": 3584,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3709,
+    "span_end": 3717,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3754,
+    "span_end": 3766,
+    "span_tag": "PATIENT",
+    "text": "Mr. Harrison"
+  },
+  {
+    "span_start": 3758,
+    "span_end": 3766,
+    "span_tag": "PATIENT",
+    "text": "Harrison"
+  },
+  {
+    "span_start": 3900,
+    "span_end": 3914,
+    "span_tag": "PATIENT",
+    "text": "Dr. Sarah Chen"
+  },
+  {
+    "span_start": 3936,
+    "span_end": 3959,
+    "span_tag": "LOCATION",
+    "text": "Stanford Medical Center"
+  },
+  {
+    "span_start": 3936,
+    "span_end": 3944,
+    "span_tag": "LOCATION",
+    "text": "Stanford"
+  }
+]

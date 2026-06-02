@@ -1,0 +1,567 @@
+GMC
+SMC
+RMC
+PMC
+VMC
+HMC
+CMC
+BWH
+SGH
+UMC
+NMC
+EMC
+WMC
+LMC
+TMC
+AMC
+BMC
+DMC
+FMC
+KMC
+GRMC
+SRMC
+PRMC
+VRMC
+HMCH
+CMCH
+BWHS
+SGHS
+UMCH
+NMCH
+EMCH
+WMCH
+LMCH
+TMCH
+AMCH
+BMCH
+DMCH
+FMCH
+KMCH
+Genesis Med
+Summit Med
+Prairie Med
+Harbor Med
+Beacon Med
+Valley Med
+Cascade Med
+Harmony Med
+Sunrise Med
+Lakeside Med
+Hillcrest Med
+Northpoint Med
+Southview Med
+Eastpoint Med
+Westpoint Med
+Clearview Med
+Grandview Med
+Fairview Med
+Riverbend Med
+Bridgewater Med
+Genesis Health
+Summit Health
+Prairie Health
+Harbor Health
+Beacon Health
+Valley Health
+Cascade Health
+Harmony Health
+Bridgewater Wellness System
+Genesis Memorial Center
+Signature Regional Hospital
+Unity Ridge Integrated Health Center
+Caring Medical System
+Shoreline Memorial Network
+Harbor Innovation Network
+Helping Hands Continuum System
+Prairie Healthcare Medical Center
+Premier Regional Center
+Stonecrest Community Group
+Pinecrest Continuum Group
+Brightview Memorial Group
+Evergreen General Group
+Premier Continuum Hospital
+Fairview Memorial System
+Kindred Quality Alliance
+Helping Hands Medical Medical Center
+Inspire Quality Center
+Briarwood Medical Medical Center
+Choice Innovation Network
+Edgewood Healthcare Hospital
+Horizons Memorial Partners
+Guiding Light Healthcare Hospital
+NorthStar Health Hospital
+Greenbrier Wellness System
+Hopewell Quality Alliance
+Riverbend General Network
+Hopewell General Alliance
+Clearwater Healthcare System
+Southview Innovation Health Center
+Silver Integrated Medical Center
+Caring Memorial Partners
+Harbor Regional Medical Center
+Eastpoint Medical Alliance
+Briarwood Wellness Hospital
+Grandview Community Alliance
+Choice Quality System
+NorthStar Health Center
+Crossroads Regional Network
+Liberty Quality Medical Center
+Riverbend Continuum Center
+Grandview Regional System
+Twin Rivers Medical Group
+Sunrise Integrated Partners
+Sapphire Integrated Group
+Genesis Continuum Network
+Sunnyvale Innovation Network
+Grandview Innovation Medical Center
+Highland Continuum Center
+Grandview Health System
+Greenbrier Memorial Center
+Southpoint Memorial Medical Center
+Choice Healthcare Network
+Highland Integrated System
+Crystal General Alliance
+Pioneer Wellness Group
+Meadowlands Wellness Center
+Stonecrest Quality Group
+Summit Quality Alliance
+Prairie Medical Health Center
+Eastpoint General Alliance
+Silver Memorial Health Center
+Hillcrest Medical Hospital
+Harmony General Group
+Crossroads Memorial Alliance
+Genesis Medical Medical Center
+Riverbend Healthcare Medical Center
+Maple Wellness Hospital
+Birchwood Quality Alliance
+Shoreline Regional Health Center
+Signature Wellness Partners
+Summit Continuum System
+Meadowlands Medical Alliance
+Oak Ridge Innovation Hospital
+Kindred Integrated Center
+Birchwood Regional Center
+Magnolia Regional Partners
+Highland Community System
+Tranquil Innovation Center
+Helping Hands General Health Center
+Heritage Healthcare Health Center
+Unity Ridge General Partners
+Riverside Innovation Group
+Hillcrest Integrated Health Center
+Choice Community Group
+Twin Rivers Regional Hospital
+Helping Hands Memorial Hospital
+Ironwood Healthcare Health Center
+Crystal Wellness Partners
+Northpoint Innovation Medical Center
+Synergy Innovation Partners
+Redwood Wellness Hospital
+Willow Creek Healthcare Health Center
+Valley Regional Center
+Tranquil Medical Health Center
+Maple Wellness Partners
+Cascade Wellness Partners
+Fairfield Healthcare Hospital
+Riverside Healthcare Alliance
+Birchwood Healthcare Alliance
+Integrity Wellness System
+Ironwood Memorial Partners
+Grandview Medical System
+Redwood Healthcare Group
+Highland Medical System
+Bluegrass Continuum System
+Oakwood Memorial Network
+Sunrise Healthcare Medical Center
+Willow Creek Wellness Alliance
+Redwood Quality Partners
+Clearwater Medical Hospital
+Southview Community Network
+Grandview Wellness Center
+NorthStar Continuum Health Center
+Inspire Continuum Medical Center
+Fairfield Healthcare System
+Westpoint Integrated Center
+Liberty Regional Alliance
+Silver Healthcare Network
+Fairfield Wellness Hospital
+Redwood Regional Group
+Harbor Quality Hospital
+Twin Rivers Quality Health Center
+Caring Regional Center
+Fairview Continuum Partners
+Bluegrass Quality Partners
+Cedar Health Health Center
+Sterling General Network
+Evergreen Regional Alliance
+Brookstone Innovation Medical Center
+Westpoint Community Alliance
+Lakeside Continuum Partners
+Sterling Wellness Alliance
+Riverbend Memorial Alliance
+Clearwater Healthcare Group
+Tranquil Healthcare Health Center
+Hillcrest Healthcare Network
+Pioneer Memorial Group
+Aspire Quality Group
+Solace Quality System
+Brookstone Continuum Group
+Inspire Community Network
+Aspire Innovation Hospital
+Horizons Regional Group
+Guiding Light Community Alliance
+Copper Ridge Memorial Group
+Clearview General Group
+Horizons Healthcare Alliance
+Copper Ridge Wellness Health Center
+Twin Rivers Memorial Center
+Bluegrass Healthcare Medical Center
+Fairfield Quality Alliance
+Grandview Health Partners
+Eastpoint Quality Network
+Sterling Memorial Partners
+Kindred Health Medical Center
+Cascade Healthcare System
+Broadview Integrated Group
+Helping Hands Medical Health Center
+Caring Innovation Center
+Broadview Healthcare Medical Center
+Oak Ridge Continuum Hospital
+Magnolia Community Hospital
+Briarwood Quality Group
+Integrity General Alliance
+Cedar Medical Network
+Riverside Continuum Medical Center
+Fairview Integrated System
+Cascade Memorial Medical Center
+Southview Innovation Medical Center
+Hopewell Continuum Hospital
+Sapphire Continuum Partners
+Solace Memorial Partners
+Sunrise Health Hospital
+Briarwood Community Health Center
+Heritage Memorial Network
+Liberty General System
+Southpoint Medical Medical Center
+Meadowlands Integrated Alliance
+Maple General System
+Bluegrass Memorial Group
+Harmony Healthcare System
+Ironwood Integrated Medical Center
+Southview Health Network
+Clearwater Wellness Alliance
+Golden Healthcare System
+Riverbend Healthcare Alliance
+Inspire Regional Medical Center
+Bridgewater Memorial Hospital
+Greenbrier Integrated System
+Summit Integrated Hospital
+Westpoint Healthcare Health Center
+Shoreline Innovation Alliance
+Twin Rivers Innovation Medical Center
+Maple Memorial Group
+Helping Hands Regional Alliance
+Hopewell General Center
+Sunnyvale Integrated Center
+Choice Memorial Medical Center
+Unity Integrated Center
+Ironwood Continuum System
+Maple Continuum System
+Crystal Health Medical Center
+Signature Healthcare Network
+Grandview Regional Hospital
+Stonecrest Integrated System
+Clearview Healthcare Center
+Premier Memorial Alliance
+Sterling General Alliance
+Southview Healthcare System
+Choice Community Partners
+Helping Hands Medical Group
+Bridgewater Integrated Center
+Unity Ridge Innovation Center
+Copper Ridge Healthcare Alliance
+Synergy Healthcare Alliance
+Twin Rivers Quality Partners
+Magnolia Integrated Partners
+Edgewood Community Medical Center
+Summit Health Health Center
+Northpoint Regional System
+Eastpoint Memorial Group
+Harmony Medical Group
+Unity Ridge Community Hospital
+Magnolia Quality Partners
+Pinecrest Health Health Center
+Tranquil Health Health Center
+Sunrise Regional Alliance
+Solace Wellness Partners
+Highland Medical Partners
+Crossroads Innovation Center
+Edgewood Health Health Center
+Genesis Regional System
+Solace Wellness Center
+Aspire Wellness Group
+Helping Hands Memorial Network
+Inspire Integrated Partners
+Willow Creek Healthcare Network
+Clearwater Quality Medical Center
+Genesis Healthcare Network
+Crossroads Continuum Group
+Bluegrass Wellness Group
+Twin Rivers Integrated Center
+Pioneer Healthcare Medical Center
+Beacon Community Group
+Kindred Healthcare Network
+Pinecrest Quality Network
+Bluegrass Regional Medical Center
+Magnolia Community Center
+Lakeside Memorial Health Center
+Hillcrest Healthcare Hospital
+Silver Community Group
+Golden Regional Group
+Twin Rivers Wellness Medical Center
+Maple Health Medical Center
+Copper Ridge Health Alliance
+Twin Rivers Continuum System
+Highland Regional Partners
+Redwood Integrated Group
+Pioneer Medical Center
+Redwood General Network
+Eastpoint Medical Partners
+Brightview Continuum Center
+Broadview Continuum Partners
+Premier Wellness Hospital
+Unity Innovation Health Center
+Ironwood Innovation Health Center
+Clearwater Community Center
+Copper Ridge Healthcare Medical Center
+Crystal Medical Group
+Crossroads Regional Medical Center
+Meadowlands Health Health Center
+NorthStar Healthcare Group
+Fairview Healthcare Center
+Brightview Medical Health Center
+Premier Wellness Network
+Harmony Regional Group
+Premier Continuum Partners
+Westpoint Wellness Health Center
+Willow Creek Integrated Group
+Premier General Medical Center
+Brookstone Healthcare Hospital
+Pioneer Health Partners
+Harmony Wellness System
+Ironwood Continuum Network
+Maple Innovation Alliance
+Oakwood Innovation Health Center
+Stonecrest Regional Group
+Southpoint Memorial Group
+Maple Health Health Center
+NorthStar Health Group
+Crossroads Community Hospital
+Hillcrest Integrated System
+Summit Wellness Hospital
+Evergreen Innovation Network
+Hillcrest Quality Center
+Silver Community Medical Center
+Highland Medical Medical Center
+Crystal Regional Medical Center
+Twin Rivers Healthcare Partners
+Prairie Quality Medical Center
+NorthStar Memorial Center
+Edgewood Wellness Medical Center
+Unity Ridge Healthcare Alliance
+Birchwood Health Health Center
+Sterling Memorial Medical Center
+Pioneer Wellness Center
+Choice Memorial Partners
+Horizons Continuum Center
+Horizons Continuum Alliance
+Silver Quality Health Center
+Crossroads Regional Hospital
+Briarwood General System
+Kindred Medical System
+Copper Ridge Medical Group
+Crystal Community Partners
+Pioneer Health Center
+Inspire General Center
+Riverbend Healthcare Center
+Silver Medical Center
+Copper Ridge Continuum Network
+Premier Health Center
+Brightview Health Hospital
+Broadview Integrated Alliance
+Riverbend Continuum Partners
+Solace Quality Network
+Pinecrest Integrated Partners
+Golden Community Alliance
+Riverside Memorial Group
+Golden Community System
+Cedar Health Group
+Signature Regional Health Center
+Horizons Regional System
+Northpoint Wellness Center
+Hopewell Healthcare Partners
+Liberty Regional Group
+Meadowlands Wellness Alliance
+Twin Rivers Regional Network
+Fairview Community Group
+Hopewell Innovation System
+Beacon Healthcare Hospital
+Fairview Quality Medical Center
+Sapphire Continuum Hospital
+Stonecrest Integrated Center
+Hopewell Integrated System
+Brightview Healthcare Alliance
+Copper Ridge Health Medical Center
+Genesis General Health Center
+Unity Ridge Quality Network
+Sapphire Medical Hospital
+Liberty Integrated Health Center
+Sunnyvale Innovation Medical Center
+Golden Innovation Partners
+Sapphire Community Alliance
+Aspire Innovation Alliance
+Willow Creek Medical Center
+Redwood Continuum Network
+Hopewell Community Partners
+Brightview Memorial Hospital
+Harmony Wellness Network
+Maple Regional Group
+Oakwood Memorial Group
+Cedar Community Center
+Lakeside Memorial Group
+Broadview Community Alliance
+Riverbend Quality Health Center
+Crossroads Wellness Center
+Tranquil Quality Center
+Cedar Wellness Alliance
+Synergy Integrated Network
+Genesis Medical Partners
+Tranquil Continuum Health Center
+Brightview Quality Medical Center
+Lakeside Memorial Medical Center
+Shoreline Memorial Partners
+Signature Regional Alliance
+Magnolia General Center
+Pioneer Healthcare Hospital
+Unity Ridge Health Partners
+Broadview Quality Center
+Signature Integrated Medical Center
+Willow Creek Continuum Group
+Solace Quality Medical Center
+Pinecrest Quality Alliance
+Silver General Medical Center
+Crossroads General Medical Center
+Lakeside Wellness Alliance
+Sterling Integrated Group
+Unity Ridge Quality Center
+Magnolia Healthcare Medical Center
+Brightview Quality Center
+Sunnyvale Integrated Network
+Caring Wellness Group
+Grandview Integrated Partners
+Greenbrier Health Center
+Grandview Memorial System
+Synergy Wellness Network
+Lakeside Regional Partners
+Inspire Health System
+Cascade Integrated System
+Highland Integrated Hospital
+Liberty Continuum System
+Kindred Memorial Partners
+Briarwood General Hospital
+Hopewell Wellness Center
+Liberty Health Network
+Golden Community Hospital
+Premier Community Hospital
+Harbor Medical Medical Center
+Stonecrest Health Center
+Evergreen Integrated Medical Center
+Silver Continuum System
+Greenbrier Regional Group
+Hopewell Wellness System
+Crossroads Integrated Hospital
+Birchwood Medical Partners
+Copper Ridge Community Center
+Greenbrier Integrated Health Center
+Unity Wellness Hospital
+Briarwood Healthcare System
+Brookstone Innovation Alliance
+Clearview Memorial Medical Center
+Evergreen General Medical Center
+Kindred Community Health Center
+Broadview Integrated Health Center
+Bluegrass Medical Partners
+Magnolia Regional Network
+Westpoint Quality Health Center
+Sunnyvale Community Hospital
+Meadowlands General Center
+Redwood Wellness Medical Center
+Brightview Continuum Health Center
+Brightview Integrated Group
+Eastpoint Healthcare Alliance
+Sunrise Wellness Alliance
+Westpoint Memorial Medical Center
+Broadview Continuum Alliance
+Sapphire Quality Alliance
+Cascade Quality Hospital
+Golden Medical Medical Center
+Prairie Community Group
+Sunnyvale Innovation Group
+Harmony General Health Center
+Caring Medical Alliance
+Golden Community Group
+Silver Community Center
+Pioneer Quality Health Center
+Kindred Continuum Medical Center
+Clearview Memorial Network
+Highland Wellness System
+Shoreline Medical System
+Southview Continuum Alliance
+Meadowlands Integrated Network
+Signature Continuum Partners
+Riverside Regional Alliance
+Brookstone Wellness System
+Liberty General Group
+Clearview Health Partners
+Synergy Wellness Group
+Magnolia Community Alliance
+Signature Integrated Health Center
+Golden Regional Network
+Tranquil Continuum Medical Center
+Harbor Healthcare Center
+Briarwood Memorial Partners
+Brightview Quality Health Center
+Southpoint Healthcare Group
+Cascade Regional Health Center
+Edgewood Regional Group
+Magnolia Integrated Alliance
+Valley Continuum Medical Center
+Northpoint Quality Hospital
+Cedar Community System
+Unity Innovation Alliance
+Choice Health Medical Center
+Synergy Innovation Medical Center
+Ironwood Memorial Alliance
+Caring Integrated Partners
+Evergreen Quality Center
+Crystal Memorial Network
+Guiding Light Health System
+Caring Wellness Alliance
+Silver Wellness Medical Center
+Shoreline Memorial Center
+Westpoint Medical Network
+Evergreen Medical System
+Horizons Health Network
+Bridgewater Continuum Medical Center
+Greenbrier Healthcare Group
+Oakwood Quality Partners
+Greenbrier Integrated Alliance
+Premier Memorial Network
+Willow Creek Wellness System
+Briarwood Wellness System
+Liberty Innovation Partners
+Kindred Medical Health Center
+Birchwood Wellness Center
+Oak Ridge Regional Alliance
+Unity Integrated Alliance

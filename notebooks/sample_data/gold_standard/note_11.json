@@ -1,0 +1,38 @@
+[
+  {
+    "span_start": 40,
+    "span_end": 51,
+    "span_tag": "PATIENT",
+    "text": "John A. Doe"
+  },
+  {
+    "span_start": 332,
+    "span_end": 346,
+    "span_tag": "PHONE",
+    "text": "(456) 555-1234"
+  },
+  {
+    "span_start": 349,
+    "span_end": 369,
+    "span_tag": "EMAIL_ADDRESS",
+    "text": "john.doe@example.com"
+  },
+  {
+    "span_start": 387,
+    "span_end": 422,
+    "span_tag": "LOCATION",
+    "text": "123 Elm Street, Palo Alto, CA 94301"
+  },
+  {
+    "span_start": 403,
+    "span_end": 412,
+    "span_tag": "LOCATION",
+    "text": "Palo Alto"
+  },
+  {
+    "span_start": 428,
+    "span_end": 439,
+    "span_tag": "MRN",
+    "text": "123-45-6789"
+  }
+]

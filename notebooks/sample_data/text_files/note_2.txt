@@ -1,0 +1,36 @@
+PRIMARY CARE PROGRESS NOTE
+
+Patient: David R. Nakamura
+DOB: 11/03/1985
+MRN: 73920146
+Date of Service: 04/07/2025
+Provider: Dr. Anita Patel
+Clinic: Hillcrest Family Medicine, 490 Meridian Ave, San Jose, CA 95126
+
+SUBJECTIVE:
+Mr. Nakamura is a 39-year-old male presenting for follow-up of hypertension and annual wellness exam. David reports good medication compliance with lisinopril 10 mg daily. He notes occasional morning headaches but denies chest pain, palpitations, or visual changes. Patient has been exercising regularly, walking 30 minutes five days per week. He reports improved dietary habits with reduced sodium intake per our last discussion.
+
+Nakamura also mentions intermittent lower back pain over the past three weeks, worsened by prolonged sitting at work. No radicular symptoms, no bowel or bladder changes.
+
+Phone: 408-617-3295
+Email: d.nakamura@gmail.com
+
+OBJECTIVE:
+Vitals: BP 132/82 mmHg, HR 74 bpm, RR 16, Temp 98.2 F, Wt 187 lbs, Ht 5'10", BMI 26.8.
+General: Alert, oriented, well-appearing male in no acute distress.
+HEENT: Normocephalic, PERRLA, oropharynx clear.
+CV: Regular rate and rhythm, no murmurs, gallops, or rubs.
+Lungs: Clear to auscultation bilaterally.
+Abdomen: Soft, non-tender, non-distended, normoactive bowel sounds.
+MSK: Mild paraspinal tenderness in the lumbar region bilaterally. Full ROM of the spine. Negative straight leg raise bilaterally.
+Neuro: Intact sensation and motor strength in lower extremities.
+
+ASSESSMENT AND PLAN:
+1. Hypertension - improved but not at goal. Increase lisinopril to 20 mg daily. Recheck BP in 4 weeks.
+2. Mechanical low back pain - likely musculoskeletal. Recommend NSAIDs as needed, stretching exercises, ergonomic assessment at work. Follow up if symptoms persist beyond 6 weeks or if neurologic symptoms develop.
+3. Wellness - labs ordered: CBC, CMP, lipid panel, HbA1c, TSH. Flu vaccine administered today.
+
+Follow-up: 4 weeks for BP recheck. Contact our office at (408) 555-0192 or via the patient portal for questions.
+
+Electronically signed by Dr. Anita Patel, MD
+04/07/2025 16:45

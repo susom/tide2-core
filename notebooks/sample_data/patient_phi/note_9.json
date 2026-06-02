@@ -1,0 +1,9 @@
+{
+    "person": ["Dr. Samantha Greene", "Dr. Michael Brennan", "Aisha K. Oduya", "Ms. Oduya", "Aisha"],
+    "phone_number": ["(831) 429-7150", "831-647-3200"],
+    "email_address": ["aisha.oduya@outlook.com"],
+    "location": ["Coastal Rheumatology Associates", "720 Harbor Blvd, Suite 310, Monterey, CA 93940", "Monterey", "Peninsula Medical Group", "1245 Pacific Grove Ct, Seaside, CA 93955", "Seaside"],
+    "us_ssn": [],
+    "har": [],
+    "mrn": ["4152839"]
+}

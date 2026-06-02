@@ -1,0 +1,4 @@
+{
+  "supported_entities": ["PATIENT", "LOCATION", "PHONE", "WEB", "DATE", "ID", "HOSPITAL", "DOCTOR", "AGE", "OTHER"],
+  "prompt_file": "phi_detection.txt"
+}

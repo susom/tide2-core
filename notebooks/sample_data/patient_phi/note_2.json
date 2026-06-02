@@ -1,0 +1,9 @@
+{
+    "person": ["David R. Nakamura", "Mr. Nakamura", "David", "Nakamura", "Dr. Anita Patel"],
+    "phone_number": ["408-617-3295", "(408) 555-0192"],
+    "email_address": ["d.nakamura@gmail.com"],
+    "location": ["Hillcrest Family Medicine", "490 Meridian Ave, San Jose, CA 95126", "San Jose"],
+    "us_ssn": [],
+    "har": [],
+    "mrn": ["73920146"]
+}

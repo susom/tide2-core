@@ -1,0 +1,46 @@
+SURGICAL PATHOLOGY REPORT
+
+Accession: PATH-2025-03782
+Patient: Dmitri Volkov
+MRN: 3847261
+SSN: 628-31-5094
+Date of Procedure: 06/02/2025
+Date of Report: 06/06/2025
+
+Referring Physician: Dr. Natalie Kim
+
+CLINICAL HISTORY:
+72-year-old male with rising PSA (8.4 ng/mL) and abnormal digital rectal exam. TRUS-guided prostate biopsy performed.
+
+SPECIMENS RECEIVED:
+A. Prostate, right base (2 cores)
+B. Prostate, right mid (2 cores)
+C. Prostate, right apex (2 cores)
+D. Prostate, left base (2 cores)
+E. Prostate, left mid (2 cores)
+F. Prostate, left apex (2 cores)
+
+GROSS DESCRIPTION:
+Twelve needle core biopsies received in six containers, each containing two cores measuring 1.0 to 1.5 cm in length and 0.1 cm in diameter. Entirely submitted.
+
+MICROSCOPIC DESCRIPTION:
+Specimen A (Right base): Two cores of prostatic tissue with small acinar adenocarcinoma, Gleason score 3+4=7 (Grade Group 2). Tumor involves approximately 40% of one core (0.6 cm linear extent). Perineural invasion identified. No lymphovascular invasion.
+
+Specimen B (Right mid): Two cores with benign prostatic tissue. Focal high-grade prostatic intraepithelial neoplasia (HGPIN). No carcinoma identified.
+
+Specimen C (Right apex): Two cores of benign prostatic tissue with mild chronic inflammation. No carcinoma.
+
+Specimen D (Left base): Two cores with small acinar adenocarcinoma, Gleason score 3+3=6 (Grade Group 1). Tumor involves approximately 15% of one core (0.2 cm linear extent). No perineural or lymphovascular invasion.
+
+Specimen E (Left mid): Benign prostatic tissue. No carcinoma.
+
+Specimen F (Left apex): Benign prostatic tissue with focal atrophy. No carcinoma.
+
+DIAGNOSIS:
+A. Prostate, right base, needle biopsy: Prostatic adenocarcinoma, Gleason score 3+4=7 (Grade Group 2), involving 40% of one core. Perineural invasion present.
+D. Prostate, left base, needle biopsy: Prostatic adenocarcinoma, Gleason score 3+3=6 (Grade Group 1), involving 15% of one core.
+B, C, E, F. Prostate, needle biopsies: Benign prostatic tissue. HGPIN in specimen B.
+
+COMMENT: Bilateral prostatic adenocarcinoma with the highest Gleason score of 3+4=7 in the right base. Recommend clinical correlation for staging and treatment planning. Results discussed with Dr. Kim on 06/06/2025.
+
+Pathologist: Dr. Angela Morrison, MD

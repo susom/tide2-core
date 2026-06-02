@@ -1,0 +1,9 @@
+{
+    "person": ["John A. Doe"],
+    "phone_number": ["(456) 555-1234"],
+    "email_address": ["john.doe@example.com"],
+    "location": ["123 Elm Street, Palo Alto, CA 94301", "Palo Alto"],
+    "us_ssn": [],
+    "har": [],
+    "mrn": ["123-45-6789"]
+}

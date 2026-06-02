@@ -1,0 +1,50 @@
+[
+  {
+    "span_start": 29,
+    "span_end": 43,
+    "span_tag": "ACC_NUM",
+    "text": "RAD-2025-41893"
+  },
+  {
+    "span_start": 53,
+    "span_end": 67,
+    "span_tag": "PATIENT",
+    "text": "Chen, Linda M."
+  },
+  {
+    "span_start": 73,
+    "span_end": 80,
+    "span_tag": "MRN",
+    "text": "5190384"
+  },
+  {
+    "span_start": 299,
+    "span_end": 314,
+    "span_tag": "PATIENT",
+    "text": "Dr. Marcus Webb"
+  },
+  {
+    "span_start": 336,
+    "span_end": 354,
+    "span_tag": "PATIENT",
+    "text": "Dr. Priya Sundaram"
+  },
+  {
+    "span_start": 365,
+    "span_end": 386,
+    "span_tag": "LOCATION",
+    "text": "Valley Medical Center"
+  },
+  {
+    "span_start": 1579,
+    "span_end": 1587,
+    "span_tag": "PATIENT",
+    "text": "Dr. Webb"
+  },
+  {
+    "span_start": 1835,
+    "span_end": 1853,
+    "span_tag": "PATIENT",
+    "text": "Dr. Priya Sundaram"
+  }
+]

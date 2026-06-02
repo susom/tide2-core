@@ -1,0 +1,134 @@
+[
+  {
+    "span_start": 33,
+    "span_end": 50,
+    "span_tag": "PATIENT",
+    "text": "William T. Okafor"
+  },
+  {
+    "span_start": 33,
+    "span_end": 40,
+    "span_tag": "PATIENT",
+    "text": "William"
+  },
+  {
+    "span_start": 44,
+    "span_end": 50,
+    "span_tag": "PATIENT",
+    "text": "Okafor"
+  },
+  {
+    "span_start": 56,
+    "span_end": 64,
+    "span_tag": "MRN",
+    "text": "82614709"
+  },
+  {
+    "span_start": 70,
+    "span_end": 81,
+    "span_tag": "US_SSN",
+    "text": "539-84-6127"
+  },
+  {
+    "span_start": 87,
+    "span_end": 98,
+    "span_tag": "HAR",
+    "text": "30291847561"
+  },
+  {
+    "span_start": 181,
+    "span_end": 200,
+    "span_tag": "PATIENT",
+    "text": "Dr. Helen Marchetti"
+  },
+  {
+    "span_start": 234,
+    "span_end": 252,
+    "span_tag": "PATIENT",
+    "text": "Dr. Steven Aguilar"
+  },
+  {
+    "span_start": 524,
+    "span_end": 534,
+    "span_tag": "PATIENT",
+    "text": "Mr. Okafor"
+  },
+  {
+    "span_start": 528,
+    "span_end": 534,
+    "span_tag": "PATIENT",
+    "text": "Okafor"
+  },
+  {
+    "span_start": 779,
+    "span_end": 786,
+    "span_tag": "PATIENT",
+    "text": "William"
+  },
+  {
+    "span_start": 1108,
+    "span_end": 1114,
+    "span_tag": "PATIENT",
+    "text": "Okafor"
+  },
+  {
+    "span_start": 1329,
+    "span_end": 1340,
+    "span_tag": "PATIENT",
+    "text": "Dr. Aguilar"
+  },
+  {
+    "span_start": 1482,
+    "span_end": 1492,
+    "span_tag": "PATIENT",
+    "text": "Mr. Okafor"
+  },
+  {
+    "span_start": 1486,
+    "span_end": 1492,
+    "span_tag": "PATIENT",
+    "text": "Okafor"
+  },
+  {
+    "span_start": 1824,
+    "span_end": 1831,
+    "span_tag": "PATIENT",
+    "text": "William"
+  },
+  {
+    "span_start": 1967,
+    "span_end": 1980,
+    "span_tag": "PATIENT",
+    "text": "Dr. Marchetti"
+  },
+  {
+    "span_start": 1996,
+    "span_end": 2007,
+    "span_tag": "PATIENT",
+    "text": "Dr. Aguilar"
+  },
+  {
+    "span_start": 2124,
+    "span_end": 2136,
+    "span_tag": "PHONE",
+    "text": "650-283-4917"
+  },
+  {
+    "span_start": 2151,
+    "span_end": 2192,
+    "span_tag": "LOCATION",
+    "text": "1523 Birchwood Dr, Redwood City, CA 94063"
+  },
+  {
+    "span_start": 2170,
+    "span_end": 2182,
+    "span_tag": "LOCATION",
+    "text": "Redwood City"
+  },
+  {
+    "span_start": 2215,
+    "span_end": 2234,
+    "span_tag": "PATIENT",
+    "text": "Dr. Helen Marchetti"
+  }
+]

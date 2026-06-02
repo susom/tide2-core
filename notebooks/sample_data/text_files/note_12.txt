@@ -1,0 +1,61 @@
+SOAP Note: Oncology Consultation (Post-Chemotherapy)
+
+Patient Name: Robert M. Harrison
+DOB: 03/15/1957
+MRN: 87624531
+Date of Service: 11/28/2025
+Provider: Dr. Sarah Chen, MD
+Location: Stanford Medical Center Cancer Center, Palo Alto, CA
+
+SUBJECTIVE:
+Mr. Harrison is a 68-year-old male with Stage IIIA Non-Small Cell Lung Cancer (NSCLC), presenting for follow-up 10 days after completing Cycle 2 of Carboplatin/Pemetrexed.
+
+Constitutional: Robert reports Grade 2 fatigue; requires a nap daily but is able to perform ADLs. Harrison's energy levels have been consistent with previous cycles.
+GI: Nausea was well-controlled with Ondansetron. Mr. Harrison reports mild constipation, managing with increased fluid intake. No vomiting or diarrhea. The patient's appetite remains stable.
+Respiratory: Dyspnea is stable on exertion; Bob denies new cough or hemoptysis. Harrison's breathing hasn't worsened since last visit.
+Neuro: R. Harrison denies numbness or tingling in extremities (neuropathy).
+
+OBJECTIVE:
+
+Vitals: BP 128/76, HR 82, Temp 98.4°F, RR 18, SpO2 96% on RA. Weight: 78 kg (stable). Mr. Harrison's vitals are within normal limits.
+General: Alert, oriented x3, no acute distress. Robert appears comfortable and engaged.
+Lungs: Clear to auscultation bilaterally; decreased breath sounds noted in the RUL consistent with known tumor mass/previous radiation field. No wheezes or rales. Harrison's lung exam is unchanged from prior.
+CV: Regular rate and rhythm, no murmurs. The patient's cardiac exam is unremarkable.
+Extremities: Trace edema in bilateral lower extremities. No calf tenderness. Bob's lower extremity edema hasn't progressed.
+Labs (Today):
+WBC: 3.2 (Low) - ANC: 1.8 (Adequate for next cycle)
+Hgb: 10.5 (Stable anemia)
+Plt: 145 (Low normal)
+Creatinine: 0.9 (Stable)
+
+Genomic Testing Results (Foundation Medicine):
+EGFR Mutation: Negative
+ALK Rearrangement: Negative
+KRAS G12C Mutation: Positive - Detected sequence: ATGACTGAATATAAACTTGTGGTAGTTGGAGCTGGTGGCGTAGGCAAGAGTGCCTTGACGATACAGCTAATTCAG
+PD-L1 TPS: 45%
+TMB: 12 mutations/Mb
+
+Chest CT Image (11/25/2025):
+data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAYAAADDPmHLAAAACXBIWXMAAAsTAAALEwEAmpwYAAAF8WlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgNS42LWMxNDUgNzkuMTYzNDk5LCAyMDE4LzA4LzEzLTE2OjQwOjIyICAgICAgICAiPiA8cmRmOlJERiB4bWxuczpyZGY9Imh0dHA6Ly93d3cudzMub3JnLzE5OTkvMDIvMjItcmRmLXN5bnRheC1ucyMiPiA8cmRmOkRlc2NyaXB0aW9uIHJkZjphYm91dD0iIiB4bWxuczp4bXA9Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC8i
+
+ASSESSMENT:
+
+Stage IIIA NSCLC (Right Upper Lobe): Mr. Harrison is currently status post Cycle 2 Carboplatin/Pemetrexed. Robert's tolerating therapy reasonably well despite his tumor's aggressive nature.
+Chemotherapy Induced Nausea/Vomiting: Well controlled. Harrison's antiemetic regimen has been effective.
+Fatigue: Likely multifactorial (chemo-related + underlying malignancy). The patient's functional status remains acceptable.
+Myelosuppression: Mild leukopenia and anemia noted in Bob's labs, but ANC allows for continuation of therapy. R. Harrison's counts are within expected range post-chemotherapy.
+
+PLAN:
+
+Chemotherapy: Proceed with Mr. Harrison's Cycle 3 Carboplatin (AUC 5) and Pemetrexed (500 mg/m2) as scheduled on 12/09/2025. Robert's doing well enough to continue with the current regimen.
+Supportive Care:
+Continue Ondansetron 8mg PO q8h prn nausea for Harrison.
+Encourage Bob's hydration and Senna for constipation management.
+Monitor fatigue; R. Harrison was advised on energy conservation techniques.
+Monitoring: Repeat CBC and CMP prior to the patient's Cycle 4. Will reassess Harrison's response to treatment.
+Follow-up: Mr. Harrison should return to clinic in 3 weeks for pre-chemo assessment. Call immediately for fevers >100.4°F or uncontrolled symptoms.
+
+Signed,
+Dr. Sarah Chen, MD
+Medical Oncology
+Stanford Medical Center

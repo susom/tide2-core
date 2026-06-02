@@ -1,0 +1,98 @@
+[
+  {
+    "span_start": 37,
+    "span_end": 54,
+    "span_tag": "PATIENT",
+    "text": "David R. Nakamura"
+  },
+  {
+    "span_start": 37,
+    "span_end": 42,
+    "span_tag": "PATIENT",
+    "text": "David"
+  },
+  {
+    "span_start": 46,
+    "span_end": 54,
+    "span_tag": "PATIENT",
+    "text": "Nakamura"
+  },
+  {
+    "span_start": 76,
+    "span_end": 84,
+    "span_tag": "MRN",
+    "text": "73920146"
+  },
+  {
+    "span_start": 123,
+    "span_end": 138,
+    "span_tag": "PATIENT",
+    "text": "Dr. Anita Patel"
+  },
+  {
+    "span_start": 147,
+    "span_end": 172,
+    "span_tag": "LOCATION",
+    "text": "Hillcrest Family Medicine"
+  },
+  {
+    "span_start": 174,
+    "span_end": 210,
+    "span_tag": "LOCATION",
+    "text": "490 Meridian Ave, San Jose, CA 95126"
+  },
+  {
+    "span_start": 192,
+    "span_end": 200,
+    "span_tag": "LOCATION",
+    "text": "San Jose"
+  },
+  {
+    "span_start": 224,
+    "span_end": 236,
+    "span_tag": "PATIENT",
+    "text": "Mr. Nakamura"
+  },
+  {
+    "span_start": 228,
+    "span_end": 236,
+    "span_tag": "PATIENT",
+    "text": "Nakamura"
+  },
+  {
+    "span_start": 326,
+    "span_end": 331,
+    "span_tag": "PATIENT",
+    "text": "David"
+  },
+  {
+    "span_start": 656,
+    "span_end": 664,
+    "span_tag": "PATIENT",
+    "text": "Nakamura"
+  },
+  {
+    "span_start": 834,
+    "span_end": 846,
+    "span_tag": "PHONE",
+    "text": "408-617-3295"
+  },
+  {
+    "span_start": 854,
+    "span_end": 874,
+    "span_tag": "EMAIL_ADDRESS",
+    "text": "d.nakamura@gmail.com"
+  },
+  {
+    "span_start": 1946,
+    "span_end": 1960,
+    "span_tag": "PHONE",
+    "text": "(408) 555-0192"
+  },
+  {
+    "span_start": 2028,
+    "span_end": 2043,
+    "span_tag": "PATIENT",
+    "text": "Dr. Anita Patel"
+  }
+]

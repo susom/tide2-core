@@ -1,0 +1,32 @@
+EMERGENCY DEPARTMENT TRIAGE NOTE
+
+Date of Service: 03/14/2025
+Triage Time: 14:32
+
+Patient Name: Margaret A. Thornton
+DOB: 07/22/1958
+MRN: 4827351
+SSN: 471-58-3920
+
+Chief Complaint: Chest pain radiating to left arm, onset 45 minutes ago.
+
+Triage Assessment:
+Ms. Thornton is a 66-year-old female who presents to the ED via ambulance with acute onset substernal chest pain rated 8/10, radiating to the left arm. Patient states she was gardening at home when the pain began suddenly. She took one aspirin 325 mg prior to EMS arrival. Margaret reports associated diaphoresis and mild nausea but denies shortness of breath or syncope.
+
+Past Medical History: Hypertension, hyperlipidemia, type 2 diabetes mellitus.
+Allergies: Sulfa drugs (rash).
+
+Vitals on Arrival:
+BP: 168/94 mmHg
+HR: 102 bpm
+RR: 22
+SpO2: 96% on RA
+Temp: 98.6 F
+
+Triage Level: ESI Level 2 - Emergent
+Patient placed on cardiac monitor, 12-lead ECG obtained, IV access established.
+
+Emergency Contact: Son, Thomas Thornton, (415) 739-2841.
+Home Address: 2847 Oakridge Ln, San Mateo, CA 94401
+
+Triage Nurse: Dr. Rebecca Liu

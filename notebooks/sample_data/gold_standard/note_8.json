@@ -1,0 +1,98 @@
+[
+  {
+    "span_start": 39,
+    "span_end": 59,
+    "span_tag": "PATIENT",
+    "text": "Beatrice L. Fontaine"
+  },
+  {
+    "span_start": 39,
+    "span_end": 47,
+    "span_tag": "PATIENT",
+    "text": "Beatrice"
+  },
+  {
+    "span_start": 65,
+    "span_end": 72,
+    "span_tag": "MRN",
+    "text": "2059471"
+  },
+  {
+    "span_start": 156,
+    "span_end": 168,
+    "span_tag": "PATIENT",
+    "text": "Carla Nguyen"
+  },
+  {
+    "span_start": 226,
+    "span_end": 240,
+    "span_tag": "PHONE",
+    "text": "(510) 834-2716"
+  },
+  {
+    "span_start": 248,
+    "span_end": 270,
+    "span_tag": "EMAIL_ADDRESS",
+    "text": "b.fontaine@comcast.net"
+  },
+  {
+    "span_start": 285,
+    "span_end": 322,
+    "span_tag": "LOCATION",
+    "text": "3961 Claremont Ave, Oakland, CA 94602"
+  },
+  {
+    "span_start": 305,
+    "span_end": 312,
+    "span_tag": "LOCATION",
+    "text": "Oakland"
+  },
+  {
+    "span_start": 352,
+    "span_end": 367,
+    "span_tag": "PATIENT",
+    "text": "Sophie Fontaine"
+  },
+  {
+    "span_start": 352,
+    "span_end": 358,
+    "span_tag": "PATIENT",
+    "text": "Sophie"
+  },
+  {
+    "span_start": 369,
+    "span_end": 381,
+    "span_tag": "PHONE",
+    "text": "510-834-9203"
+  },
+  {
+    "span_start": 481,
+    "span_end": 494,
+    "span_tag": "PATIENT",
+    "text": "Mrs. Fontaine"
+  },
+  {
+    "span_start": 597,
+    "span_end": 605,
+    "span_tag": "PATIENT",
+    "text": "Beatrice"
+  },
+  {
+    "span_start": 735,
+    "span_end": 741,
+    "span_tag": "PATIENT",
+    "text": "Sophie"
+  },
+  {
+    "span_start": 885,
+    "span_end": 903,
+    "span_tag": "PATIENT",
+    "text": "Dr. Raymond Torres"
+  },
+  {
+    "span_start": 2304,
+    "span_end": 2316,
+    "span_tag": "PATIENT",
+    "text": "Carla Nguyen"
+  }
+]

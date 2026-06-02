@@ -1,0 +1,96 @@
+# Example config for: tide2-runner run <job_type> --config this_file.yaml
+#
+# All keys match CLI arg names (with underscores).
+# CLI flags always override config values.
+#
+# Job types: recognizer, anonymizer, transformer, reassembly, pipeline, llm-recognizer
+
+# =========================================================================
+# Job settings (all job types)
+# =========================================================================
+mode: vm
+input: /mnt/gcs/standalone_anonymizer/input
+output: /mnt/gcs/standalone_anonymizer/output
+
+# =========================================================================
+# Ray cluster tuning (all job types)
+# =========================================================================
+num_cpus: 224
+# num_gpus: 1
+object_store_gb: 100
+
+# =========================================================================
+# Actor tuning (recognizer, anonymizer, reassembly, pipeline)
+# =========================================================================
+num_actors: 100
+batch_size: 200
+cpus_per_actor: 2
+
+# =========================================================================
+# Read tuning (recognizer, anonymizer)
+# =========================================================================
+read_parallelism: 200
+read_cpus: 0.25
+read_op_min_num_blocks: 200
+target_max_block_size_mb: 128
+target_min_block_size_mb: 1
+
+# =========================================================================
+# Recognizer-specific
+# =========================================================================
+# batch_timeout: 120
+
+# =========================================================================
+# Anonymizer-specific
+# =========================================================================
+salt: /mnt/gcs/tide2/arpah_prod_salt.key
+key: /mnt/gcs/tide2/arpah_prod_key.key
+# acc_num_salt: "your-salt-here"
+# acc_num_study_id: "your-study-id-here"
+# jitter_required: false
+
+# =========================================================================
+# Transformer-specific
+# =========================================================================
+# model: "StanfordAIMI/stanford-deidentifier-v2"
+# model_path: /path/to/local/model
+# bucket_name: "your-gcs-bucket"
+# project_id: "your-gcp-project"
+# chunk_size: 512
+# chunk_overlap: 40
+# gpu_batch_size: auto-computed from model config and free GPU memory
+# short_seq_budget: auto-computed from total GPU VRAM (0.6 for L4, 0.7 for A6000, 0.8 for H100)
+# compile_model: false
+# compile_cache_path: /path/to/compiled_cache.bin
+# num_agg_actors: auto-computed as ~30% of available CPUs
+
+# =========================================================================
+# LLM Recognizer-specific (llm-recognizer and pipeline jobs)
+# =========================================================================
+# provider_type: "google"            # LLM provider: google, openai, anthropic, llama, medgemma
+# context_length: 1048576            # Model context window in tokens
+# max_tokens: 16384                  # Maximum LLM output tokens
+# temperature: 0.0                   # Model temperature for response generation
+# region: "us-central1"              # Cloud region for LLM API
+# endpoint_id: null                  # Vertex AI endpoint ID (optional)
+# max_retries: 3                     # Maximum retry attempts for failed LLM requests
+
+# =========================================================================
+# Pipeline-specific (tide2-runner run pipeline)
+# =========================================================================
+# run_transformer: true
+# run_recognizer: true
+# run_anonymizer: true
+# produce_visualizer_json: false
+# salt_hex: "00" * 32
+# key_hex: "11" * 32
+# cpu_batch_size: 100
+# llm_recognizer_mode: "off"        # "off", "only", or "merge"
+# llm_project_id: "your-gcp-project"  # GCP project for LLM API (defaults to project_id)
+# llm_model: "gemini-2.5-flash"       # LLM model name
+
+# =========================================================================
+# Flags
+# =========================================================================
+dry_run: false
+log_level: INFO

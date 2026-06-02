@@ -1,0 +1,39 @@
+RADIOLOGY REPORT
+
+Accession: RAD-2025-41893
+Patient: Chen, Linda M.
+MRN: 5190384
+Date of Exam: 02/18/2025
+Date of Report: 02/18/2025
+
+Exam: CT Chest with Contrast
+
+Clinical Indication: 62-year-old female with persistent cough and weight loss. Evaluate for pulmonary pathology.
+
+Referring Physician: Dr. Marcus Webb
+Reading Radiologist: Dr. Priya Sundaram
+Location: Valley Medical Center, Department of Radiology
+
+TECHNIQUE:
+Helical CT of the chest was performed following IV administration of 100 mL Omnipaque 350 contrast. Images were acquired from the thoracic inlet through the adrenal glands at 1.25 mm slice thickness. Coronal and sagittal reformations were reviewed.
+
+COMPARISON: Chest radiograph dated 01/15/2025.
+
+FINDINGS:
+Lungs: A 2.3 x 1.8 cm spiculated nodule is identified in the right upper lobe, suspicious for primary malignancy. Additional sub-centimeter nodules measuring 4 mm and 3 mm are noted in the right lower lobe, indeterminate. No consolidation or ground-glass opacity. No pleural effusion.
+
+Mediastinum: Mildly enlarged subcarinal lymph node measuring 1.4 cm in short axis. No hilar lymphadenopathy. Heart size is normal. No pericardial effusion.
+
+Vasculature: No pulmonary embolism. Thoracic aorta is normal in caliber without aneurysm.
+
+Bones: Mild degenerative changes of the thoracic spine. No suspicious osseous lesions.
+
+Upper Abdomen: Limited evaluation. Liver, spleen, and adrenal glands appear unremarkable.
+
+IMPRESSION:
+1. Suspicious 2.3 cm spiculated right upper lobe nodule. Recommend PET-CT for further evaluation. Findings discussed with Dr. Webb by telephone on 02/18/2025.
+2. Subcarinal lymphadenopathy, may represent reactive or metastatic disease.
+3. Indeterminate sub-centimeter right lower lobe nodules. Recommend follow-up CT in 3 months per Fleischner Society guidelines.
+
+Dictated by: Dr. Priya Sundaram, MD
+Electronically signed: 02/18/2025 17:20

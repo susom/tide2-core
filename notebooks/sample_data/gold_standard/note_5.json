@@ -1,0 +1,38 @@
+[
+  {
+    "span_start": 46,
+    "span_end": 64,
+    "span_tag": "PATIENT",
+    "text": "Garcia, Rosa Elena"
+  },
+  {
+    "span_start": 70,
+    "span_end": 77,
+    "span_tag": "MRN",
+    "text": "6438210"
+  },
+  {
+    "span_start": 124,
+    "span_end": 143,
+    "span_tag": "PATIENT",
+    "text": "Dr. James Whitfield"
+  },
+  {
+    "span_start": 184,
+    "span_end": 207,
+    "span_tag": "LOCATION",
+    "text": "Pacific Heart Institute"
+  },
+  {
+    "span_start": 1853,
+    "span_end": 1872,
+    "span_tag": "PATIENT",
+    "text": "Dr. James Whitfield"
+  },
+  {
+    "span_start": 1883,
+    "span_end": 1906,
+    "span_tag": "LOCATION",
+    "text": "Pacific Heart Institute"
+  }
+]

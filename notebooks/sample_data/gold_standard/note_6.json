@@ -1,0 +1,68 @@
+[
+  {
+    "span_start": 25,
+    "span_end": 43,
+    "span_tag": "PATIENT",
+    "text": "Johansson, Erik B."
+  },
+  {
+    "span_start": 49,
+    "span_end": 56,
+    "span_tag": "MRN",
+    "text": "9501762"
+  },
+  {
+    "span_start": 62,
+    "span_end": 73,
+    "span_tag": "HAR",
+    "text": "50482917630"
+  },
+  {
+    "span_start": 114,
+    "span_end": 134,
+    "span_tag": "PATIENT",
+    "text": "Dr. Catherine Reeves"
+  },
+  {
+    "span_start": 149,
+    "span_end": 164,
+    "span_tag": "PATIENT",
+    "text": "Dr. Omar Farouk"
+  },
+  {
+    "span_start": 183,
+    "span_end": 196,
+    "span_tag": "PATIENT",
+    "text": "Dr. Lisa Tran"
+  },
+  {
+    "span_start": 207,
+    "span_end": 231,
+    "span_tag": "LOCATION",
+    "text": "Bayside General Hospital"
+  },
+  {
+    "span_start": 303,
+    "span_end": 317,
+    "span_tag": "ACC_NUM",
+    "text": "RAD-2025-09134"
+  },
+  {
+    "span_start": 398,
+    "span_end": 412,
+    "span_tag": "ACC_NUM",
+    "text": "RAD-2025-09267"
+  },
+  {
+    "span_start": 2706,
+    "span_end": 2719,
+    "span_tag": "PATIENT",
+    "text": "Mr. Johansson"
+  },
+  {
+    "span_start": 2870,
+    "span_end": 2890,
+    "span_tag": "PATIENT",
+    "text": "Dr. Catherine Reeves"
+  }
+]

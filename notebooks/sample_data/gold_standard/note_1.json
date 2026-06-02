@@ -1,0 +1,68 @@
+[
+  {
+    "span_start": 96,
+    "span_end": 116,
+    "span_tag": "PATIENT",
+    "text": "Margaret A. Thornton"
+  },
+  {
+    "span_start": 96,
+    "span_end": 104,
+    "span_tag": "PATIENT",
+    "text": "Margaret"
+  },
+  {
+    "span_start": 138,
+    "span_end": 145,
+    "span_tag": "MRN",
+    "text": "4827351"
+  },
+  {
+    "span_start": 151,
+    "span_end": 162,
+    "span_tag": "US_SSN",
+    "text": "471-58-3920"
+  },
+  {
+    "span_start": 257,
+    "span_end": 269,
+    "span_tag": "PATIENT",
+    "text": "Ms. Thornton"
+  },
+  {
+    "span_start": 530,
+    "span_end": 538,
+    "span_tag": "PATIENT",
+    "text": "Margaret"
+  },
+  {
+    "span_start": 966,
+    "span_end": 981,
+    "span_tag": "PATIENT",
+    "text": "Thomas Thornton"
+  },
+  {
+    "span_start": 983,
+    "span_end": 997,
+    "span_tag": "PHONE",
+    "text": "(415) 739-2841"
+  },
+  {
+    "span_start": 1013,
+    "span_end": 1050,
+    "span_tag": "LOCATION",
+    "text": "2847 Oakridge Ln, San Mateo, CA 94401"
+  },
+  {
+    "span_start": 1031,
+    "span_end": 1040,
+    "span_tag": "LOCATION",
+    "text": "San Mateo"
+  },
+  {
+    "span_start": 1066,
+    "span_end": 1081,
+    "span_tag": "PATIENT",
+    "text": "Dr. Rebecca Liu"
+  }
+]

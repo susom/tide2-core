@@ -1,0 +1,45 @@
+TRANSTHORACIC ECHOCARDIOGRAM REPORT
+
+Patient: Garcia, Rosa Elena
+MRN: 6438210
+Date of Study: 03/05/2025
+Ordering Physician: Dr. James Whitfield
+Sonographer: K. Brennan, RDCS
+Location: Pacific Heart Institute
+
+INDICATION:
+Dyspnea on exertion and lower extremity edema. Evaluate cardiac structure and function.
+
+TECHNIQUE:
+Complete 2-D, M-mode, and Doppler echocardiogram performed with color flow imaging. Subcostal, parasternal, and apical views obtained. Image quality was adequate.
+
+FINDINGS:
+
+Left Ventricle:
+The left ventricular cavity size is mildly dilated. Wall thickness is normal. There is global hypokinesis with an estimated ejection fraction of 35-40% by modified Simpson's biplane method. No regional wall motion abnormalities to suggest prior infarction. LV end-diastolic diameter measures 5.8 cm.
+
+Right Ventricle:
+The right ventricle is normal in size with preserved systolic function. TAPSE measures 2.0 cm.
+
+Atria:
+The left atrium is moderately dilated at 4.5 cm. The right atrium is mildly dilated.
+
+Valves:
+Aortic valve is trileaflet with normal excursion. No stenosis. Trace aortic regurgitation.
+Mitral valve leaflets are mildly thickened. Moderate mitral regurgitation is present with a central jet.
+Tricuspid valve is structurally normal. Mild tricuspid regurgitation. Estimated PA systolic pressure is 38 mmHg.
+Pulmonic valve appears normal.
+
+Other:
+No pericardial effusion. IVC is mildly dilated with reduced respiratory variation, consistent with elevated right atrial pressure. No intracardiac masses or thrombi identified.
+
+IMPRESSION:
+1. Mild LV dilation with global hypokinesis and moderately reduced LVEF of 35-40%, consistent with non-ischemic cardiomyopathy.
+2. Moderate mitral regurgitation.
+3. Mildly elevated PA pressure.
+4. Biatrial dilation.
+
+Findings communicated to Dr. Whitfield on 03/05/2025.
+
+Interpreted by: Dr. James Whitfield, MD, FACC
+Pacific Heart Institute

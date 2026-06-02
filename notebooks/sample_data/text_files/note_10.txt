@@ -1,0 +1,60 @@
+LABORATORY RESULTS REPORT
+
+Patient: Terrence J. Washington
+MRN: 7193024
+SSN: 312-76-4058
+Date Collected: 09/08/2025 07:30
+Date Reported: 09/08/2025 14:15
+Ordering Physician: Dr. Karen Yeh
+Laboratory: Redwood Clinical Laboratories
+
+Phone on file: 925-471-6382
+
+COMPLETE BLOOD COUNT (CBC):
+WBC:         11.2 x10^3/uL    (H)    [Ref: 4.0-10.5]
+RBC:         4.85 x10^6/uL           [Ref: 4.50-5.50]
+Hemoglobin:  14.8 g/dL               [Ref: 13.5-17.5]
+Hematocrit:  44.2%                    [Ref: 38.0-50.0]
+MCV:         91.1 fL                  [Ref: 80.0-100.0]
+Platelets:   245 x10^3/uL            [Ref: 150-400]
+
+DIFFERENTIAL:
+Neutrophils: 78%               (H)    [Ref: 40-70]
+Lymphocytes: 14%               (L)    [Ref: 20-40]
+Monocytes:   6%                       [Ref: 2-8]
+Eosinophils: 1%                       [Ref: 1-4]
+Basophils:   1%                       [Ref: 0-1]
+
+COMPREHENSIVE METABOLIC PANEL (CMP):
+Glucose:     142 mg/dL         (H)    [Ref: 70-100]
+BUN:         28 mg/dL          (H)    [Ref: 7-20]
+Creatinine:  1.6 mg/dL        (H)    [Ref: 0.7-1.3]
+eGFR:        48 mL/min/1.73m2 (L)    [Ref: >60]
+Sodium:      139 mEq/L               [Ref: 136-145]
+Potassium:   4.8 mEq/L               [Ref: 3.5-5.1]
+Chloride:    101 mEq/L               [Ref: 98-106]
+CO2:         24 mEq/L                [Ref: 21-31]
+Calcium:     9.4 mg/dL               [Ref: 8.5-10.5]
+Total Protein: 7.2 g/dL              [Ref: 6.0-8.3]
+Albumin:     3.8 g/dL                [Ref: 3.5-5.5]
+Bilirubin:   0.9 mg/dL               [Ref: 0.1-1.2]
+Alk Phos:    85 U/L                  [Ref: 44-147]
+AST:         32 U/L                  [Ref: 10-40]
+ALT:         28 U/L                  [Ref: 7-56]
+
+HEMOGLOBIN A1C:
+HbA1c:       8.2%              (H)    [Ref: <5.7]
+Estimated Average Glucose: 189 mg/dL
+
+LIPID PANEL:
+Total Cholesterol: 238 mg/dL   (H)    [Ref: <200]
+LDL:               158 mg/dL   (H)    [Ref: <100]
+HDL:               38 mg/dL    (L)    [Ref: >40]
+Triglycerides:     210 mg/dL   (H)    [Ref: <150]
+
+CRITICAL VALUES: eGFR 48 mL/min/1.73m2 - consistent with Stage 3a CKD. Dr. Yeh notified by telephone at 14:20 on 09/08/2025.
+
+NOTE: Fasting specimen. Results suggest poorly controlled type 2 diabetes mellitus with Stage 3a chronic kidney disease and dyslipidemia. Clinical correlation recommended.
+
+Verified by: J. Patterson, MT(ASCP)
+Redwood Clinical Laboratories

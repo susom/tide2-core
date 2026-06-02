@@ -1,0 +1,44 @@
+DISCHARGE SUMMARY
+
+Patient Name: William T. Okafor
+MRN: 82614709
+SSN: 539-84-6127
+HAR: 30291847561
+Date of Admission: 01/28/2025
+Date of Discharge: 02/03/2025
+
+Attending Physician: Dr. Helen Marchetti
+Consulting Services: Cardiology (Dr. Steven Aguilar), Physical Therapy
+
+PRINCIPAL DIAGNOSIS:
+Acute ST-elevation myocardial infarction (STEMI), inferior wall.
+
+SECONDARY DIAGNOSES:
+1. Coronary artery disease, two-vessel
+2. Type 2 diabetes mellitus, uncontrolled
+3. Essential hypertension
+4. Hyperlipidemia
+
+HOSPITAL COURSE:
+Mr. Okafor is a 58-year-old male who presented to the emergency department on 01/28/2025 with acute onset crushing substernal chest pain radiating to the jaw. ECG demonstrated ST elevation in leads II, III, and aVF. Troponin I was elevated at 4.82 ng/mL. William was taken emergently to the cardiac catheterization lab where angiography revealed a 99% occlusion of the right coronary artery and a 70% stenosis of the left anterior descending artery. A drug-eluting stent was placed in the RCA with excellent angiographic result. The LAD lesion was managed medically.
+
+Post-procedure, Okafor was monitored in the CCU for 48 hours. He remained hemodynamically stable with no recurrent chest pain or arrhythmias. Echocardiogram on 01/30/2025 showed mild inferior wall hypokinesis with preserved LVEF of 50%. Dr. Aguilar recommended initiation of dual antiplatelet therapy and aggressive risk factor modification.
+
+Physical therapy was consulted and worked with Mr. Okafor on cardiac rehabilitation exercises. He was ambulating independently by day 4 of admission without symptoms.
+
+DISCHARGE MEDICATIONS:
+1. Aspirin 81 mg daily
+2. Clopidogrel 75 mg daily
+3. Atorvastatin 80 mg daily
+4. Metoprolol succinate 50 mg daily
+5. Lisinopril 10 mg daily
+6. Metformin 1000 mg twice daily
+
+DISCHARGE INSTRUCTIONS:
+William should follow a heart-healthy diet, attend outpatient cardiac rehabilitation, and avoid strenuous activity for 4 weeks. Follow-up with Dr. Marchetti in 2 weeks and Dr. Aguilar in 4 weeks. Return to ED for chest pain, shortness of breath, or palpitations.
+
+Contact Information:
+Patient Phone: 650-283-4917
+Home Address: 1523 Birchwood Dr, Redwood City, CA 94063
+
+Discharge Physician: Dr. Helen Marchetti, MD

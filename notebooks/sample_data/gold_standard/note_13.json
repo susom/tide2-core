@@ -1,0 +1,68 @@
+[
+  {
+    "span_start": 9,
+    "span_end": 21,
+    "span_tag": "PATIENT",
+    "text": "Maria Santos"
+  },
+  {
+    "span_start": 44,
+    "span_end": 52,
+    "span_tag": "MRN",
+    "text": "12345678"
+  },
+  {
+    "span_start": 60,
+    "span_end": 71,
+    "span_tag": "US_SSN",
+    "text": "123-45-6789"
+  },
+  {
+    "span_start": 79,
+    "span_end": 93,
+    "span_tag": "PHONE",
+    "text": "(650) 723-4000"
+  },
+  {
+    "span_start": 103,
+    "span_end": 120,
+    "span_tag": "EMAIL_ADDRESS",
+    "text": "msantos@email.com"
+  },
+  {
+    "span_start": 130,
+    "span_end": 152,
+    "span_tag": "LOCATION",
+    "text": "Stanford Cancer Center"
+  },
+  {
+    "span_start": 154,
+    "span_end": 194,
+    "span_tag": "LOCATION",
+    "text": "875 Blake Wilbur Dr, Palo Alto, CA 94304"
+  },
+  {
+    "span_start": 175,
+    "span_end": 184,
+    "span_tag": "LOCATION",
+    "text": "Palo Alto"
+  },
+  {
+    "span_start": 209,
+    "span_end": 221,
+    "span_tag": "PATIENT",
+    "text": "James Wilson"
+  },
+  {
+    "span_start": 362,
+    "span_end": 367,
+    "span_tag": "PATIENT",
+    "text": "Sarah"
+  },
+  {
+    "span_start": 371,
+    "span_end": 376,
+    "span_tag": "PHONE",
+    "text": "x4521"
+  }
+]

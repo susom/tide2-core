@@ -1,0 +1,9 @@
+{
+    "person": ["Maria Santos", "James Wilson", "Sarah"],
+    "phone_number": ["(650) 723-4000", "x4521"],
+    "email_address": ["msantos@email.com"],
+    "location": ["875 Blake Wilbur Dr, Palo Alto, CA 94304", "Palo Alto", "Stanford Cancer Center"],
+    "us_ssn": ["123-45-6789"],
+    "har": [],
+    "mrn": ["12345678"]
+}

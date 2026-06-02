@@ -1,0 +1,44 @@
+[
+  {
+    "span_start": 38,
+    "span_end": 53,
+    "span_tag": "ACC_NUM",
+    "text": "PATH-2025-03782"
+  },
+  {
+    "span_start": 63,
+    "span_end": 76,
+    "span_tag": "PATIENT",
+    "text": "Dmitri Volkov"
+  },
+  {
+    "span_start": 82,
+    "span_end": 89,
+    "span_tag": "MRN",
+    "text": "3847261"
+  },
+  {
+    "span_start": 95,
+    "span_end": 106,
+    "span_tag": "US_SSN",
+    "text": "628-31-5094"
+  },
+  {
+    "span_start": 186,
+    "span_end": 201,
+    "span_tag": "PATIENT",
+    "text": "Dr. Natalie Kim"
+  },
+  {
+    "span_start": 2223,
+    "span_end": 2230,
+    "span_tag": "PATIENT",
+    "text": "Dr. Kim"
+  },
+  {
+    "span_start": 2260,
+    "span_end": 2279,
+    "span_tag": "PATIENT",
+    "text": "Dr. Angela Morrison"
+  }
+]

@@ -1,0 +1,63 @@
+{
+  "name": "TiDE 2 Development Container",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": "..",
+    "target": "development",
+    "args": {
+      "BASE_IMAGE": "nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "astral-sh.ty",
+        "ms-python.black-formatter",
+        "ms-toolsai.jupyter",
+        "charliermarsh.ruff",
+        "samuelcolvin.jinjahtml",
+        "ms-azuretools.vscode-containers",
+        "docker.docker",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/opt/tide2/.venv/bin/python",
+        "python.languageServer": "None",
+        "python.terminal.activateEnvironment": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+  "shutdownAction": "stopContainer",
+  "remoteUser": "tide",
+  "hostRequirements": {
+    "gpu": "optional"
+  },
+  "workspaceMount": "source=${localWorkspaceFolder},target=/opt/tide2,type=bind,consistency=cached",
+  "workspaceFolder": "/opt/tide2",
+  "mounts": [
+    "source=tide-venv,target=/opt/tide2/.venv,type=volume",
+    "source=tide-home,target=/home/tide,type=volume"
+  ],
+  "postCreateCommand": "uv sync --locked --group gpu && make setup-hooks",
+  "postStartCommand": "bash .devcontainer/post-start.sh",
+  "forwardPorts": [8501],
+  "portsAttributes": {
+    "8501": {
+      "label": "Streamlit",
+      "onAutoForward": "silent"
+    }
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "moby": false
+    },
+    "ghcr.io/devcontainers-extra/features/apt-packages:1": {
+      "packages": "build-essential,cmake,swig"
+    },
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  }
+}

@@ -1,0 +1,122 @@
+[
+  {
+    "span_start": 39,
+    "span_end": 58,
+    "span_tag": "PATIENT",
+    "text": "Dr. Samantha Greene"
+  },
+  {
+    "span_start": 73,
+    "span_end": 104,
+    "span_tag": "LOCATION",
+    "text": "Coastal Rheumatology Associates"
+  },
+  {
+    "span_start": 105,
+    "span_end": 151,
+    "span_tag": "LOCATION",
+    "text": "720 Harbor Blvd, Suite 310, Monterey, CA 93940"
+  },
+  {
+    "span_start": 133,
+    "span_end": 141,
+    "span_tag": "LOCATION",
+    "text": "Monterey"
+  },
+  {
+    "span_start": 159,
+    "span_end": 178,
+    "span_tag": "PATIENT",
+    "text": "Dr. Michael Brennan"
+  },
+  {
+    "span_start": 198,
+    "span_end": 221,
+    "span_tag": "LOCATION",
+    "text": "Peninsula Medical Group"
+  },
+  {
+    "span_start": 246,
+    "span_end": 260,
+    "span_tag": "PATIENT",
+    "text": "Aisha K. Oduya"
+  },
+  {
+    "span_start": 246,
+    "span_end": 251,
+    "span_tag": "PATIENT",
+    "text": "Aisha"
+  },
+  {
+    "span_start": 282,
+    "span_end": 289,
+    "span_tag": "MRN",
+    "text": "4152839"
+  },
+  {
+    "span_start": 336,
+    "span_end": 345,
+    "span_tag": "PATIENT",
+    "text": "Ms. Oduya"
+  },
+  {
+    "span_start": 419,
+    "span_end": 424,
+    "span_tag": "PATIENT",
+    "text": "Aisha"
+  },
+  {
+    "span_start": 724,
+    "span_end": 729,
+    "span_tag": "PATIENT",
+    "text": "Aisha"
+  },
+  {
+    "span_start": 1426,
+    "span_end": 1435,
+    "span_tag": "PATIENT",
+    "text": "Ms. Oduya"
+  },
+  {
+    "span_start": 1545,
+    "span_end": 1559,
+    "span_tag": "PHONE",
+    "text": "(831) 429-7150"
+  },
+  {
+    "span_start": 1567,
+    "span_end": 1590,
+    "span_tag": "EMAIL_ADDRESS",
+    "text": "aisha.oduya@outlook.com"
+  },
+  {
+    "span_start": 1600,
+    "span_end": 1640,
+    "span_tag": "LOCATION",
+    "text": "1245 Pacific Grove Ct, Seaside, CA 93955"
+  },
+  {
+    "span_start": 1623,
+    "span_end": 1630,
+    "span_tag": "LOCATION",
+    "text": "Seaside"
+  },
+  {
+    "span_start": 1670,
+    "span_end": 1682,
+    "span_tag": "PHONE",
+    "text": "831-647-3200"
+  },
+  {
+    "span_start": 1770,
+    "span_end": 1789,
+    "span_tag": "PATIENT",
+    "text": "Dr. Michael Brennan"
+  },
+  {
+    "span_start": 1794,
+    "span_end": 1817,
+    "span_tag": "LOCATION",
+    "text": "Peninsula Medical Group"
+  }
+]
