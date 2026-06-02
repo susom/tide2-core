@@ -543,7 +543,14 @@ class LocalJobRunner:
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
-            Processing statistics dictionary
+            Processing statistics dictionary, including ``output_rows`` (the number
+            of rows written) so a successful run is observable.
+
+        Raises:
+            RuntimeError: If a non-empty input produces zero output rows. Ray's
+                ``max_errored_blocks`` and the supervisor's ``_failed_batch``
+                fallback can otherwise turn a total failure into a successful-looking
+                0-row write; this guard surfaces it as a hard error instead.
         """
         from tide2.actors import create_anonymizer_actor_class
 
@@ -643,6 +650,16 @@ class LocalJobRunner:
             )
             processed.write_parquet(str(output_dir), compression="zstd")
 
+            # Guard against silent total failure: Ray's max_errored_blocks and the
+            # supervisor's _failed_batch fallback can turn every dropped batch into a
+            # successful-looking 0-row write. Surface that as a hard error instead.
+            output_rows = processed.count()
+            if output_rows == 0 and len(input_files) > 0:
+                raise RuntimeError(
+                    "Anonymizer wrote 0 rows from non-empty input — all batches failed. "
+                    "Check worker logs for the underlying error."
+                )
+
             # Clear checkpoint config to avoid leaking to subsequent pipelines
             ctx.checkpoint_config = None
 
@@ -654,6 +671,7 @@ class LocalJobRunner:
                 "num_files": len(input_files),
                 "num_actors": num_actors,
                 "batch_size": batch_size,
+                "output_rows": output_rows,
             }
 
         except Exception:
