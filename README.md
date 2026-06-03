@@ -18,12 +18,12 @@ GPU group), pre-commit hooks.
 
 1. Clone the repository and open it in VS Code:
    ```bash
-   git clone https://github.com/susom/tide2.git
+   git clone https://github.com/susom/tide2-core.git
    cd tide2
    ```
 2. When VS Code detects `.devcontainer/devcontainer.json`, click **Reopen in Container**
    (or run the command **Dev Containers: Reopen in Container** from the command palette).
-3. The virtual environment at `/opt/tide2/.venv` is activated by default in all terminals.
+3. The virtual environment at `/opt/tide2-core/.venv` is activated by default in all terminals.
 
 The Dev Container includes these VS Code extensions pre-installed: Python, Ruff, Jupyter,
 Docker, and TOML support.
