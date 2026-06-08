@@ -6,8 +6,6 @@ system codes, typos, and the core institution name.
 """
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -322,6 +320,34 @@ class TestDeduplication:
         texts = [text[r.start : r.end] for r in results]
         assert any("www.stanfordhealthcare.org" in t for t in texts)
 
+    def test_longer_match_removes_shorter(self, recognizer):
+        text = "See stanfordhealthcare.org/info now."
+        results = _detect(recognizer, text)
+        texts = [text[r.start : r.end] for r in results]
+        # The domain pattern should subsume the bare "stanfordhealthcare" match
+        assert not any(t == "stanfordhealthcare" for t in texts)
+
+
+# ---------------------------------------------------------------------------
+# Trailing punctuation trimming
+# ---------------------------------------------------------------------------
+
+
+class TestTrailingPunctuation:
+    def test_url_trailing_period(self, recognizer):
+        text = "Visit stanfordhealthcare.org."
+        results = _detect(recognizer, text)
+        texts = [text[r.start : r.end] for r in results]
+        for t in texts:
+            assert not t.endswith(".")
+
+    def test_url_trailing_comma(self, recognizer):
+        text = "See stanfordmed.org, then call."
+        results = _detect(recognizer, text)
+        texts = [text[r.start : r.end] for r in results]
+        for t in texts:
+            assert not t.endswith(",")
+
 
 # ---------------------------------------------------------------------------
 # from_config (JSON loading)
@@ -354,6 +380,23 @@ class TestFromConfig:
         rec = InstitutionRecognizer.from_config(config_path)
         results = _detect(rec, "Visit testhospital.org or call TestHosp.")
         assert len(results) == 2
+
+    def test_invalid_flag_raises(self, tmp_path):
+        config = {
+            "institution": "Test",
+            "rules": [
+                {
+                    "pattern": r"\bTest\b",
+                    "flags": ["IGNORCASE"],
+                    "label": "bad_flag",
+                },
+            ],
+        }
+        config_path = tmp_path / "bad.json"
+        config_path.write_text(json.dumps(config))
+
+        with pytest.raises(ValueError, match="Unknown regex flag"):
+            InstitutionRecognizer.from_config(config_path)
 
     def test_config_scores(self, tmp_path):
         config = {

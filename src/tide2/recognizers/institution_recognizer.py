@@ -14,9 +14,9 @@ Other institutions can contribute their own pattern sets by adding a class metho
 (similar to ``stanford_patterns``) or by loading patterns from a JSON config file
 via ``from_config``.
 
-Performance: Uses a single pre-compiled combined regex for high-frequency patterns
-and individual compiled patterns for context-sensitive rules. All patterns are
-compiled at construction time and reused across calls.
+Performance: All patterns are pre-compiled at construction time and reused across
+calls. Patterns are evaluated individually to preserve per-pattern confidence
+scores and category metadata.
 """
 
 import json
@@ -58,6 +58,7 @@ class InstitutionRecognizer(EntityRecognizer):
 
     SUPPORTED_ENTITY: ClassVar[str] = "INSTITUTION"
     DEFAULT_SCORE: ClassVar[float] = 0.85
+    _TRAILING_PUNCT = re.compile(r"[.,;:!?)\"']+$")
 
     # --- Stanford Health Care patterns -----------------------------------------
     # Each tuple: (compiled_regex, score, pattern_name, category)
@@ -254,11 +255,23 @@ class InstitutionRecognizer(EntityRecognizer):
         with open(config_path) as f:
             cfg = json.load(f)
 
+        _VALID_FLAGS = {
+            "IGNORECASE", "MULTILINE", "DOTALL", "VERBOSE",
+            "ASCII", "LOCALE", "UNICODE",
+        }
+
         patterns: list[tuple[re.Pattern, float, str, str]] = []
         for rule in cfg.get("rules", []):
             flags = 0
             for flag_name in rule.get("flags", []):
-                flags |= getattr(re, flag_name.upper(), 0)
+                upper = flag_name.upper()
+                if upper not in _VALID_FLAGS:
+                    raise ValueError(
+                        f"Unknown regex flag '{flag_name}' in rule "
+                        f"'{rule.get('label', '?')}'. "
+                        f"Valid flags: {sorted(_VALID_FLAGS)}"
+                    )
+                flags |= getattr(re, upper)
             compiled = re.compile(rule["pattern"], flags)
             score = rule.get("score", cls.DEFAULT_SCORE)
             label = rule["label"]
@@ -305,6 +318,14 @@ class InstitutionRecognizer(EntityRecognizer):
             for match in pattern.finditer(text):
                 start = match.start()
                 end = match.end()
+
+                matched_text = text[start:end]
+                trailing = self._TRAILING_PUNCT.search(matched_text)
+                if trailing:
+                    end -= len(trailing.group())
+                if end <= start:
+                    continue
+
                 span = (start, end)
 
                 if span in seen_spans:
@@ -318,6 +339,19 @@ class InstitutionRecognizer(EntityRecognizer):
                         break
                 if is_subset:
                     continue
+
+                # Remove existing spans that are subsets of this longer match
+                subsumed = {
+                    (es, ee)
+                    for es, ee in seen_spans
+                    if es >= start and ee <= end
+                }
+                if subsumed:
+                    seen_spans -= subsumed
+                    results = [
+                        r for r in results
+                        if (r.start, r.end) not in subsumed
+                    ]
 
                 seen_spans.add(span)
 
