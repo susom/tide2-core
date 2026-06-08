@@ -70,7 +70,8 @@ class InstitutionRecognizer(EntityRecognizer):
         """Return the built-in Stanford Health Care pattern set.
 
         Returns a list of (compiled_regex, confidence_score, pattern_name, category)
-        tuples ordered from most specific (longest match) to least specific.
+        tuples grouped by category, with more specific patterns listed before
+        broader ones where practical.
         """
         return [
             # ── URLs & domains (high confidence — almost never false positives) ──
@@ -120,7 +121,7 @@ class InstitutionRecognizer(EntityRecognizer):
              0.85, "lucile_community", "facility"),
 
             # ── Concatenated location names (no space variants) ──
-            (re.compile(r"PaloAlto"),
+            (re.compile(r"PaloAlto", re.IGNORECASE),
              0.80, "paloalto_concat", "location"),
             (re.compile(r"BlakeWilbur", re.IGNORECASE),
              0.85, "blakewilbur_concat", "location"),
@@ -164,7 +165,7 @@ class InstitutionRecognizer(EntityRecognizer):
             (re.compile(r"\bSHCe\b"), 0.70, "shce_mixed", "abbreviation"),
 
             # ── Bare domain/compound names (catch-all for missed URLs) ──
-            (re.compile(r"Pasteur", re.IGNORECASE),
+            (re.compile(r"\bPasteur\b", re.IGNORECASE),
              0.60, "pasteur", "location"),
             (re.compile(r"stanfordhealthcare", re.IGNORECASE),
              0.90, "bare_shc", "name"),

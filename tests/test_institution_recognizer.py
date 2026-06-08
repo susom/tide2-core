@@ -180,6 +180,11 @@ class TestLocations:
         results = _detect(recognizer, text)
         assert len(results) >= 1
 
+    def test_pasteurized_not_matched(self, recognizer):
+        text = "The milk was pasteurized before use."
+        matched = _detected_texts(recognizer, text)
+        assert not any("pasteur" in m.lower() for m in matched)
+
 
 # ---------------------------------------------------------------------------
 # Portal names
@@ -250,6 +255,16 @@ class TestAbbreviations:
         text = "Referred to SHCE clinic."
         matched = _detected_texts(recognizer, text)
         assert "SHCE" in matched
+
+    def test_shc(self, recognizer):
+        text = "Admitted to SHC on Monday."
+        matched = _detected_texts(recognizer, text)
+        assert "SHC" in matched
+
+    def test_lpch(self, recognizer):
+        text = "Child seen at LPCH today."
+        matched = _detected_texts(recognizer, text)
+        assert "LPCH" in matched
 
 
 # ---------------------------------------------------------------------------
