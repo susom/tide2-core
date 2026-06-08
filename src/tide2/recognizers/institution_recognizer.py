@@ -149,9 +149,10 @@ class InstitutionRecognizer(EntityRecognizer):
              0.75, "myheath_typo", "portal"),
 
             # ── Abbreviations ──
+            (re.compile(r"\bSHC\b", re.IGNORECASE), 0.70, "shc", "abbreviation"),
+            (re.compile(r"\bLPCH\b", re.IGNORECASE), 0.70, "lpch", "abbreviation"),
             (re.compile(r"\bPAMF\b"), 0.70, "pamf", "abbreviation"),
             (re.compile(r"\bPamf\b"), 0.70, "pamf_title", "abbreviation"),
-
             # ── System codes (very specific — high confidence) ──
             (re.compile(r"SHCECT01"), 0.95, "shcect01", "system_code"),
             (re.compile(r"SHCVCLOGO"), 0.95, "shcvclogo", "system_code"),
