@@ -98,7 +98,7 @@ class InstitutionRecognizer(EntityRecognizer):
              0.90, "url_pain", "url"),
 
             # ── Social media handles ──
-            (re.compile(r"@[Ss]tanford[\w_]+"),
+            (re.compile(r"(?<!\w)@[Ss]tanford[\w_]+"),
              0.90, "social_handle", "social"),
 
             # ── Affiliated facilities (multi-word — high confidence) ──
@@ -257,7 +257,7 @@ class InstitutionRecognizer(EntityRecognizer):
 
         _VALID_FLAGS = {
             "IGNORECASE", "MULTILINE", "DOTALL", "VERBOSE",
-            "ASCII", "LOCALE", "UNICODE",
+            "ASCII", "UNICODE",
         }
 
         patterns: list[tuple[re.Pattern, float, str, str]] = []
@@ -298,7 +298,8 @@ class InstitutionRecognizer(EntityRecognizer):
         Analyze text for institution-specific PHI.
 
         Applies patterns in priority order (most specific first). Overlapping
-        matches are deduplicated, preferring higher-confidence matches.
+        matches are deduplicated by suppressing spans that are fully contained
+        within a longer match (regardless of score).
 
         Args:
             text: Text to analyze.

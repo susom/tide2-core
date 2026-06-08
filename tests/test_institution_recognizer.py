@@ -99,6 +99,13 @@ class TestSocial:
         results = _detect(recognizer, text)
         assert len(results) >= 1
 
+    def test_email_not_matched_as_handle(self, recognizer):
+        text = "Contact foo@StanfordMed.org for help."
+        results = _detect(recognizer, text)
+        matched = _detected_texts(recognizer, text)
+        # Should NOT match "@StanfordMed" as a social handle from an email
+        assert not any(m.startswith("@Stanford") for m in matched)
+
 
 # ---------------------------------------------------------------------------
 # Facilities
