@@ -69,7 +69,7 @@ jupyter notebook notebooks/tide2_pipeline.ipynb
 View the notebook on GitHub: [TIDE 2.0 Pipeline Tutorial](https://github.com/susom/tide2-core/blob/main/notebooks/tide2_pipeline.ipynb)
 
 **Troubleshooting:**
-- **Run from the repo root** — launch Jupyter from the `tide2/` directory so that relative paths resolve correctly.
+- **Run from the repo root** — launch Jupyter from the `tide2-core/` directory so that relative paths resolve correctly.
 - **GCP credentials are not required** — the notebook downloads the transformer model from HuggingFace Hub by default. Set `project_id` and `bucket_name` in the Configuration cell only if you want to use GCS-hosted weights.
 - **Kernel crashes** — if the Jupyter kernel crashes repeatedly, restart Jupyter (`Ctrl+C`, then re-launch) and run the cells from the top.
 

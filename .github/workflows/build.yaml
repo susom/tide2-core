@@ -12,6 +12,7 @@ on:
         description: "Semantic version (e.g., 1.0.0)"
         required: false
         type: string
+        default: ""
       skip_tests:
         description: "Skip test job (tests already passed in caller workflow)"
         required: false
@@ -24,6 +25,7 @@ on:
         description: "Semantic version (e.g., 1.0.0)"
         required: false
         type: string
+        default: ""
       skip_tests:
         description: "Skip test job (tests already passed in caller workflow)"
         required: false
@@ -73,7 +75,7 @@ jobs:
 
   test:
     if: >-
-      !inputs.skip_tests &&
+      (github.event_name != 'workflow_call' && github.event_name != 'workflow_dispatch' || !inputs.skip_tests) &&
       (github.event_name != 'pull_request' ||
        (github.event.pull_request.draft == false &&
         github.event.pull_request.base.ref != 'main'))
@@ -198,7 +200,7 @@ jobs:
         if: inputs.version != ''
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}"
-          VERSION="${{ inputs.version }}"
+          VERSION="${{ env.VERSION_INPUT }}"
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f2)
           docker buildx imagetools create \
@@ -215,8 +217,8 @@ jobs:
             echo "- \`${{ needs.build-prepare.outputs.build_id }}\`"
             echo "- \`${{ needs.build-prepare.outputs.branch_name }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n "${{ inputs.version }}" ]]; then
-            VERSION="${{ inputs.version }}"
+          if [[ -n "${VERSION_INPUT}" ]]; then
+            VERSION="${VERSION_INPUT}"
             MAJOR=$(echo "$VERSION" | cut -d. -f1)
             MINOR=$(echo "$VERSION" | cut -d. -f2)
             {
