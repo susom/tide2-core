@@ -154,6 +154,7 @@ jobs:
       PROJECT: ${{ secrets.PROJECT }}
       REGISTRY: ${{ secrets.REGISTRY }}
       REPOSITORY: ${{ secrets.REPOSITORY }}
+      VERSION_INPUT: ${{ inputs.version }}
 
     permissions:
       contents: 'write'
