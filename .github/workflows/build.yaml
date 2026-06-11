@@ -131,7 +131,7 @@ jobs:
         run: |
           BRANCH="${HEAD_REF:-$REF_NAME}"
           SANITIZED_BRANCH=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9_.-]+#-#g')
-           echo "BRANCH_NAME=${SANITIZED_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "BRANCH_NAME=${SANITIZED_BRANCH}" >> "$GITHUB_OUTPUT"
 
       - name: Generate build ID
         id: build_id
