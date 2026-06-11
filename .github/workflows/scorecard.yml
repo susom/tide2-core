@@ -75,6 +75,7 @@ jobs:
 
       # Upload results to GitHub Code Scanning (Security tab).
       - name: Upload results to GitHub Code Scanning
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: github/codeql-action/upload-sarif@1b549b9259bda1cb5ddde3b41741a82a2d15a841 # v3.28.13
         with:
           sarif_file: results.sarif
