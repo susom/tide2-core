@@ -1,0 +1,228 @@
+name: build
+on:
+  pull_request:
+
+  push:
+    branches-ignore:
+      - main
+
+  workflow_call:
+    inputs:
+      version:
+        description: "Semantic version (e.g., 1.0.0)"
+        required: false
+        type: string
+        default: ""
+      skip_tests:
+        description: "Skip test job (tests already passed in caller workflow)"
+        required: false
+        type: boolean
+        default: false
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semantic version (e.g., 1.0.0)"
+        required: false
+        type: string
+        default: ""
+      skip_tests:
+        description: "Skip test job (tests already passed in caller workflow)"
+        required: false
+        type: boolean
+        default: false
+
+# Some third-party actions bundle Node.js 20, which GitHub is deprecating in
+# favour of Node.js 24. Setting FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 makes the
+# GitHub Actions runner execute those actions under Node 24 instead, silencing
+# deprecation warnings and future failures.
+# Affected actions: pre-commit/action@v3.0.1, docker/build-push-action@v6,
+# docker/setup-buildx-action@v3, google-github-actions/auth@v2,
+# google-github-actions/setup-gcloud@v2.
+# Remove this override once upstream actions ship Node 24 bundles.
+# Restrict all tokens to read-only by default (satisfies Token-Permissions scorecard check).
+# Jobs that need write access declare it explicitly at the job level.
+permissions: read-all
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+       github.event.pull_request.base.ref != 'main') ||
+      (github.event_name == 'push' && github.ref_name != 'main')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run pre-commit on PR diff
+        if: github.event_name == 'pull_request'
+        uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.event.pull_request.head.sha }}
+
+      - name: Run pre-commit on push diff
+        if: github.event_name == 'push'
+        uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --from-ref ${{ github.event.before }} --to-ref ${{ github.event.after }}
+
+  test:
+    if: >-
+      (github.event_name != 'workflow_call' && github.event_name != 'workflow_dispatch' || !inputs.skip_tests) &&
+      (github.event_name != 'pull_request' ||
+       (github.event.pull_request.draft == false &&
+        github.event.pull_request.base.ref != 'main'))
+
+    runs-on: ubuntu-latest-64GB-RAM
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          target: test
+          provenance: false
+          push: false
+          cache-from: |
+            type=gha,scope=build-amd64-gpu
+            type=gha,scope=build-amd64-test
+          cache-to: type=gha,mode=max,scope=build-amd64-test
+
+  build-prepare:
+    needs: [test, validate-tool]
+    if: |
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.validate-tool.result == 'success' || needs.validate-tool.result == 'skipped') &&
+      (inputs.version != '' ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref_name == 'development' &&
+        !contains(github.event.head_commit.message || '', '!ignore') &&
+        !startsWith(github.event.head_commit.message || '', 'docs:')))
+
+    runs-on: ubuntu-latest
+    outputs:
+      branch_name: ${{ steps.branch.outputs.BRANCH_NAME }}
+      build_id: ${{ steps.build_id.outputs.BUILD_ID }}
+    steps:
+      - name: Set branch name
+        id: branch
+        # Use env vars to avoid script injection with untrusted context variables
+        # (github.head_ref / github.ref_name). Satisfies Dangerous-Workflow check.
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          BRANCH="${HEAD_REF:-$REF_NAME}"
+          SANITIZED_BRANCH="${BRANCH//\//-}"
+          echo "BRANCH_NAME=${SANITIZED_BRANCH}" >> $GITHUB_OUTPUT
+
+      - name: Generate build ID
+        id: build_id
+        run: |
+          ts=$(date +%Y%m%d%H%M%S)
+          echo "BUILD_ID=${{ steps.branch.outputs.BRANCH_NAME }}-${ts}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: build-prepare
+    if: ${{ !cancelled() && needs.build-prepare.result == 'success' }}
+
+    strategy:
+      matrix:
+        variant: [cpu, gpu]
+
+    env:
+      PROJECT: ${{ secrets.PROJECT }}
+      REGISTRY: ${{ secrets.REGISTRY }}
+      REPOSITORY: ${{ secrets.REPOSITORY }}
+      VERSION_INPUT: ${{ inputs.version }}
+
+    permissions:
+      contents: 'write'
+      id-token: 'write'
+
+    runs-on: ubuntu-latest-64GB-RAM
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: ${{ secrets.PROJECT }}
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          version: '>= 363.0.0'
+
+      - name: Authenticate to GAR
+        run: |
+          gcloud auth configure-docker ${{ env.REGISTRY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.variant }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          target: production-${{ matrix.variant }}
+          provenance: false
+          cache-from: type=gha,scope=build-amd64-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=build-amd64-${{ matrix.variant }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}:${{ needs.build-prepare.outputs.build_id }}
+            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}:${{ needs.build-prepare.outputs.branch_name }}
+
+      - name: Create semver tags
+        if: inputs.version != ''
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}"
+          VERSION="${{ env.VERSION_INPUT }}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" \
+            --tag "${IMAGE}:${MAJOR}.${MINOR}" \
+            --tag "${IMAGE}:${MAJOR}" \
+            "${IMAGE}:${{ needs.build-prepare.outputs.build_id }}"
+
+      - name: Write image tags to job summary
+        run: |
+          {
+            echo "#### :whale: \`tide2-${{ matrix.variant }}\`"
+            echo ""
+            echo "- \`${{ needs.build-prepare.outputs.build_id }}\`"
+            echo "- \`${{ needs.build-prepare.outputs.branch_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "${VERSION_INPUT}" ]]; then
+            VERSION="${VERSION_INPUT}"
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            {
+              echo "- \`${VERSION}\`"
+              echo "- \`${MAJOR}.${MINOR}\`"
+              echo "- \`${MAJOR}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

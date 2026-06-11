@@ -1,0 +1,73 @@
+# OpenSSF Scorecard Workflow
+# This file is sometimes referred to as the "Baseline Definition File" (BDF) for
+# OSSF supply-chain security scoring.
+#
+# Checks scored: Binary-Artifacts, Branch-Protection, CI-Tests, CII-Best-Practices,
+#   Code-Review, Contributors, Dangerous-Workflow, Dependency-Update-Tool, Fuzzing,
+#   License, Maintained, Packaging, Pinned-Dependencies, SAST, Security-Policy,
+#   Signed-Releases, Token-Permissions, Vulnerabilities
+#
+# Docs: https://github.com/ossf/scorecard/blob/main/docs/checks.md
+name: OpenSSF Scorecard
+
+on:
+  # Run on every push to the default branch.
+  push:
+    branches:
+      - main
+
+  # Run weekly on Saturdays at 01:30 UTC.
+  schedule:
+    - cron: "30 1 * * 6"
+
+  # Allow manual runs.
+  workflow_dispatch:
+
+# Restrict all jobs to read-only by default (satisfies Token-Permissions check).
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Required to upload SARIF results to GitHub Code Scanning dashboard.
+      security-events: write
+      # Required for OIDC token used when publish_results is true.
+      id-token: write
+      # Required to read repository contents.
+      contents: read
+      # Required for private repos to avoid GraphQL/SAST gaps.
+      actions: read
+
+    steps:
+      - name: Checkout repository
+        # Pin to full commit SHA to satisfy Pinned-Dependencies check.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Run OSSF Scorecard analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Setting publish_results: true allows the Scorecard team to use your
+          # workflow results to power the Scorecard badge and public dataset.
+          # This is free and helps scale the project.
+          publish_results: true
+
+      # Upload results as a workflow artifact so they are available for 5 days.
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      # Upload results to GitHub Code Scanning (Security tab).
+      - name: Upload results to GitHub Code Scanning
+        uses: github/codeql-action/upload-sarif@1b549b9259bda1cb5ddde3b41741a82a2d15a841 # v3.28.13
+        with:
+          sarif_file: results.sarif
