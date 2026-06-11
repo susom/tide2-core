@@ -137,7 +137,7 @@ jobs:
         id: build_id
         run: |
           ts=$(date +%Y%m%d%H%M%S)
-          echo "BUILD_ID=${{ steps.branch.outputs.BRANCH_NAME }}-${ts}" >> $GITHUB_OUTPUT
+          echo "BUILD_ID=${{ steps.branch.outputs.BRANCH_NAME }}-${ts}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: build-prepare
