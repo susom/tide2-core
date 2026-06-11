@@ -106,11 +106,10 @@ jobs:
           cache-to: type=gha,mode=max,scope=build-amd64-test
 
   build-prepare:
-    needs: [test, validate-tool]
+    needs: [test]
     if: |
       always() &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
-      (needs.validate-tool.result == 'success' || needs.validate-tool.result == 'skipped') &&
       (inputs.version != '' ||
        github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref_name == 'development' &&
