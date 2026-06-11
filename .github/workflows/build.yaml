@@ -155,9 +155,8 @@ jobs:
       VERSION_INPUT: ${{ inputs.version }}
 
     permissions:
-      contents: 'write'
+      contents: 'read'
       id-token: 'write'
-
     runs-on: ubuntu-latest-64GB-RAM
     steps:
       - uses: actions/checkout@v4
