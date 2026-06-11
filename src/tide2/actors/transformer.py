@@ -120,6 +120,17 @@ class TransformerInferenceActor:
             device = "cpu"
             logger.warning("No GPU detected, using CPU (performance will be degraded)")
 
+        # CPU branch only: cap torch threads to the CPUs Ray reserved for this
+        # actor so that actors x threads <= total CPUs (no oversubscription).
+        # GPU branch keeps torch's default thread behavior untouched.
+        if device == "cpu":
+            import ray
+
+            assigned = ray.get_runtime_context().get_assigned_resources()
+            n = int(assigned.get("CPU", 1)) or 1
+            torch.set_num_threads(n)
+            logger.info("CPU inference: capping torch to %d thread(s) per Ray allocation", n)
+
         # Create core inference engine with explicit device and immediate loading
         self._core = TransformerCore(
             model_name=model_name,
