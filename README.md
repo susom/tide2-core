@@ -19,7 +19,7 @@ GPU group), pre-commit hooks.
 1. Clone the repository and open it in VS Code:
    ```bash
    git clone https://github.com/susom/tide2-core.git
-   cd tide2
+   cd tide2-core
    ```
 2. When VS Code detects `.devcontainer/devcontainer.json`, click **Reopen in Container**
    (or run the command **Dev Containers: Reopen in Container** from the command palette).
@@ -38,8 +38,8 @@ If you prefer to develop outside the Dev Container:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and install
-git clone https://github.com/susom/tide2.git
-cd tide2
+git clone https://github.com/susom/tide2-core.git
+cd tide2-core
 
 uv python install 3.12.8
 uv sync
@@ -66,7 +66,7 @@ source .venv/bin/activate
 jupyter notebook notebooks/tide2_pipeline.ipynb
 ```
 
-View the notebook on GitHub: [TIDE 2.0 Pipeline Tutorial](https://github.com/susom/tide2/blob/main/notebooks/tide2_pipeline.ipynb)
+View the notebook on GitHub: [TIDE 2.0 Pipeline Tutorial](https://github.com/susom/tide2-core/blob/main/notebooks/tide2_pipeline.ipynb)
 
 **Troubleshooting:**
 - **Run from the repo root** — launch Jupyter from the `tide2/` directory so that relative paths resolve correctly.
@@ -334,14 +334,14 @@ If you use TIDE 2.0 in your research, please cite:
   title={TIDE 2.0: Data De-identification and Anonymization Toolkit},
   author={TIDE 2.0 Team},
   year={2025},
-  url={https://github.com/susom/tide2}
+  url={https://github.com/susom/tide2-core}
 }
 ```
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/susom/tide2/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/susom/tide2/discussions)
+- **Issues**: [GitHub Issues](https://github.com/susom/tide2-core/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/susom/tide2-core/discussions)
 - **Development**: See the Contributing section above
 
 ---

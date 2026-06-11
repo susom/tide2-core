@@ -1,0 +1,81 @@
+version: "v1.0.0"
+
+tool:
+  name: "TIDE 2.0"
+  repo_url: "https://github.com/susom/tide2-core"
+  tool_homepage: "https://github.com/susom/tide2-core"
+  documentation_url: "https://github.com/susom/tide2-core#readme"
+  tool_type: "Library"
+  tool_notes: "Data de-identification and anonymization toolkit combining multiple strategies with cryptographic techniques and ML-based entity recognition"
+
+domains:
+  - "healthcare"
+  - "privacy"
+  - "de-identification"
+
+llm:
+  usesLlm: true
+  modelsSupported:
+    - "gpt4o"
+    - "gpt4o-mini"
+    - "claude3-5sonnet"
+    - "claude3-7"
+    - "gemini"
+    - "gemini-flash"
+    - "google-vertex-ai"
+  bringOwnKey: true
+
+input:
+  - name: "Clinical Notes"
+    dataCategory: "clinical-phenotype"
+    dataClass: "unstructured-text"
+    dataType: "clinical-ehr"
+    dataStandard:
+      - "None"
+    format:
+      - "txt"
+      - "json"
+    proprietary: false
+
+output:
+  - name: "De-identified Clinical Notes"
+    dataCategory: "clinical-phenotype"
+    dataClass: "unstructured-text"
+    dataType: "clinical-ehr"
+    dataStandard:
+      - "None"
+    format:
+      - "txt"
+      - "json"
+    proprietary: false
+
+collaborations: []
+
+maturity:
+  beginning_maturity: 3
+  current_maturity: 5
+
+license:
+  license_type: "MIT"
+  link: "https://github.com/susom/tide2-core/blob/main/LICENSE"
+
+credit:
+  - name: "TIDE 2.0 Team"
+    org: "Stanford University"
+    role: "Developer"
+
+target_users:
+  primary_user:
+    user_type: "researcher"
+    technical_literacy_level:
+      - "intermediate"
+      - "advanced"
+    biomedical_literacy_level:
+      - "intermediate"
+      - "advanced"
+  secondary_user:
+    user_type: "clinician"
+    technical_literacy_level:
+      - "intermediate"
+    biomedical_literacy_level:
+      - "expert"
