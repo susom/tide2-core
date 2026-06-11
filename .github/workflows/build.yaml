@@ -105,11 +105,23 @@ jobs:
             type=gha,scope=build-amd64-test
           cache-to: type=gha,mode=max,scope=build-amd64-test
 
+  validate-tool:
+    if: >-
+      !inputs.skip_tests &&
+      (github.event_name != 'pull_request' ||
+       (github.event.pull_request.draft == false &&
+        github.event.pull_request.base.ref != 'main'))
+
+    uses: ARPA-H-BDF/bdfkb-schema/.github/workflows/ci-validate.yaml@main
+    with:
+      python-version: '3.12'
+
   build-prepare:
-    needs: [test]
+    needs: [test, validate-tool]
     if: |
       always() &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.validate-tool.result == 'success' || needs.validate-tool.result == 'skipped') &&
       (inputs.version != '' ||
        github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref_name == 'development' &&
@@ -224,4 +236,3 @@ jobs:
               echo "- \`${MAJOR}\`"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-
