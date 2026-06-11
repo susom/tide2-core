@@ -30,11 +30,14 @@ on:
         type: boolean
         default: false
 
-# Several third-party actions still bundle Node.js 20 dependencies:
-# pre-commit/action@v3.0.1 (actions/cache@v4), docker/build-push-action@v6,
+# Some third-party actions bundle Node.js 20, which GitHub is deprecating in
+# favour of Node.js 24. Setting FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 makes the
+# GitHub Actions runner execute those actions under Node 24 instead, silencing
+# deprecation warnings and future failures.
+# Affected actions: pre-commit/action@v3.0.1, docker/build-push-action@v6,
 # docker/setup-buildx-action@v3, google-github-actions/auth@v2,
 # google-github-actions/setup-gcloud@v2.
-# Periodically check for newer versions of these actions to remove this override.
+# Remove this override once upstream actions ship Node 24 bundles.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
