@@ -224,3 +224,4 @@ jobs:
               echo "- \`${MAJOR}\`"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
+          
