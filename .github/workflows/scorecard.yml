@@ -16,6 +16,13 @@ on:
     branches:
       - main
 
+  # Run on pull requests so results appear as a PR check.
+  # publish_results is disabled for PRs (requires default branch context).
+  pull_request:
+    branches:
+      - main
+      - development
+
   # Run weekly on Saturdays at 01:30 UTC.
   schedule:
     - cron: "30 1 * * 6"
@@ -53,10 +60,10 @@ jobs:
         with:
           results_file: results.sarif
           results_format: sarif
-          # Setting publish_results: true allows the Scorecard team to use your
-          # workflow results to power the Scorecard badge and public dataset.
-          # This is free and helps scale the project.
-          publish_results: true
+          # Publish results only on default-branch pushes so the Scorecard team
+          # can use them for the badge and public dataset. Must be false for
+          # pull_request events (OIDC publishing requires default-branch context).
+          publish_results: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # Upload results as a workflow artifact so they are available for 5 days.
       - name: Upload SARIF artifact
