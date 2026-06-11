@@ -57,7 +57,7 @@ maturity:
 
 license:
   license_type: "MIT"
-  link: "https://github.com/susom/tide2-core/blob/main/LICENSE"
+  link: "https://github.com/susom/tide2-core/blob/main/LICENSE-MIT"
 
 credit:
   - name: "TIDE 2.0 Team"
