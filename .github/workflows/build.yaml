@@ -1,0 +1,108 @@
+name: build
+on:
+  pull_request:
+
+  push:
+    branches-ignore:
+      - main
+
+  workflow_call:
+    inputs:
+      version:
+        description: "Semantic version (e.g., 1.0.0)"
+        required: false
+        type: string
+        default: ""
+      skip_tests:
+        description: "Skip test job (tests already passed in caller workflow)"
+        required: false
+        type: boolean
+        default: true
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semantic version (e.g., 1.0.0)"
+        required: false
+        type: string
+        default: ""
+      skip_tests:
+        description: "Skip test job (tests already passed in caller workflow)"
+        required: false
+        type: boolean
+        default: true
+
+# Some third-party actions bundle Node.js 20, which GitHub is deprecating in
+# favour of Node.js 24. Setting FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 makes the
+# GitHub Actions runner execute those actions under Node 24 instead, silencing
+# deprecation warnings and future failures.
+# Affected actions: pre-commit/action@v3.0.1, docker/build-push-action@v6,
+# docker/setup-buildx-action@v3, google-github-actions/auth@v2,
+# google-github-actions/setup-gcloud@v2.
+# Remove this override once upstream actions ship Node 24 bundles.
+# Restrict all tokens to read-only by default (satisfies Token-Permissions scorecard check).
+# Jobs that need write access declare it explicitly at the job level.
+permissions: read-all
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
+       github.event.pull_request.base.ref != 'main') ||
+      (github.event_name == 'push' && github.ref_name != 'main')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run pre-commit on PR diff
+        if: github.event_name == 'pull_request'
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.event.pull_request.head.sha }}
+
+      - name: Run pre-commit on push diff
+        if: github.event_name == 'push'
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --from-ref ${{ github.event.before }} --to-ref ${{ github.event.after }}
+
+  validate-tool:
+    if: >-
+      !inputs.skip_tests &&
+      (github.event_name != 'pull_request' ||
+       (github.event.pull_request.draft == false &&
+        github.event.pull_request.base.ref != 'main'))
+
+    uses: ARPA-H-BDF/bdfkb-schema/.github/workflows/ci-validate.yaml@6afe39430894512131b7f86f75ac165e8db65551 # main
+    with:
+      python-version: '3.12'
+
+  build-prepare:
+    needs: [validate-tool]
+    if: |
+      always() &&
+      (needs.validate-tool.result == 'success' || needs.validate-tool.result == 'skipped') &&
+      (inputs.version != '' ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.base.ref != 'main') ||
+       (github.event_name == 'push' && github.ref_name == 'development' &&
+        !contains(github.event.head_commit.message || '', '!ignore') &&
+        !startsWith(github.event.head_commit.message || '', 'docs:')))
+
+    runs-on: ubuntu-latest
+    steps:
+      - name: No-op
+        run: echo "build-prepare complete"

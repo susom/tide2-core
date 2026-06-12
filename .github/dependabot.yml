@@ -1,0 +1,54 @@
+# Dependabot configuration
+# Keeps dependencies up to date, satisfying the Dependency-Update-Tool
+# scorecard check. See: https://docs.github.com/code-security/dependabot
+version: 2
+
+updates:
+  # Python dependencies (pip / uv / pyproject.toml)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    labels:
+      - "dependencies"
+      - "python"
+    open-pull-requests-limit: 10
+    groups:
+      # Group minor/patch updates to reduce PR noise
+      python-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # GitHub Actions dependencies
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Docker base image dependencies
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    labels:
+      - "dependencies"
+      - "docker"
