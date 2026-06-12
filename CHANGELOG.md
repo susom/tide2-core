@@ -6,15 +6,6 @@
 
 _This release is published under the MIT License._
 
-### Features
-
-- Add OSSF Scorecard support (score 9.1/10)
-  ([#11](https://github.com/susom/tide2-core/pull/11),
-  [`6ff5249`](https://github.com/susom/tide2-core/commit/6ff5249dc8c0f7bcef803089d36f70a12d6bae87))
-
-- Add tide2-core PHI de-identification pipeline
-  ([`f165b26`](https://github.com/susom/tide2-core/commit/f165b26bbd849c2eb4a13c3cd5ffd884cad15530))
-
 ### Bug Fixes
 
 - Fetch base SHA before pre-commit diff on PRs
@@ -23,11 +14,6 @@ _This release is published under the MIT License._
 
 - **anonymizer**: Resolve patient_uid name collision causing silent 0-row output
   ([`34e0619`](https://github.com/susom/tide2-core/commit/34e0619c1644f8fbf7b895482d993bd2dbf32c59))
-
-### Performance Improvements
-
-- **pipeline**: Auto-tune CPU resource allocation for Mac/CPU runs
-  ([`c96ec32`](https://github.com/susom/tide2-core/commit/c96ec32b1ee614c5d90550743355a604eed3260d))
 
 ### Documentation
 
@@ -39,3 +25,17 @@ _This release is published under the MIT License._
 
 - Update clone URL and venv path to tide2-core
   ([`d440c40`](https://github.com/susom/tide2-core/commit/d440c40719afafb93f821e70739de574c651a677))
+
+### Features
+
+- Add OSSF Scorecard support (score 9.1/10)
+  ([#11](https://github.com/susom/tide2-core/pull/11),
+  [`6ff5249`](https://github.com/susom/tide2-core/commit/6ff5249dc8c0f7bcef803089d36f70a12d6bae87))
+
+- Add tide2-core PHI de-identification pipeline
+  ([`f165b26`](https://github.com/susom/tide2-core/commit/f165b26bbd849c2eb4a13c3cd5ffd884cad15530))
+
+### Performance Improvements
+
+- **pipeline**: Auto-tune CPU resource allocation for Mac/CPU runs
+  ([`c96ec32`](https://github.com/susom/tide2-core/commit/c96ec32b1ee614c5d90550743355a604eed3260d))
