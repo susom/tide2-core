@@ -11,6 +11,8 @@ import pytest
 
 from tide2.recognizers.institution_recognizer import InstitutionRecognizer
 
+ALL_ENTITIES = ["HOSPITAL", "URL", "LOCATION"]
+
 
 @pytest.fixture
 def recognizer():
@@ -18,9 +20,9 @@ def recognizer():
     return InstitutionRecognizer()
 
 
-def _detect(recognizer, text: str, entity: str = "INSTITUTION") -> list:
+def _detect(recognizer, text: str, entities: list[str] | None = None) -> list:
     """Helper: run analyze and return results."""
-    return recognizer.analyze(text=text, entities=[entity])
+    return recognizer.analyze(text=text, entities=entities or ALL_ENTITIES)
 
 
 def _detected_texts(recognizer, text: str) -> list[str]:
@@ -317,10 +319,28 @@ class TestEntityFiltering:
         results = recognizer.analyze(text=text, entities=["PERSON"])
         assert len(results) == 0
 
-    def test_responds_to_institution_entity(self, recognizer):
+    def test_responds_to_hospital_entity(self, recognizer):
         text = "Patient at Stanford Hospital."
-        results = recognizer.analyze(text=text, entities=["INSTITUTION"])
+        results = recognizer.analyze(text=text, entities=["HOSPITAL"])
         assert len(results) >= 1
+        assert all(r.entity_type == "HOSPITAL" for r in results)
+
+    def test_responds_to_url_entity(self, recognizer):
+        text = "Visit stanfordhealthcare.org for info."
+        results = recognizer.analyze(text=text, entities=["URL"])
+        assert len(results) >= 1
+        assert all(r.entity_type == "URL" for r in results)
+
+    def test_responds_to_location_entity(self, recognizer):
+        text = "Located at 300 Pasteur Drive."
+        results = recognizer.analyze(text=text, entities=["LOCATION"])
+        assert len(results) >= 1
+        assert all(r.entity_type == "LOCATION" for r in results)
+
+    def test_url_only_excludes_hospital_matches(self, recognizer):
+        text = "Stanford Hospital at stanfordhealthcare.org"
+        results = recognizer.analyze(text=text, entities=["URL"])
+        assert all(r.entity_type == "URL" for r in results)
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +446,8 @@ class TestFromConfig:
         rec = InstitutionRecognizer.from_config(config_path)
         results = _detect(rec, "Visit testhospital.org or call TestHosp.")
         assert len(results) == 2
+        entity_types = {r.entity_type for r in results}
+        assert entity_types == {"URL", "HOSPITAL"}
 
     def test_invalid_flag_raises(self, tmp_path):
         config = {
@@ -479,3 +501,75 @@ class TestMetadata:
         assert meta["institution"] == "Stanford Health Care"
         assert "pattern_name" in meta
         assert "category" in meta
+
+
+# ---------------------------------------------------------------------------
+# SHIELD entity type mapping
+# ---------------------------------------------------------------------------
+
+
+class TestShieldEntityTypes:
+    def test_url_patterns_emit_url_entity(self, recognizer):
+        text = "Visit stanfordhealthcare.org for info."
+        results = _detect(recognizer, text)
+        url_results = [r for r in results if r.entity_type == "URL"]
+        assert len(url_results) >= 1
+
+    def test_social_handle_emits_url_entity(self, recognizer):
+        text = "Follow @StanfordHealth on Twitter."
+        results = _detect(recognizer, text)
+        handle = [r for r in results if text[r.start : r.end] == "@StanfordHealth"]
+        assert len(handle) == 1
+        assert handle[0].entity_type == "URL"
+
+    def test_portal_emits_url_entity(self, recognizer):
+        text = "Log into MyHealth for results."
+        results = _detect(recognizer, text)
+        portal = [r for r in results if text[r.start : r.end] == "MyHealth"]
+        assert len(portal) == 1
+        assert portal[0].entity_type == "URL"
+
+    def test_facility_emits_hospital_entity(self, recognizer):
+        text = "Seen at Packard Children's Hospital."
+        results = _detect(recognizer, text)
+        assert any(r.entity_type == "HOSPITAL" for r in results)
+
+    def test_abbreviation_emits_hospital_entity(self, recognizer):
+        text = "Admitted to SHC on Monday."
+        results = _detect(recognizer, text)
+        shc = [r for r in results if text[r.start : r.end] == "SHC"]
+        assert len(shc) == 1
+        assert shc[0].entity_type == "HOSPITAL"
+
+    def test_name_emits_hospital_entity(self, recognizer):
+        text = "Records from Stanford."
+        results = _detect(recognizer, text)
+        assert any(r.entity_type == "HOSPITAL" for r in results)
+
+    def test_location_emits_location_entity(self, recognizer):
+        text = "Office at 300 Pasteur Drive."
+        results = _detect(recognizer, text)
+        loc = [r for r in results if r.entity_type == "LOCATION"]
+        assert len(loc) >= 1
+
+    def test_supported_entities_are_shield_types(self, recognizer):
+        entities = recognizer.get_supported_entities()
+        assert set(entities) == {"HOSPITAL", "URL", "LOCATION"}
+
+    def test_non_overlapping_spans(self, recognizer):
+        text = (
+            "Patient seen at Stanford Hospital, visit stanfordhealthcare.org "
+            "or MyHealth. Located at 300 Pasteur Drive, Palo Alto."
+        )
+        results = _detect(recognizer, text)
+        for i, a in enumerate(results):
+            for b in results[i + 1 :]:
+                assert a.end <= b.start or b.end <= a.start, (
+                    f"Overlapping spans: [{a.start}:{a.end}] and [{b.start}:{b.end}]"
+                )
+
+    def test_each_span_has_one_label(self, recognizer):
+        text = "Stanford stanfordhealthcare.org Pasteur Drive"
+        results = _detect(recognizer, text)
+        spans = [(r.start, r.end) for r in results]
+        assert len(spans) == len(set(spans))

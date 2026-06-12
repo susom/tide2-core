@@ -60,6 +60,18 @@ class InstitutionRecognizer(EntityRecognizer):
     DEFAULT_SCORE: ClassVar[float] = 0.85
     _TRAILING_PUNCT = re.compile(r"[.,;:!?)>\]\}\"']+$")
 
+    CATEGORY_ENTITY_MAP: ClassVar[dict[str, str]] = {
+        "url": "URL",
+        "social": "URL",
+        "portal": "URL",
+        "facility": "HOSPITAL",
+        "abbreviation": "HOSPITAL",
+        "system_code": "HOSPITAL",
+        "name": "HOSPITAL",
+        "typo": "HOSPITAL",
+        "location": "LOCATION",
+    }
+
     # --- Stanford Health Care patterns -----------------------------------------
     # Each tuple: (compiled_regex, score, pattern_name, category)
     # Categories: url, social, facility, location, portal, system_code,
@@ -198,8 +210,8 @@ class InstitutionRecognizer(EntityRecognizer):
         self,
         patterns: list[tuple[re.Pattern, float, str, str]] | None = None,
         supported_language: str = "en",
-        supported_entity: str = "INSTITUTION",
         institution_name: str = "Stanford Health Care",
+        category_entity_map: dict[str, str] | None = None,
     ):
         """
         Initialize the institution recognizer.
@@ -208,24 +220,34 @@ class InstitutionRecognizer(EntityRecognizer):
             patterns: List of (compiled_regex, score, name, category) tuples.
                       Defaults to Stanford Health Care patterns.
             supported_language: Language code (default: "en").
-            supported_entity: Entity type name (default: "INSTITUTION").
             institution_name: Display name for the institution (used in explanations).
+            category_entity_map: Mapping from pattern category to SHIELD entity type.
+                                 Defaults to CATEGORY_ENTITY_MAP.
         """
+        self._patterns = patterns if patterns is not None else self.stanford_patterns()
+        self._category_entity_map = (
+            category_entity_map if category_entity_map is not None
+            else self.CATEGORY_ENTITY_MAP
+        )
+        self._institution_name = institution_name
+
+        entities = sorted({
+            self._category_entity_map.get(cat, "HOSPITAL")
+            for _, _, _, cat in self._patterns
+        })
+
         super().__init__(
-            supported_entities=[supported_entity],
+            supported_entities=entities,
             supported_language=supported_language,
             name="InstitutionRecognizer",
         )
-        self._supported_entity = supported_entity
-        self._institution_name = institution_name
-        self._patterns = patterns if patterns is not None else self.stanford_patterns()
 
     @classmethod
     def from_config(
         cls,
         config_path: str | Path,
         supported_language: str = "en",
-        supported_entity: str = "INSTITUTION",
+        category_entity_map: dict[str, str] | None = None,
     ) -> "InstitutionRecognizer":
         """
         Create an InstitutionRecognizer from a JSON configuration file.
@@ -249,7 +271,8 @@ class InstitutionRecognizer(EntityRecognizer):
         Args:
             config_path: Path to the JSON config file.
             supported_language: Language code (default: "en").
-            supported_entity: Entity type name (default: "INSTITUTION").
+            category_entity_map: Mapping from category to SHIELD entity type.
+                                 Defaults to CATEGORY_ENTITY_MAP.
 
         Returns:
             Configured InstitutionRecognizer instance.
@@ -257,7 +280,7 @@ class InstitutionRecognizer(EntityRecognizer):
         with open(config_path) as f:
             cfg = json.load(f)
 
-        _VALID_FLAGS = {
+        valid_flags = {
             "IGNORECASE", "MULTILINE", "DOTALL", "VERBOSE",
             "ASCII", "UNICODE",
         }
@@ -267,11 +290,11 @@ class InstitutionRecognizer(EntityRecognizer):
             flags = 0
             for flag_name in rule.get("flags", []):
                 upper = flag_name.upper()
-                if upper not in _VALID_FLAGS:
+                if upper not in valid_flags:
                     raise ValueError(
                         f"Unknown regex flag '{flag_name}' in rule "
                         f"'{rule.get('label', '?')}'. "
-                        f"Valid flags: {sorted(_VALID_FLAGS)}"
+                        f"Valid flags: {sorted(valid_flags)}"
                     )
                 flags |= getattr(re, upper)
             compiled = re.compile(rule["pattern"], flags)
@@ -283,7 +306,7 @@ class InstitutionRecognizer(EntityRecognizer):
         return cls(
             patterns=patterns,
             supported_language=supported_language,
-            supported_entity=supported_entity,
+            category_entity_map=category_entity_map,
             institution_name=cfg.get("institution", "Unknown"),
         )
 
@@ -299,9 +322,13 @@ class InstitutionRecognizer(EntityRecognizer):
         """
         Analyze text for institution-specific PHI.
 
-        Applies patterns in priority order (most specific first). Overlapping
-        matches are deduplicated by suppressing spans that are fully contained
-        within a longer match (regardless of score).
+        Each pattern's category is mapped to a SHIELD entity type via
+        ``CATEGORY_ENTITY_MAP``. Only patterns whose mapped entity is in the
+        requested ``entities`` list are evaluated.
+
+        Overlapping matches are deduplicated by suppressing spans that are fully
+        contained within a longer match (regardless of score). Non-overlapping
+        spans each receive exactly one label.
 
         Args:
             text: Text to analyze.
@@ -311,13 +338,18 @@ class InstitutionRecognizer(EntityRecognizer):
         Returns:
             List of RecognizerResult objects for detected institution PHI.
         """
-        if self._supported_entity not in entities:
+        requested = set(entities) & set(self.supported_entities)
+        if not requested:
             return []
 
         results: list[RecognizerResult] = []
         seen_spans: set[tuple[int, int]] = set()
 
         for pattern, score, pattern_name, category in self._patterns:
+            entity_type = self._category_entity_map.get(category, "HOSPITAL")
+            if entity_type not in requested:
+                continue
+
             for match in pattern.finditer(text):
                 start = match.start()
                 end = match.end()
@@ -334,7 +366,6 @@ class InstitutionRecognizer(EntityRecognizer):
                 if span in seen_spans:
                     continue
 
-                # Skip if this span is fully contained within an existing match
                 is_subset = False
                 for existing_start, existing_end in seen_spans:
                     if start >= existing_start and end <= existing_end:
@@ -343,7 +374,6 @@ class InstitutionRecognizer(EntityRecognizer):
                 if is_subset:
                     continue
 
-                # Remove existing spans that are subsets of this longer match
                 subsumed = {
                     (es, ee)
                     for es, ee in seen_spans
@@ -370,7 +400,7 @@ class InstitutionRecognizer(EntityRecognizer):
 
                 results.append(
                     RecognizerResult(
-                        entity_type=self._supported_entity,
+                        entity_type=entity_type,
                         start=start,
                         end=end,
                         score=score,
@@ -385,7 +415,3 @@ class InstitutionRecognizer(EntityRecognizer):
                 )
 
         return results
-
-    def get_supported_entities(self) -> list[str]:
-        """Return supported entities."""
-        return [self._supported_entity]
