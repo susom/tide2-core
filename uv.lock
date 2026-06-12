@@ -3650,7 +3650,6 @@ name = "tide2"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
-    { name = "click" },
     { name = "db-dtypes" },
     { name = "faker" },
     { name = "ff3" },
@@ -3759,7 +3758,6 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic" },
-    { name = "click", specifier = ">=8.1" },
     { name = "cython", marker = "extra == 'dev'" },
     { name = "db-dtypes" },
     { name = "faker" },
