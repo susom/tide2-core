@@ -57,23 +57,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
       - name: Run pre-commit on PR diff
         if: github.event_name == 'pull_request'
-        uses: pre-commit/action@v3.0.1
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.event.pull_request.head.sha }}
 
       - name: Run pre-commit on push diff
         if: github.event_name == 'push'
-        uses: pre-commit/action@v3.0.1
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --from-ref ${{ github.event.before }} --to-ref ${{ github.event.after }}
 
@@ -84,7 +84,7 @@ jobs:
        (github.event.pull_request.draft == false &&
         github.event.pull_request.base.ref != 'main'))
 
-    uses: ARPA-H-BDF/bdfkb-schema/.github/workflows/ci-validate.yaml@main
+    uses: ARPA-H-BDF/bdfkb-schema/.github/workflows/ci-validate.yaml@6afe39430894512131b7f86f75ac165e8db65551 # main
     with:
       python-version: '3.12'
 
