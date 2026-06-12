@@ -106,6 +106,11 @@ class TestSocial:
         # Should NOT match "@StanfordMed" as a social handle from an email
         assert not any(m.startswith("@Stanford") for m in matched)
 
+    def test_social_handle_case_insensitive(self, recognizer):
+        text = "Follow us @STANFORDMED for updates."
+        matched = _detected_texts(recognizer, text)
+        assert "@STANFORDMED" in matched
+
 
 # ---------------------------------------------------------------------------
 # Facilities
@@ -482,6 +487,50 @@ class TestFromConfig:
         results = _detect(rec, "Check FooBar now.")
         assert len(results) == 1
         assert results[0].score == pytest.approx(0.42)
+
+    def test_missing_pattern_key_raises(self, tmp_path):
+        config = {
+            "institution": "Test",
+            "rules": [{"label": "no_pattern", "score": 0.5}],
+        }
+        config_path = tmp_path / "bad.json"
+        config_path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match="missing required key 'pattern'"):
+            InstitutionRecognizer.from_config(config_path)
+
+    def test_missing_label_key_raises(self, tmp_path):
+        config = {
+            "institution": "Test",
+            "rules": [{"pattern": r"\bTest\b", "score": 0.5}],
+        }
+        config_path = tmp_path / "bad.json"
+        config_path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match="missing required key 'label'"):
+            InstitutionRecognizer.from_config(config_path)
+
+    def test_score_out_of_range_raises(self, tmp_path):
+        config = {
+            "institution": "Test",
+            "rules": [
+                {"pattern": r"\bTest\b", "label": "test", "score": 1.5},
+            ],
+        }
+        config_path = tmp_path / "bad.json"
+        config_path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match="out of range"):
+            InstitutionRecognizer.from_config(config_path)
+
+    def test_negative_score_raises(self, tmp_path):
+        config = {
+            "institution": "Test",
+            "rules": [
+                {"pattern": r"\bTest\b", "label": "test", "score": -0.1},
+            ],
+        }
+        config_path = tmp_path / "bad.json"
+        config_path.write_text(json.dumps(config))
+        with pytest.raises(ValueError, match="out of range"):
+            InstitutionRecognizer.from_config(config_path)
 
 
 # ---------------------------------------------------------------------------

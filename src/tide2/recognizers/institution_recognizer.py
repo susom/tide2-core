@@ -75,7 +75,7 @@ class InstitutionRecognizer(EntityRecognizer):
     # --- Stanford Health Care patterns -----------------------------------------
     # Each tuple: (compiled_regex, score, pattern_name, category)
     # Categories: url, social, facility, location, portal, system_code,
-    #             abbreviation, name, typo, zip_code
+    #             abbreviation, name, typo
 
     @staticmethod
     def stanford_patterns() -> list[tuple[re.Pattern, float, str, str]]:
@@ -99,7 +99,7 @@ class InstitutionRecognizer(EntityRecognizer):
             (re.compile(r"stanfordendo", re.IGNORECASE), 0.85, "bare_endo", "url"),
             (re.compile(r"stanfordpainmedicine", re.IGNORECASE), 0.90, "url_pain", "url"),
             # ── Social media handles ──
-            (re.compile(r"(?<!\w)@[Ss]tanford[\w_]+"), 0.90, "social_handle", "social"),
+            (re.compile(r"(?<!\w)@stanford[\w_]+", re.IGNORECASE), 0.90, "social_handle", "social"),
             # ── Affiliated facilities (multi-word — high confidence) ──
             (re.compile(r"\bPalo Alto Medical Foundation\b", re.IGNORECASE), 0.90, "palo_alto_med_fdn", "facility"),
             (re.compile(r"\bSfm Myhealth Clinic Messaging\b", re.IGNORECASE), 0.90, "sfm_myhealth", "facility"),
@@ -149,10 +149,10 @@ class InstitutionRecognizer(EntityRecognizer):
             (re.compile(r"\bStandford\b"), 0.85, "standford_typo", "typo"),
             (re.compile(r"\bstandford\b"), 0.85, "standford_typo_lc", "typo"),
             # ── Core institution name (ordered: exact case first, then fallback) ──
-            (re.compile(r"STANFORD"), 0.85, "stanford_upper", "name"),
-            (re.compile(r"Stanford"), 0.85, "stanford_title", "name"),
-            (re.compile(r"stanford"), 0.85, "stanford_lower", "name"),
-            (re.compile(r"stanford", re.IGNORECASE), 0.85, "stanford_mixed", "name"),
+            (re.compile(r"\bSTANFORD\b"), 0.85, "stanford_upper", "name"),
+            (re.compile(r"\bStanford\b"), 0.85, "stanford_title", "name"),
+            (re.compile(r"\bstanford\b"), 0.85, "stanford_lower", "name"),
+            (re.compile(r"\bstanford\b", re.IGNORECASE), 0.85, "stanford_mixed", "name"),
             # ── Mail codes & unit codes ──
             (re.compile(r"\bMC\s+\d{4,5}\b", re.IGNORECASE), 0.75, "mail_code", "location"),
             (
@@ -228,7 +228,7 @@ class InstitutionRecognizer(EntityRecognizer):
         Returns:
             Configured InstitutionRecognizer instance.
         """
-        with Path(config_path).open() as f:
+        with Path(config_path).open(encoding="utf-8") as f:
             cfg = json.load(f)
 
         valid_flags = {
@@ -242,6 +242,12 @@ class InstitutionRecognizer(EntityRecognizer):
 
         patterns: list[tuple[re.Pattern, float, str, str]] = []
         for rule in cfg.get("rules", []):
+            for key in ("pattern", "label"):
+                if key not in rule:
+                    raise ValueError(f"Rule missing required key '{key}': {rule!r}")
+            score = rule.get("score", cls.DEFAULT_SCORE)
+            if not 0.0 <= score <= 1.0:
+                raise ValueError(f"Score {score} out of range [0, 1] in rule '{rule.get('label', '?')}'")
             flags = 0
             for flag_name in rule.get("flags", []):
                 upper = flag_name.upper()
@@ -253,7 +259,6 @@ class InstitutionRecognizer(EntityRecognizer):
                     )
                 flags |= getattr(re, upper)
             compiled = re.compile(rule["pattern"], flags)
-            score = rule.get("score", cls.DEFAULT_SCORE)
             label = rule["label"]
             category = rule.get("category", "name")
             patterns.append((compiled, score, label, category))
@@ -267,6 +272,7 @@ class InstitutionRecognizer(EntityRecognizer):
 
     def load(self) -> None:
         """No loading required — patterns are compiled at construction time."""
+        pass
 
     def analyze(
         self,
