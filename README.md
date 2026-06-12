@@ -316,10 +316,10 @@ Pages artifact.
 
 ## Contributing
 
-See the [Dev Container setup](#dev-container-recommended) above for the development environment. Guidelines:
-
-- Code style and testing requirements are enforced by pre-commit hooks (installed automatically in the Dev Container)
-- Run `pytest` to verify changes before submitting pull requests
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow, branching
+model, commit-message conventions, and the pull request checklist. The
+[Dev Container setup](#dev-container-recommended) above provisions the full
+development environment (including pre-commit hooks) automatically.
 
 ## License
 
