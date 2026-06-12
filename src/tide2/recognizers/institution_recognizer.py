@@ -58,7 +58,7 @@ class InstitutionRecognizer(EntityRecognizer):
 
     SUPPORTED_ENTITY: ClassVar[str] = "INSTITUTION"
     DEFAULT_SCORE: ClassVar[float] = 0.85
-    _TRAILING_PUNCT = re.compile(r"[.,;:!?)\"']+$")
+    _TRAILING_PUNCT = re.compile(r"[.,;:!?)>\]\}\"']+$")
 
     # --- Stanford Health Care patterns -----------------------------------------
     # Each tuple: (compiled_regex, score, pattern_name, category)

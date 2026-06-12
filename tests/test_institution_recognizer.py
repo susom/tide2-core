@@ -370,6 +370,30 @@ class TestTrailingPunctuation:
         for t in texts:
             assert not t.endswith(",")
 
+    def test_url_trailing_bracket(self, recognizer):
+        text = "See [www.stanfordhealthcare.org] for info."
+        results = _detect(recognizer, text)
+        texts = [text[r.start : r.end] for r in results]
+        assert len(texts) >= 1
+        for t in texts:
+            assert not t.endswith("]")
+
+    def test_url_trailing_brace(self, recognizer):
+        text = "Link {www.stanfordmed.org} here."
+        results = _detect(recognizer, text)
+        texts = [text[r.start : r.end] for r in results]
+        assert len(texts) >= 1
+        for t in texts:
+            assert not t.endswith("}")
+
+    def test_url_trailing_angle_bracket(self, recognizer):
+        text = "See <www.stanfordhealthcare.org> for info."
+        results = _detect(recognizer, text)
+        texts = [text[r.start : r.end] for r in results]
+        assert len(texts) >= 1
+        for t in texts:
+            assert not t.endswith(">")
+
 
 # ---------------------------------------------------------------------------
 # from_config (JSON loading)
