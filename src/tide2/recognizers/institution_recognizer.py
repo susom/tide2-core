@@ -56,7 +56,7 @@ class InstitutionRecognizer(EntityRecognizer):
         results = engine.analyze(text="Patient seen at Stanford", language="en")
     """
 
-    SUPPORTED_ENTITY: ClassVar[str] = "INSTITUTION"
+    SUPPORTED_ENTITIES: ClassVar[tuple[str, ...]] = ("HOSPITAL", "URL", "LOCATION")
     DEFAULT_SCORE: ClassVar[float] = 0.85
     _TRAILING_PUNCT = re.compile(r"[.,;:!?)>\]\}\"']+$")
 
@@ -88,9 +88,9 @@ class InstitutionRecognizer(EntityRecognizer):
         return [
             # ── URLs & domains (high confidence — almost never false positives) ──
             (re.compile(r"[Ww]ww\.stanford\w+\.(?:com|org|edu)\S*", re.IGNORECASE), 0.95, "url_full", "url"),
-            (re.compile(r"stanfordhealthcare\.[\w./@-]*", re.IGNORECASE), 0.95, "domain_shc", "url"),
-            (re.compile(r"stanfordhospital\.[\w./@-]*", re.IGNORECASE), 0.95, "domain_sh", "url"),
-            (re.compile(r"stanfordmed\.[\w./@-]*", re.IGNORECASE), 0.95, "domain_sm", "url"),
+            (re.compile(r"stanfordhealthcare\.[\w./@-]+", re.IGNORECASE), 0.95, "domain_shc", "url"),
+            (re.compile(r"stanfordhospital\.[\w./@-]+", re.IGNORECASE), 0.95, "domain_sh", "url"),
+            (re.compile(r"stanfordmed\.[\w./@-]+", re.IGNORECASE), 0.95, "domain_sm", "url"),
             (re.compile(r"evercore\.stanfordmed\.org", re.IGNORECASE), 0.95, "url_evercore", "url"),
             (re.compile(r"partners\.stanfordemedicine\.com", re.IGNORECASE), 0.95, "url_partners", "url"),
             (re.compile(r"bit\.ly/StanfordPatientEdReg", re.IGNORECASE), 0.95, "url_bitly", "url"),
