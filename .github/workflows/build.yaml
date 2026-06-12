@@ -75,11 +75,26 @@ jobs:
         with:
           extra_args: --from-ref ${{ github.event.pull_request.base.sha }} --to-ref ${{ github.event.pull_request.head.sha }}
 
+      - name: Determine pre-commit base ref for push diff
+        if: github.event_name == 'push'
+        id: push_base
+        run: |
+          before="${{ github.event.before }}"
+          # On a brand-new branch, github.event.before is all-zeros and cannot be
+          # used as a git revision. Fall back to diffing against the default branch.
+          if [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            default_branch="${{ github.event.repository.default_branch }}"
+            git fetch --depth=1 origin "$default_branch"
+            echo "from_ref=origin/$default_branch" >> "$GITHUB_OUTPUT"
+          else
+            echo "from_ref=$before" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run pre-commit on push diff
         if: github.event_name == 'push'
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
-          extra_args: --from-ref ${{ github.event.before }} --to-ref ${{ github.event.after }}
+          extra_args: --from-ref ${{ steps.push_base.outputs.from_ref }} --to-ref ${{ github.event.after }}
 
   validate-tool:
     if: >-
