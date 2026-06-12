@@ -65,6 +65,10 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Fetch base SHA for pre-commit diff
+        if: github.event_name == 'pull_request'
+        run: git fetch --depth=1 origin ${{ github.event.pull_request.base.sha }}
+
       - name: Run pre-commit on PR diff
         if: github.event_name == 'pull_request'
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
