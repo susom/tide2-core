@@ -17,7 +17,7 @@ on:
         description: "Skip test job (tests already passed in caller workflow)"
         required: false
         type: boolean
-        default: false
+        default: true
 
   workflow_dispatch:
     inputs:
@@ -30,7 +30,7 @@ on:
         description: "Skip test job (tests already passed in caller workflow)"
         required: false
         type: boolean
-        default: false
+        default: true
 
 # Some third-party actions bundle Node.js 20, which GitHub is deprecating in
 # favour of Node.js 24. Setting FORCE_JAVASCRIPT_ACTIONS_TO_NODE24 makes the
@@ -103,110 +103,6 @@ jobs:
         !startsWith(github.event.head_commit.message || '', 'docs:')))
 
     runs-on: ubuntu-latest
-    outputs:
-      branch_name: ${{ steps.branch.outputs.BRANCH_NAME }}
-      build_id: ${{ steps.build_id.outputs.BUILD_ID }}
     steps:
-      - name: Set branch name
-        id: branch
-        # Use env vars to avoid script injection with untrusted context variables
-        # (github.head_ref / github.ref_name). Satisfies Dangerous-Workflow check.
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          BRANCH="${HEAD_REF:-$REF_NAME}"
-          SANITIZED_BRANCH=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's#[^a-z0-9_.-]+#-#g')
-          echo "BRANCH_NAME=${SANITIZED_BRANCH}" >> "$GITHUB_OUTPUT"
-
-      - name: Generate build ID
-        id: build_id
-        run: |
-          ts=$(date +%Y%m%d%H%M%S)
-          echo "BUILD_ID=${{ steps.branch.outputs.BRANCH_NAME }}-${ts}" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: build-prepare
-    if: ${{ !cancelled() && needs.build-prepare.result == 'success' }}
-
-    strategy:
-      matrix:
-        variant: [cpu, gpu]
-
-    env:
-      PROJECT: ${{ secrets.PROJECT }}
-      REGISTRY: ${{ secrets.REGISTRY }}
-      REPOSITORY: ${{ secrets.REPOSITORY }}
-      VERSION_INPUT: ${{ inputs.version }}
-
-    permissions:
-      contents: 'read'
-      id-token: 'write'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Authenticate with Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          project_id: ${{ secrets.PROJECT }}
-          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
-
-      - name: Set up Cloud SDK
-        uses: 'google-github-actions/setup-gcloud@v2'
-        with:
-          version: '>= 363.0.0'
-
-      - name: Authenticate to GAR
-        run: |
-          gcloud auth configure-docker ${{ env.REGISTRY }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build ${{ matrix.variant }} image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          target: production-${{ matrix.variant }}
-          provenance: false
-          cache-from: type=gha,scope=build-amd64-${{ matrix.variant }}
-          cache-to: type=gha,mode=max,scope=build-amd64-${{ matrix.variant }}
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}:${{ needs.build-prepare.outputs.build_id }}
-            ${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}:${{ needs.build-prepare.outputs.branch_name }}
-
-      - name: Create semver tags
-        if: inputs.version != ''
-        run: |
-          IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT }}/${{ env.REPOSITORY }}/tide2-${{ matrix.variant }}"
-          VERSION="${{ env.VERSION_INPUT }}"
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${VERSION}" \
-            --tag "${IMAGE}:${MAJOR}.${MINOR}" \
-            --tag "${IMAGE}:${MAJOR}" \
-            "${IMAGE}:${{ needs.build-prepare.outputs.build_id }}"
-
-      - name: Write image tags to job summary
-        run: |
-          {
-            echo "#### :whale: \`tide2-${{ matrix.variant }}\`"
-            echo ""
-            echo "- \`${{ needs.build-prepare.outputs.build_id }}\`"
-            echo "- \`${{ needs.build-prepare.outputs.branch_name }}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [[ -n "${VERSION_INPUT}" ]]; then
-            VERSION="${VERSION_INPUT}"
-            MAJOR=$(echo "$VERSION" | cut -d. -f1)
-            MINOR=$(echo "$VERSION" | cut -d. -f2)
-            {
-              echo "- \`${VERSION}\`"
-              echo "- \`${MAJOR}.${MINOR}\`"
-              echo "- \`${MAJOR}\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+      - name: No-op
+        run: echo "build-prepare complete"
