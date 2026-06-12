@@ -87,80 +87,45 @@ class InstitutionRecognizer(EntityRecognizer):
         """
         return [
             # ── URLs & domains (high confidence — almost never false positives) ──
-            (re.compile(r"[Ww]ww\.stanford\w+\.(?:com|org|edu)\S*", re.IGNORECASE),
-             0.95, "url_full", "url"),
-            (re.compile(r"stanfordhealthcare\.[\w./@-]*", re.IGNORECASE),
-             0.95, "domain_shc", "url"),
-            (re.compile(r"stanfordhospital\.[\w./@-]*", re.IGNORECASE),
-             0.95, "domain_sh", "url"),
-            (re.compile(r"stanfordmed\.[\w./@-]*", re.IGNORECASE),
-             0.95, "domain_sm", "url"),
-            (re.compile(r"evercore\.stanfordmed\.org", re.IGNORECASE),
-             0.95, "url_evercore", "url"),
-            (re.compile(r"partners\.stanfordemedicine\.com", re.IGNORECASE),
-             0.95, "url_partners", "url"),
-            (re.compile(r"bit\.ly/StanfordPatientEdReg", re.IGNORECASE),
-             0.95, "url_bitly", "url"),
-            (re.compile(r"StanfordHealthCareLiveDonors\.org", re.IGNORECASE),
-             0.95, "url_livedonors", "url"),
-            (re.compile(r"StanfordHealthCareLiveDonors", re.IGNORECASE),
-             0.90, "bare_livedonors", "url"),
-            (re.compile(r"stanfordendo", re.IGNORECASE),
-             0.85, "bare_endo", "url"),
-            (re.compile(r"stanfordpainmedicine", re.IGNORECASE),
-             0.90, "url_pain", "url"),
-
+            (re.compile(r"[Ww]ww\.stanford\w+\.(?:com|org|edu)\S*", re.IGNORECASE), 0.95, "url_full", "url"),
+            (re.compile(r"stanfordhealthcare\.[\w./@-]*", re.IGNORECASE), 0.95, "domain_shc", "url"),
+            (re.compile(r"stanfordhospital\.[\w./@-]*", re.IGNORECASE), 0.95, "domain_sh", "url"),
+            (re.compile(r"stanfordmed\.[\w./@-]*", re.IGNORECASE), 0.95, "domain_sm", "url"),
+            (re.compile(r"evercore\.stanfordmed\.org", re.IGNORECASE), 0.95, "url_evercore", "url"),
+            (re.compile(r"partners\.stanfordemedicine\.com", re.IGNORECASE), 0.95, "url_partners", "url"),
+            (re.compile(r"bit\.ly/StanfordPatientEdReg", re.IGNORECASE), 0.95, "url_bitly", "url"),
+            (re.compile(r"StanfordHealthCareLiveDonors\.org", re.IGNORECASE), 0.95, "url_livedonors", "url"),
+            (re.compile(r"StanfordHealthCareLiveDonors", re.IGNORECASE), 0.90, "bare_livedonors", "url"),
+            (re.compile(r"stanfordendo", re.IGNORECASE), 0.85, "bare_endo", "url"),
+            (re.compile(r"stanfordpainmedicine", re.IGNORECASE), 0.90, "url_pain", "url"),
             # ── Social media handles ──
-            (re.compile(r"(?<!\w)@[Ss]tanford[\w_]+"),
-             0.90, "social_handle", "social"),
-
+            (re.compile(r"(?<!\w)@[Ss]tanford[\w_]+"), 0.90, "social_handle", "social"),
             # ── Affiliated facilities (multi-word — high confidence) ──
-            (re.compile(r"\bPalo Alto Medical Foundation\b", re.IGNORECASE),
-             0.90, "palo_alto_med_fdn", "facility"),
-            (re.compile(r"\bSfm Myhealth Clinic Messaging\b", re.IGNORECASE),
-             0.90, "sfm_myhealth", "facility"),
-            (re.compile(r"\bMyHealth Clinic Messaging\b", re.IGNORECASE),
-             0.90, "myhealth_clinic_msg", "facility"),
-            (re.compile(r"\bBlake Wilbur Building\b", re.IGNORECASE),
-             0.90, "blake_wilbur_bldg", "location"),
-            (re.compile(r"\bPackard Children's\b", re.IGNORECASE),
-             0.90, "packard_childrens", "facility"),
-            (re.compile(r"\bPackard Children\b", re.IGNORECASE),
-             0.90, "packard_children", "facility"),
-            (re.compile(r"\bLucile\s+Salter\b", re.IGNORECASE),
-             0.90, "lucile_salter", "facility"),
-            (re.compile(r"\bLucile\s+Community\b", re.IGNORECASE),
-             0.85, "lucile_community", "facility"),
-
+            (re.compile(r"\bPalo Alto Medical Foundation\b", re.IGNORECASE), 0.90, "palo_alto_med_fdn", "facility"),
+            (re.compile(r"\bSfm Myhealth Clinic Messaging\b", re.IGNORECASE), 0.90, "sfm_myhealth", "facility"),
+            (re.compile(r"\bMyHealth Clinic Messaging\b", re.IGNORECASE), 0.90, "myhealth_clinic_msg", "facility"),
+            (re.compile(r"\bBlake Wilbur Building\b", re.IGNORECASE), 0.90, "blake_wilbur_bldg", "location"),
+            (re.compile(r"\bPackard Children's\b", re.IGNORECASE), 0.90, "packard_childrens", "facility"),
+            (re.compile(r"\bPackard Children\b", re.IGNORECASE), 0.90, "packard_children", "facility"),
+            (re.compile(r"\bLucile\s+Salter\b", re.IGNORECASE), 0.90, "lucile_salter", "facility"),
+            (re.compile(r"\bLucile\s+Community\b", re.IGNORECASE), 0.85, "lucile_community", "facility"),
             # ── Concatenated location names (no space variants) ──
-            (re.compile(r"PaloAlto", re.IGNORECASE),
-             0.80, "paloalto_concat", "location"),
-            (re.compile(r"BlakeWilbur", re.IGNORECASE),
-             0.85, "blakewilbur_concat", "location"),
-            (re.compile(r"PasteurDrive", re.IGNORECASE),
-             0.90, "pasteurdrive_concat", "location"),
-            (re.compile(r"PasteurDr", re.IGNORECASE),
-             0.90, "pasteurdr_concat", "location"),
-
+            (re.compile(r"PaloAlto", re.IGNORECASE), 0.80, "paloalto_concat", "location"),
+            (re.compile(r"BlakeWilbur", re.IGNORECASE), 0.85, "blakewilbur_concat", "location"),
+            (re.compile(r"PasteurDrive", re.IGNORECASE), 0.90, "pasteurdrive_concat", "location"),
+            (re.compile(r"PasteurDr", re.IGNORECASE), 0.90, "pasteurdr_concat", "location"),
             # ── Spaced location names ──
-            (re.compile(r"Palo\s+Alto", re.IGNORECASE),
-             0.75, "palo_alto", "location"),
-            (re.compile(r"Blake\s+Wilbur", re.IGNORECASE),
-             0.85, "blake_wilbur", "location"),
-            (re.compile(r"Pasteur\s+Drive", re.IGNORECASE),
-             0.90, "pasteur_drive", "location"),
-            (re.compile(r"Pasteur\s+Dr\b", re.IGNORECASE),
-             0.90, "pasteur_dr", "location"),
-
+            (re.compile(r"Palo\s+Alto", re.IGNORECASE), 0.75, "palo_alto", "location"),
+            (re.compile(r"Blake\s+Wilbur", re.IGNORECASE), 0.85, "blake_wilbur", "location"),
+            (re.compile(r"Pasteur\s+Drive", re.IGNORECASE), 0.90, "pasteur_drive", "location"),
+            (re.compile(r"Pasteur\s+Dr\b", re.IGNORECASE), 0.90, "pasteur_dr", "location"),
             # ── Portal names ──
             (re.compile(r"\bMyHealth\b"), 0.80, "myhealth", "portal"),
             (re.compile(r"\bMyhealth\b"), 0.80, "myhealth_lc", "portal"),
             (re.compile(r"\bmyHealth\b"), 0.80, "myhealth_camel", "portal"),
             (re.compile(r"\bmyhealth\b"), 0.80, "myhealth_lower", "portal"),
             (re.compile(r"\bMYHEALTH\b"), 0.80, "myhealth_upper", "portal"),
-            (re.compile(r"\b[Mm][Yy][Hh]ea?th\b"),
-             0.75, "myheath_typo", "portal"),
-
+            (re.compile(r"\b[Mm][Yy][Hh]ea?th\b"), 0.75, "myheath_typo", "portal"),
             # ── Abbreviations ──
             (re.compile(r"\bSHC\b", re.IGNORECASE), 0.70, "shc", "abbreviation"),
             (re.compile(r"\bLPCH\b", re.IGNORECASE), 0.70, "lpch", "abbreviation"),
@@ -175,35 +140,27 @@ class InstitutionRecognizer(EntityRecognizer):
             (re.compile(r"\bShca\b"), 0.70, "shca_title", "abbreviation"),
             (re.compile(r"\bShce\b"), 0.70, "shce_title", "abbreviation"),
             (re.compile(r"\bSHCe\b"), 0.70, "shce_mixed", "abbreviation"),
-
             # ── Bare domain/compound names (catch-all for missed URLs) ──
-            (re.compile(r"\bPasteur\b", re.IGNORECASE),
-             0.60, "pasteur", "location"),
-            (re.compile(r"stanfordhealthcare", re.IGNORECASE),
-             0.90, "bare_shc", "name"),
-            (re.compile(r"stanfordhospital", re.IGNORECASE),
-             0.90, "bare_sh", "name"),
-            (re.compile(r"stanfordmed", re.IGNORECASE),
-             0.90, "bare_sm", "name"),
-
+            (re.compile(r"\bPasteur\b", re.IGNORECASE), 0.60, "pasteur", "location"),
+            (re.compile(r"stanfordhealthcare", re.IGNORECASE), 0.90, "bare_shc", "name"),
+            (re.compile(r"stanfordhospital", re.IGNORECASE), 0.90, "bare_sh", "name"),
+            (re.compile(r"stanfordmed", re.IGNORECASE), 0.90, "bare_sm", "name"),
             # ── Typos ──
             (re.compile(r"\bStandford\b"), 0.85, "standford_typo", "typo"),
             (re.compile(r"\bstandford\b"), 0.85, "standford_typo_lc", "typo"),
-
             # ── Core institution name (ordered: exact case first, then fallback) ──
             (re.compile(r"STANFORD"), 0.85, "stanford_upper", "name"),
             (re.compile(r"Stanford"), 0.85, "stanford_title", "name"),
             (re.compile(r"stanford"), 0.85, "stanford_lower", "name"),
-            (re.compile(r"stanford", re.IGNORECASE),
-             0.85, "stanford_mixed", "name"),
-
+            (re.compile(r"stanford", re.IGNORECASE), 0.85, "stanford_mixed", "name"),
             # ── Mail codes & unit codes ──
-            (re.compile(r"\bMC\s+\d{4,5}\b", re.IGNORECASE),
-             0.75, "mail_code", "location"),
-            (re.compile(
-                r"\b(?:Floor|ICU|MICU|SICU|NICU|PICU|CCU|HDU)-\d{4,6}\b",
-                re.IGNORECASE),
-             0.70, "unit_code", "location"),
+            (re.compile(r"\bMC\s+\d{4,5}\b", re.IGNORECASE), 0.75, "mail_code", "location"),
+            (
+                re.compile(r"\b(?:Floor|ICU|MICU|SICU|NICU|PICU|CCU|HDU)-\d{4,6}\b", re.IGNORECASE),
+                0.70,
+                "unit_code",
+                "location",
+            ),
         ]
 
     def __init__(
@@ -225,16 +182,10 @@ class InstitutionRecognizer(EntityRecognizer):
                                  Defaults to CATEGORY_ENTITY_MAP.
         """
         self._patterns = patterns if patterns is not None else self.stanford_patterns()
-        self._category_entity_map = (
-            category_entity_map if category_entity_map is not None
-            else self.CATEGORY_ENTITY_MAP
-        )
+        self._category_entity_map = category_entity_map if category_entity_map is not None else self.CATEGORY_ENTITY_MAP
         self._institution_name = institution_name
 
-        entities = sorted({
-            self._category_entity_map.get(cat, "HOSPITAL")
-            for _, _, _, cat in self._patterns
-        })
+        entities = sorted({self._category_entity_map.get(cat, "HOSPITAL") for _, _, _, cat in self._patterns})
 
         super().__init__(
             supported_entities=entities,
@@ -277,12 +228,16 @@ class InstitutionRecognizer(EntityRecognizer):
         Returns:
             Configured InstitutionRecognizer instance.
         """
-        with open(config_path) as f:
+        with Path(config_path).open() as f:
             cfg = json.load(f)
 
         valid_flags = {
-            "IGNORECASE", "MULTILINE", "DOTALL", "VERBOSE",
-            "ASCII", "UNICODE",
+            "IGNORECASE",
+            "MULTILINE",
+            "DOTALL",
+            "VERBOSE",
+            "ASCII",
+            "UNICODE",
         }
 
         patterns: list[tuple[re.Pattern, float, str, str]] = []
@@ -374,27 +329,17 @@ class InstitutionRecognizer(EntityRecognizer):
                 if is_subset:
                     continue
 
-                subsumed = {
-                    (es, ee)
-                    for es, ee in seen_spans
-                    if es >= start and ee <= end
-                }
+                subsumed = {(es, ee) for es, ee in seen_spans if es >= start and ee <= end}
                 if subsumed:
                     seen_spans -= subsumed
-                    results = [
-                        r for r in results
-                        if (r.start, r.end) not in subsumed
-                    ]
+                    results = [r for r in results if (r.start, r.end) not in subsumed]
 
                 seen_spans.add(span)
 
                 explanation = AnalysisExplanation(
                     recognizer=self.name,
                     original_score=score,
-                    textual_explanation=(
-                        f"{self._institution_name} pattern '{pattern_name}' "
-                        f"({category}) matched"
-                    ),
+                    textual_explanation=(f"{self._institution_name} pattern '{pattern_name}' ({category}) matched"),
                     pattern=pattern.pattern,
                 )
 
