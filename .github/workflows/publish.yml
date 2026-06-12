@@ -1,0 +1,126 @@
+name: Publish to PyPI
+
+# Manual publishing workflow. Select the git tag (vX.Y.Z) to release from the
+# "Use workflow from" ref picker, then choose the target:
+#   - testpypi: build + upload to TestPyPI only (default, safe dry run)
+#   - both:     upload to TestPyPI, then promote to production PyPI
+#
+# Authentication uses PyPI Trusted Publishing (OIDC) — no API tokens are stored.
+# See docs/PUBLISHING.md for the one-time PyPI/TestPyPI/GitHub Environment setup.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        type: choice
+        options:
+          - testpypi
+          - both
+        default: testpypi
+      version:
+        description: "First-release bootstrap only: version to build when no clean tag exists (e.g. 1.0.0). Leave blank for normal tag-based releases."
+        type: string
+        default: ""
+
+# Restrict all jobs to read-only by default (satisfies Token-Permissions check).
+# The publish jobs request id-token: write explicitly for OIDC.
+permissions: read-all
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Full history + tags are required for hatch-vcs to derive the version.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        env:
+          # First-release bootstrap: when a clean vX.Y.Z tag does not yet contain
+          # this workflow, pass `version` to override the hatch-vcs (setuptools_scm)
+          # derived version. Empty string is a no-op, so normal tag-based releases
+          # are unaffected.
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
+        run: uv build
+
+      - name: Guard against non-release versions
+        # PyPI rejects PEP 440 local versions (the "+g<sha>" / ".devN" suffixes
+        # hatch-vcs emits on untagged commits). Fail fast unless a version was
+        # explicitly supplied for the first-release bootstrap.
+        run: |
+          set -euo pipefail
+          version="$(ls dist/*.whl | sed -E 's/.*tide2-([^-]+)-py3.*/\1/')"
+          echo "Built version: $version"
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "Bootstrap version override in effect; skipping clean-tag check."
+            exit 0
+          fi
+          case "$version" in
+            *+*|*dev*)
+              echo "::error::Version '$version' is not a clean release version. Run this workflow from a vX.Y.Z tag, or set the 'version' input for a first-release bootstrap." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Validate package metadata
+        run: uvx twine check dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/tide2
+    permissions:
+      # Required for Trusted Publishing (OIDC).
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    needs: publish-testpypi
+    if: inputs.target == 'both'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tide2
+    permissions:
+      # Required for Trusted Publishing (OIDC).
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
