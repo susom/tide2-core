@@ -147,10 +147,6 @@ prerelease = false
 match = "development"
 prerelease = true
 
-[tool.semantic_release.branches."v*"]
-match = "^v\\d+\\.\\d+$"
-prerelease = false
-
 [tool.semantic_release.commit_parser_options]
 allowed_tags = [
     "build",
@@ -287,7 +283,7 @@ packages = ["src/tide2"]
 allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/README.md", "/LICENSE"]
+include = ["/src", "/README.md", "/LICENSE-MIT"]
 exclude = [
     "/.git",
     "/.gitignore",
