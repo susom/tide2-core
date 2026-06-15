@@ -137,12 +137,11 @@ class TestLlmModelTokenConfiguration:
     @patch("tide2.utils.llm_model.genai")
     def test_get_model_input_token_limit_missing_attribute(self, mock_genai):
         """Test handling when input_token_limit attribute is missing."""
-        # Setup mock where model_info doesn't have input_token_limit attribute
+        # Setup mock where model_info doesn't have input_token_limit attribute.
+        # Use a spec-restricted mock so getattr(model_info, "input_token_limit", None)
+        # reliably returns None instead of auto-creating a child Mock.
         mock_client = Mock()
-        mock_model_info = Mock()
-        # Remove the input_token_limit attribute completely
-        if hasattr(mock_model_info, "input_token_limit"):
-            delattr(mock_model_info, "input_token_limit")
+        mock_model_info = Mock(spec=[])
         mock_client.models.get.return_value = mock_model_info
         mock_genai.Client.return_value = mock_client
 

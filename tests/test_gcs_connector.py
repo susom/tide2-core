@@ -601,29 +601,86 @@ class TestGCSConnectorDelete:
 
 
 class TestGCSConnectorIntegration:
-    """Integration test cases that test multiple methods working together."""
+    """Integration test cases that test multiple methods working together (fully mocked)."""
 
     @patch("tide2.utils.gcs_connector.storage.Client")
     def setup_method(self, method, mock_client):
         """Set up test fixtures."""
         self.connector = GCSConnector("test-project", max_workers=2)
+        self.connector.retry_multiplier = 0
         self.mock_client = mock_client.return_value
+        self.mock_bucket = Mock()
+        self.mock_blob = Mock()
 
-    def test_upload_then_download_workflow(self):
-        """Test a complete upload then download workflow."""
-        # This would test the interaction between upload and download methods
-        # In a real scenario, you might upload files then download them back
-        pass
+        self.mock_client.bucket.return_value = self.mock_bucket
+        self.mock_bucket.blob.return_value = self.mock_blob
+
+    @patch("os.path.exists", return_value=True)
+    @patch("os.path.getsize", return_value=2048)
+    def test_upload_then_download_workflow(self, mock_getsize, mock_exists):
+        """Test a complete upload then download workflow against a mocked bucket."""
+        # Upload leg: the blob accepts the file without error.
+        self.mock_blob.upload_from_filename.return_value = None
+
+        upload_ok = self.connector.upload_single_file("test-bucket", "/tmp/source.txt", "data/source.txt")
+
+        assert upload_ok is True
+        self.mock_blob.upload_from_filename.assert_called_once_with("/tmp/source.txt")
+
+        # Download leg: the same blob now reports a size and downloads cleanly.
+        self.mock_blob.reload.return_value = None
+        self.mock_blob.size = 2048
+        self.mock_blob.download_to_filename.return_value = None
+
+        download_ok = self.connector.download_single_file("test-bucket", "data/source.txt", "/tmp/dest.txt")
+
+        assert download_ok is True
+        self.mock_blob.download_to_filename.assert_called_once_with("/tmp/dest.txt")
+        # Both legs addressed the same bucket and blob.
+        self.mock_client.bucket.assert_called_with("test-bucket")
+        self.mock_bucket.blob.assert_called_with("data/source.txt")
 
     def test_list_then_delete_workflow(self):
-        """Test listing files then deleting them."""
-        # This would test the interaction between list and delete methods
-        pass
+        """Test listing files by pattern then deleting exactly those matches."""
+        mock_blob1 = Mock()
+        mock_blob1.name = "data/file1.txt"
+        mock_blob2 = Mock()
+        mock_blob2.name = "data/file2.txt"
+        mock_blob3 = Mock()
+        mock_blob3.name = "data/keep.json"  # Should not match "*.txt"
 
-    def test_concurrent_operations_limit(self):
-        """Test that concurrent operations respect the max_workers limit."""
-        # This would test that the ThreadPoolExecutor is properly configured
-        pass
+        self.mock_bucket.list_blobs.return_value = [mock_blob1, mock_blob2, mock_blob3]
+
+        listed = self.connector.list_files_by_pattern("test-bucket", "*.txt", "data/")
+        assert listed == ["data/file1.txt", "data/file2.txt"]
+
+        # Feed the listing straight into a delete and confirm only those blobs are deleted.
+        with patch.object(self.connector, "delete_multiple_files") as mock_delete_multiple:
+            mock_delete_multiple.return_value = dict.fromkeys(listed, True)
+
+            delete_specs = [("test-bucket", blob_name) for blob_name in listed]
+            results = self.connector.delete_multiple_files(delete_specs)
+
+            mock_delete_multiple.assert_called_once_with(delete_specs)
+            assert results == {"data/file1.txt": True, "data/file2.txt": True}
+
+    @patch("tide2.utils.gcs_connector.as_completed", side_effect=list)
+    @patch("tide2.utils.gcs_connector.ThreadPoolExecutor")
+    def test_concurrent_operations_limit(self, mock_executor, mock_as_completed):
+        """Test that concurrent operations size the ThreadPoolExecutor with max_workers."""
+        mock_future = Mock()
+        mock_future.result.return_value = True
+
+        mock_executor_instance = Mock()
+        mock_executor.return_value.__enter__.return_value = mock_executor_instance
+        mock_executor_instance.submit.return_value = mock_future
+
+        download_specs = [("bucket", "blob1", "/tmp/file1"), ("bucket", "blob2", "/tmp/file2")]
+        self.connector.download_multiple_files(download_specs)
+
+        # The pool must be created with the connector's configured worker cap.
+        mock_executor.assert_called_once_with(max_workers=2)
+        assert mock_executor_instance.submit.call_count == 2
 
 
 if __name__ == "__main__":
