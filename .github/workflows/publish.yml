@@ -6,7 +6,7 @@ name: Publish to PyPI
 #   - both:     upload to TestPyPI, then promote to production PyPI
 #
 # Authentication uses PyPI Trusted Publishing (OIDC) — no API tokens are stored.
-# See docs/PUBLISHING.md for the one-time PyPI/TestPyPI/GitHub Environment setup.
+# See PUBLISHING.md for the one-time PyPI/TestPyPI/GitHub Environment setup.
 on:
   workflow_dispatch:
     inputs:
@@ -93,6 +93,10 @@ jobs:
     permissions:
       # Required for Trusted Publishing (OIDC).
       id-token: write
+      # Required to download the dist artifact (job-level permissions replace the
+      # workflow-level read-all default, so the read scopes must be restated).
+      contents: read
+      actions: read
     steps:
       - name: Download dist artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -115,6 +119,10 @@ jobs:
     permissions:
       # Required for Trusted Publishing (OIDC).
       id-token: write
+      # Required to download the dist artifact (job-level permissions replace the
+      # workflow-level read-all default, so the read scopes must be restated).
+      contents: read
+      actions: read
     steps:
       - name: Download dist artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
