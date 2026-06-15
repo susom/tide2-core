@@ -28,6 +28,7 @@ High-performance recognizers (faster regex-only, used as default in workflows):
 - AccessionRecognizer: High-performance accession number detection (23x faster)
 - SsnRecognizer: High-performance US SSN detection (10-20x faster than Presidio)
 - AddressRecognizer: High-performance US address detection using usaddress library
+- InstitutionRecognizer: Institution-specific PHI detection (ships with Stanford Health Care patterns)
 
 Note: For batch processing, use the runner module:
     from tide2.runner import LocalJobRunner
@@ -46,6 +47,7 @@ from .cached_results_transformers_recognizer import create_cached_recognizer
 from .email_recognizer import EmailRecognizer
 from .genetic_sequence_recognizer import GeneticSequenceRecognizer
 from .har_recognizer import HarRecognizer
+from .institution_recognizer import InstitutionRecognizer
 from .known_values import KnownValuesRecognizer
 from .known_values import create_recognizers_for_patient
 from .llm_json_recognizer import LlmJsonRecognizer
@@ -73,6 +75,7 @@ __all__ = [
     "EmailRecognizer",
     "GeneticSequenceRecognizer",
     "HarRecognizer",
+    "InstitutionRecognizer",
     "KnownValuesRecognizer",
     "LlmJsonRecognizer",
     "MrnRecognizer",
