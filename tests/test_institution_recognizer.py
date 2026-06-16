@@ -625,14 +625,14 @@ class TestShieldEntityTypes:
 class TestDomainDotEdgeCase:
     """Domain patterns must require at least one char after the dot."""
 
-    def test_bare_domain_dot_not_matched_as_url(self):
+    def test_bare_domain_dot_not_matched_as_url(self, recognizer):
         text = "Visit stanfordmed. More info later."
-        results = _detect(text, ["URL"])
+        results = _detect(recognizer, text, ["URL"])
         url_texts = [text[r.start : r.end] for r in results if r.entity_type == "URL"]
         assert "stanfordmed" not in url_texts
 
-    def test_domain_with_path_still_matches(self):
+    def test_domain_with_path_still_matches(self, recognizer):
         text = "Visit stanfordmed.org/portal for info."
-        results = _detect(text, ["URL"])
+        results = _detect(recognizer, text, ["URL"])
         url_texts = [text[r.start : r.end] for r in results if r.entity_type == "URL"]
         assert any("stanfordmed.org" in t for t in url_texts)
