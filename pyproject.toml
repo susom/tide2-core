@@ -40,18 +40,16 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    # LLM and AI providers
-    "anthropic",
-    "google-cloud-aiplatform[prediction]",
-    "google-genai",
-    "openai",
     # Google Cloud services
     "db-dtypes", # implicit: required by bigquery.to_dataframe() for pandas dtype mapping
     "google-cloud-bigquery",
     "google-cloud-storage",
-    # NLP (CPU-only components)
+    # NLP and ML-based entity recognition (required: no model runs without these)
     "presidio-analyzer",
     "presidio-anonymizer",
+    "spacy>=3.8.0",
+    "torch",
+    "transformers>=5.0.0",
     # Data processing
     "numpy",
     "intervaltree>=3.1.0",
@@ -65,9 +63,11 @@ dependencies = [
     "usaddress",
     # Orchestration
     "ray[default,data]>=2.54.0",
+    "aiohttp>=3.14.0", # transitive via ray[default]; pinned for security/compat
     # Web and CLI
     "httpx>=0.25.0",
     "streamlit",
+    "starlette>=1.0.1", # transitive via streamlit/fastapi; pinned for security/compat
     # Utilities
     "psutil",
     "pyyaml>=6.0",
@@ -75,17 +75,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = [
-    "presidio-analyzer[transformers]",
-    "spacy>=3.8.0",
-    "torch",
-    "transformers",
+
+llm = [
+    "anthropic",
+    "google-cloud-aiplatform",
+    "google-genai",
+    "openai"
 ]
+
 evaluation = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.0",
 ]
 dev = [
     "pytest>=7.4.0",
@@ -101,7 +102,6 @@ dev = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.0",
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
     "python-semantic-release>=10.5.3",
@@ -324,17 +324,10 @@ exclude_lines = [
 ]
 
 [dependency-groups]
-gpu = [
-    "presidio-analyzer[transformers]",
-    "spacy>=3.8.0",
-    "torch",
-    "transformers",
-]
 evaluation = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.0",
 ]
 dev = [
     "pytest>=7.4.0",
