@@ -110,9 +110,11 @@ uv pip install --python /tmp/tide2-check/bin/python \
 After the production release:
 
 ```bash
-uv pip install tide2          # base install (CPU)
-uv pip install 'tide2[gpu]'   # add spaCy / torch / transformers for ML recognizers
+uv pip install tide2          # full install: includes the ML stack (spaCy / torch / transformers)
+uv pip install 'tide2[llm]'   # add LLM provider SDKs for the optional LLM-based recognizer
 ```
 
-The base install is CPU-only; the heavy ML stack (`spacy`, `torch`,
-`transformers`) lives in the `gpu` extra so `pip install tide2` stays lean.
+The ML inference stack (`spacy`, `torch`, `transformers`) is **required** and
+ships in the base install — no model can run without it. The optional `llm`
+extra adds the LLM provider SDKs (`anthropic`, `openai`, `google-genai`,
+`google-cloud-aiplatform`) for the LLM-based recognizer.

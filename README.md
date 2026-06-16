@@ -202,15 +202,15 @@ make test-docker    # build the test target and run the suite in Docker
 
 ## Dependency Groups
 
-- **`dev`**: Development tools (`pytest`, `pytest-cov`, `ty`, `ruff`, `pre-commit`), Jupyter, and the `evaluation` libraries (`scikit-learn`, `scipy`, `tqdm`, `umap-learn`)
-- **`evaluation`**: Evaluation/analysis libraries (`scikit-learn`, `scipy`, `tqdm`, `umap-learn`)
+- **`llm`**: LLM provider SDKs for the optional LLM-based recognizer (`anthropic`, `openai`, `google-genai`, `google-cloud-aiplatform`)
+- **`dev`**: Development tools (`pytest`, `pytest-cov`, `ty`, `ruff`, `pre-commit`), Jupyter, and the `evaluation` libraries (`scikit-learn`, `scipy`, `tqdm`)
+- **`evaluation`**: Evaluation/analysis libraries (`scikit-learn`, `scipy`, `tqdm`)
 - **`test`**: Minimal test dependencies (`pytest`, `pytest-cov`)
-- **`gpu`**: ML inference stack (`torch`, `transformers`, `spacy`, `presidio-analyzer[transformers]`)
 - **`docs`**: API documentation generation (`pdoc`)
 
 Install an optional group as an extra with `uv sync --extra <name>`, or all extras with `uv sync --all-extras`. (These same sets are also defined as `[dependency-groups]`, usable with `uv sync --group <name>`.)
 
-Note: GCP, CLI, and Presidio dependencies ship in the main package by default. The transformer/NER ML stack (`torch`, `transformers`, `spacy`) lives in the `gpu` extra — install it with `uv sync --extra gpu` before running transformer or pipeline jobs.
+Note: The full ML inference stack (`torch`, `transformers`, `spacy`) ships in the main package by default — it is required, since no model can run without it. The `llm` extra is only needed for the optional LLM-based recognizer.
 
 ## Architecture
 
@@ -280,8 +280,9 @@ API documentation is hosted via GitHub Pages: [https://susom.github.io/tide2/](h
 To build or preview docs locally (generated with [pdoc](https://pdoc.dev/)):
 
 ```bash
-# Install docs dependencies (pdoc); also needs the gpu extra so all modules import
-uv sync --extra docs --extra gpu
+# Install docs dependencies (pdoc); the ML stack ships in the base install,
+# so all modules import without an extra
+uv sync --extra docs
 
 # Live preview (opens a local server with hot reload)
 make docs-serve
@@ -305,7 +306,7 @@ Pages artifact.
 - **Python**: 3.12 (required, `>=3.12,<3.13`) — constrained to 3.12 for compatibility with the `spacy`/`thinc` C-extension stack and other pinned dependencies.
 - **Package Manager**: uv (not pip or poetry)
 - **Virtual Environment**: `.venv/` (activated automatically in the Dev Container; must be activated manually for local installs)
-- **Core Dependencies**: Presidio, Ray (`>=2.54`), Cryptography, Faker, Google Cloud libraries; `torch`/`transformers`/`spacy` in the optional `gpu` extra
+- **Core Dependencies**: Presidio, Ray (`>=2.54`), Cryptography, Faker, Google Cloud libraries, and the ML inference stack (`torch`, `transformers>=5.0`, `spacy`) — all required and shipped in the base install
 
 ## Security Considerations
 
