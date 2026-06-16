@@ -25,12 +25,14 @@ def _is_llm_sdk_module(module_name: str | None) -> bool:
 
 
 def reraise_missing_llm_sdk(feature: str, exc: ModuleNotFoundError) -> None:
-    """Re-raise a missing-import error with LLM-extra install guidance.
+    """Raise LLM-extra install guidance when ``exc`` is a missing optional SDK.
 
     If ``exc`` reports a module that is part of the ``[llm]`` extra, raise a
-    clear message telling the user to install it. Otherwise the error is a real
-    internal import failure (e.g. a missing ``tide2.*`` module) and is
-    re-raised unchanged so it is not masked.
+    clear ``ModuleNotFoundError`` telling the user to install it. Otherwise the
+    error is a real internal import failure (e.g. a missing ``tide2.*`` module):
+    this function returns without raising so the caller can re-raise the
+    original exception with ``raise`` in its own ``except`` block, leaving the
+    traceback unchanged (no helper frame) so the bug is not masked.
     """
     if _is_llm_sdk_module(exc.name):
         raise ModuleNotFoundError(
@@ -38,4 +40,3 @@ def reraise_missing_llm_sdk(feature: str, exc: ModuleNotFoundError) -> None:
             "Install them with `pip install 'tide2[llm]'` (or `uv sync --extra llm`).",
             name=exc.name,
         ) from exc
-    raise exc

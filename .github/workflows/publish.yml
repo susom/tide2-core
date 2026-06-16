@@ -76,10 +76,15 @@ jobs:
           fi
           version="$(basename "$wheel" | cut -d- -f2)"
           echo "Built version: $version"
-          if [ -n "${{ inputs.version }}" ]; then
-            echo "Bootstrap version override in effect; skipping clean-tag check."
-            exit 0
+          # When a bootstrap override is supplied, the built wheel must actually
+          # carry it: if hatch-vcs ignored SETUPTOOLS_SCM_PRETEND_VERSION the
+          # build would silently publish the derived (e.g. +local/.dev) version.
+          if [ -n "${{ inputs.version }}" ] && [ "$version" != "${{ inputs.version }}" ]; then
+            echo "::error::Built version '$version' does not match the requested override '${{ inputs.version }}'." >&2
+            exit 1
           fi
+          # Always enforce a clean release version, even for bootstrap overrides:
+          # PyPI rejects local/dev versions.
           case "$version" in
             *+*|*dev*)
               echo "::error::Version '$version' is not a clean release version. Run this workflow from a vX.Y.Z tag, or set the 'version' input for a first-release bootstrap." >&2

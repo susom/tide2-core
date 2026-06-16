@@ -75,6 +75,7 @@ def __getattr__(name: str):
             from tide2._optional import reraise_missing_llm_sdk
 
             reraise_missing_llm_sdk("LlmJsonRecognizer", exc)
+            raise  # real internal import failure: propagate unchanged
 
         return LlmJsonRecognizer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
