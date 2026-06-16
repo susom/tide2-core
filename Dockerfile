@@ -151,7 +151,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY --chown=${USER}:${GROUP} pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/home/${USER}/.cache/uv,uid=${USER_UID},gid=${USER_GID} \
-    uv sync --locked --no-install-project --no-dev --group gpu
+    uv sync --locked --no-install-project --no-dev
 
 # Copy project files
 COPY --chown=${USER}:${GROUP} README.md LICENSE ./
@@ -159,7 +159,7 @@ COPY --chown=${USER}:${GROUP} src ./src
 
 # Install the project
 RUN --mount=type=cache,target=/home/${USER}/.cache/uv,uid=${USER_UID},gid=${USER_GID} \
-    uv sync --locked --no-dev --group gpu
+    uv sync --locked --no-dev
 
 # NVIDIA runtime environment variables (mounted by GKE)
 ARG DOCKER_REGISTRY=
