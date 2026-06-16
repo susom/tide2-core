@@ -80,23 +80,29 @@ jobs:
         id: push_base
         run: |
           before="${{ github.event.before }}"
-          default_branch="${{ github.event.repository.default_branch }}"
-          # Fall back to diffing against the default branch when the "before" SHA
-          # is unusable as a git revision. This happens on a brand-new branch
+          # Integration branch feature branches are cut from. Falls back to the
+          # repo default branch if it does not exist, so the workflow stays valid
+          # for any repo/branch layout.
+          base_branch="development"
+          if ! git ls-remote --exit-code --heads origin "$base_branch" >/dev/null 2>&1; then
+            base_branch="${{ github.event.repository.default_branch }}"
+          fi
+          # Fall back to diffing against the base branch when the "before" SHA is
+          # unusable as a git revision. This happens on a brand-new branch
           # (all-zeros sentinel) and after a force-push/rebase (the previous tip
           # is orphaned and no longer exists in the repo).
-          use_default=false
+          use_base=false
           if [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            use_default=true
+            use_base=true
           else
             git fetch --depth=1 origin "$before" 2>/dev/null || true
             if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
-              use_default=true
+              use_base=true
             fi
           fi
-          if [ "$use_default" = true ]; then
-            git fetch --depth=1 origin "$default_branch"
-            echo "from_ref=origin/$default_branch" >> "$GITHUB_OUTPUT"
+          if [ "$use_base" = true ]; then
+            git fetch --depth=1 origin "$base_branch"
+            echo "from_ref=origin/$base_branch" >> "$GITHUB_OUTPUT"
           else
             echo "from_ref=$before" >> "$GITHUB_OUTPUT"
           fi
