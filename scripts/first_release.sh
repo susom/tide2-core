@@ -38,8 +38,9 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([abrc.][0-9a-z.]+)?$ ]]; then
-  echo "error: '$VERSION' is not a PEP 440 release version (e.g. 1.0.0)." >&2
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$ ]]; then
+  echo "error: '$VERSION' is not a clean X.Y.Z release version (optionally aN/bN/rcN, e.g. 1.0.0 or 1.0.0rc1)." >&2
+  echo "       .devN and local versions are rejected because the publish workflow refuses them." >&2
   exit 1
 fi
 

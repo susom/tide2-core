@@ -60,7 +60,14 @@ jobs:
         # explicitly supplied for the first-release bootstrap.
         run: |
           set -euo pipefail
-          version="$(ls dist/*.whl | sed -E 's/.*tide2-([^-]+)-py3.*/\1/')"
+          # Pick one wheel deterministically and parse the version from the
+          # standard wheel filename: {name}-{version}-{pytag}-{abitag}-{plat}.whl
+          wheel="$(find dist -maxdepth 1 -name '*.whl' | sort | head -n1)"
+          if [ -z "$wheel" ]; then
+            echo "::error::No wheel found in dist/." >&2
+            exit 1
+          fi
+          version="$(basename "$wheel" | cut -d- -f2)"
           echo "Built version: $version"
           if [ -n "${{ inputs.version }}" ]; then
             echo "Bootstrap version override in effect; skipping clean-tag check."

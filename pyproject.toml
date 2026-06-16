@@ -45,6 +45,7 @@ dependencies = [
     "google-cloud-bigquery",
     "google-cloud-storage",
     # NLP and ML-based entity recognition (required: no model runs without these)
+    "accelerate", # required by transformers for device_map="auto" (device="auto")
     "presidio-analyzer",
     "presidio-anonymizer",
     "spacy>=3.8.0",
@@ -67,7 +68,7 @@ dependencies = [
     # Web and CLI
     "httpx>=0.25.0",
     "streamlit",
-    "starlette>=1.0.1", # transitive via streamlit/fastapi; pinned for security/compat
+    "starlette>=1.0.1", # transitive via streamlit; pinned for security/compat
     # Utilities
     "psutil",
     "pyyaml>=6.0",
@@ -325,6 +326,12 @@ exclude_lines = [
 ]
 
 [dependency-groups]
+llm = [
+    "anthropic",
+    "google-cloud-aiplatform",
+    "google-genai",
+    "openai",
+]
 evaluation = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",

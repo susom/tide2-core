@@ -100,13 +100,13 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY --chown=${USER}:${GROUP} pyproject.toml uv.lock ./
 
 RUN --mount=type=cache,target=/home/${USER}/.cache/uv,uid=${USER_UID},gid=${USER_GID} \
-    uv sync --locked --no-install-project --no-dev --no-group gpu
+    uv sync --locked --no-install-project --no-dev
 
-COPY --chown=${USER}:${GROUP} README.md LICENSE ./
+COPY --chown=${USER}:${GROUP} README.md LICENSE-MIT ./
 COPY --chown=${USER}:${GROUP} src ./src
 
 RUN --mount=type=cache,target=/home/${USER}/.cache/uv,uid=${USER_UID},gid=${USER_GID} \
-    uv sync --locked --no-dev --no-group gpu
+    uv sync --locked --no-dev
 
 ARG DOCKER_REGISTRY=
 ARG DOCKER_IMAGE_CPU=tide2-cpu
@@ -154,7 +154,7 @@ RUN --mount=type=cache,target=/home/${USER}/.cache/uv,uid=${USER_UID},gid=${USER
     uv sync --locked --no-install-project --no-dev
 
 # Copy project files
-COPY --chown=${USER}:${GROUP} README.md LICENSE ./
+COPY --chown=${USER}:${GROUP} README.md LICENSE-MIT ./
 COPY --chown=${USER}:${GROUP} src ./src
 
 # Install the project
@@ -243,7 +243,7 @@ COPY --chown=${USER}:${GROUP} pyproject.toml uv.lock ./
 
 RUN uv sync --no-install-project --frozen
 
-COPY --chown=${USER}:${GROUP} README.md LICENSE ./
+COPY --chown=${USER}:${GROUP} README.md LICENSE-MIT ./
 COPY --chown=${USER}:${GROUP} src ./src
 COPY --chown=${USER}:${GROUP} tests ./tests
 COPY --chown=${USER}:${GROUP} conftest.py ./

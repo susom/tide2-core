@@ -187,8 +187,8 @@ tide2-visualizer
 
 Several targets are built from a single multi-stage `Dockerfile`:
 
-- `production-cpu` — slim CPU-only image (no CUDA, no `gpu` dependency group). Used by recognizer, anonymizer, and BigQuery tasks.
-- `production-gpu` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`, includes the `gpu` dependency group (`torch`, `transformers`, `spacy`). Used by transformer inference.
+- `production-cpu` — slim CPU-only image (no CUDA). Used by recognizer, anonymizer, and BigQuery tasks.
+- `production-gpu` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`. Used by transformer inference. (The ML stack — `torch`, `transformers`, `spacy` — ships in both images, since it is a required core dependency.)
 - `development` — Dev Container target with `git`, `gcloud`, build tools, and the full dev environment.
 - `test` — extends `development` and runs the test suite (used by `make test-docker`).
 

@@ -515,8 +515,8 @@ class TransformerCore:
                 aggregated_results.append([])
                 continue
 
-            # Remove duplicates
-            deduped_preds = [dict(t) for t in {tuple(d.items()) for d in raw_preds}]
+            # Remove duplicates (sort items so the dedupe key is independent of dict insertion order)
+            deduped_preds = [dict(t) for t in {tuple(sorted(d.items())) for d in raw_preds}]
 
             # Aggregate BIO tokens
             aggregated = aggregate_bio_tokens(deduped_preds, text)

@@ -50,7 +50,6 @@ from .har_recognizer import HarRecognizer
 from .institution_recognizer import InstitutionRecognizer
 from .known_values import KnownValuesRecognizer
 from .known_values import create_recognizers_for_patient
-from .llm_json_recognizer import LlmJsonRecognizer
 from .mrn_recognizer import MrnRecognizer
 from .passthrough_recognizer import PassthroughRecognizer
 from .phone_recognizer import PhoneRecognizer
@@ -59,11 +58,20 @@ from .url_recognizer import UrlRecognizer
 
 
 def __getattr__(name: str):
-    """Lazy import for torch-dependent recognizers."""
+    """Lazy import for recognizers with heavy/optional dependencies.
+
+    ``TransformersRecognizer`` pulls in torch; ``LlmJsonRecognizer`` pulls in
+    the provider SDKs from the optional ``[llm]`` extra. Importing them lazily
+    keeps ``import tide2.recognizers`` working without those extras installed.
+    """
     if name == "TransformersRecognizer":
         from .transformers_recognizer import TransformersRecognizer
 
         return TransformersRecognizer
+    if name == "LlmJsonRecognizer":
+        from .llm_json_recognizer import LlmJsonRecognizer
+
+        return LlmJsonRecognizer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
