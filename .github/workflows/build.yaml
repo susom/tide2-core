@@ -80,10 +80,21 @@ jobs:
         id: push_base
         run: |
           before="${{ github.event.before }}"
-          # On a brand-new branch, github.event.before is all-zeros and cannot be
-          # used as a git revision. Fall back to diffing against the default branch.
+          default_branch="${{ github.event.repository.default_branch }}"
+          # Fall back to diffing against the default branch when the "before" SHA
+          # is unusable as a git revision. This happens on a brand-new branch
+          # (all-zeros sentinel) and after a force-push/rebase (the previous tip
+          # is orphaned and no longer exists in the repo).
+          use_default=false
           if [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            default_branch="${{ github.event.repository.default_branch }}"
+            use_default=true
+          else
+            git fetch --depth=1 origin "$before" 2>/dev/null || true
+            if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+              use_default=true
+            fi
+          fi
+          if [ "$use_default" = true ]; then
             git fetch --depth=1 origin "$default_branch"
             echo "from_ref=origin/$default_branch" >> "$GITHUB_OUTPUT"
           else
