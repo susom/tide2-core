@@ -21,7 +21,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv sync --extra docs   # docs=pdoc; the ML stack (torch/transformers/spacy) ships in the base install
+      - run: uv sync --extra docs --extra llm   # docs=pdoc; llm SDKs needed because pdoc imports every module (incl. tide2.utils.llm_model). The ML stack (torch/transformers/spacy) ships in the base install.
       - run: uv run make docs                    # reuses Makefile target (+ pyarrow workaround)
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

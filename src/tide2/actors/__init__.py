@@ -51,7 +51,13 @@ def __getattr__(name: str):
 
         return getattr(_mod, name)
     if name == "LlmRecognizerActor":
-        from tide2.actors.llm_recognizer import LlmRecognizerActor as _LlmRecognizerActor
+        try:
+            from tide2.actors.llm_recognizer import LlmRecognizerActor as _LlmRecognizerActor
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "LlmRecognizerActor requires the optional LLM provider SDKs. "
+                "Install them with `pip install 'tide2[llm]'` (or `uv sync --extra llm`)."
+            ) from exc
 
         return _LlmRecognizerActor
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -69,7 +69,13 @@ def __getattr__(name: str):
 
         return TransformersRecognizer
     if name == "LlmJsonRecognizer":
-        from .llm_json_recognizer import LlmJsonRecognizer
+        try:
+            from .llm_json_recognizer import LlmJsonRecognizer
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "LlmJsonRecognizer requires the optional LLM provider SDKs. "
+                "Install them with `pip install 'tide2[llm]'` (or `uv sync --extra llm`)."
+            ) from exc
 
         return LlmJsonRecognizer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

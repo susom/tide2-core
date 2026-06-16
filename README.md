@@ -275,14 +275,15 @@ Coverage is configured in `pyproject.toml` and runs automatically with `pytest`.
 
 ### API Reference
 
-API documentation is hosted via GitHub Pages: [https://susom.github.io/tide2/](https://susom.github.io/tide2/)
+API documentation is hosted via GitHub Pages: [https://susom.github.io/tide2-core/](https://susom.github.io/tide2-core/)
 
 To build or preview docs locally (generated with [pdoc](https://pdoc.dev/)):
 
 ```bash
-# Install docs dependencies (pdoc); the ML stack ships in the base install,
-# so all modules import without an extra
-uv sync --extra docs
+# Install docs dependencies. pdoc imports every module (including the LLM
+# utilities), so the `llm` extra is required in addition to `docs`. The ML
+# stack (torch/transformers/spacy) ships in the base install.
+uv sync --extra docs --extra llm
 
 # Live preview (opens a local server with hot reload)
 make docs-serve
