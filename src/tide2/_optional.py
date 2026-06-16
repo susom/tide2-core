@@ -35,6 +35,7 @@ def reraise_missing_llm_sdk(feature: str, exc: ModuleNotFoundError) -> None:
     if _is_llm_sdk_module(exc.name):
         raise ModuleNotFoundError(
             f"{feature} requires the optional LLM provider SDKs (missing {exc.name!r}). "
-            "Install them with `pip install 'tide2[llm]'` (or `uv sync --extra llm`)."
+            "Install them with `pip install 'tide2[llm]'` (or `uv sync --extra llm`).",
+            name=exc.name,
         ) from exc
     raise exc

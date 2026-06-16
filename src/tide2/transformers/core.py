@@ -28,6 +28,19 @@ logger = logging.getLogger(__name__)
 _RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
 
 
+def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
+    """Remove duplicate raw BIO predictions (can occur from chunking).
+
+    The dedupe key is built from the fixed prediction schema in a stable order
+    so it does not depend on dict insertion order (O(k) per dict, no per-key
+    sort).
+    """
+    return [
+        dict(zip(_RAW_PRED_KEYS, key, strict=True))
+        for key in {tuple(d[k] for k in _RAW_PRED_KEYS) for d in raw_predictions}
+    ]
+
+
 class TransformerCore:
     """
     Core transformer inference engine used by both Presidio and Ray wrappers.
@@ -496,7 +509,7 @@ class TransformerCore:
             return []
 
         # Remove duplicates (can occur from chunking at caller level)
-        raw_predictions = [dict(t) for t in {tuple(d.items()) for d in raw_predictions}]
+        raw_predictions = _dedupe_raw_predictions(raw_predictions)
 
         # Aggregate BIO tokens
         return aggregate_bio_tokens(raw_predictions, text)
@@ -519,13 +532,8 @@ class TransformerCore:
                 aggregated_results.append([])
                 continue
 
-            # Remove duplicates. Build the dedupe key from the fixed prediction
-            # schema in a stable order so it does not depend on dict insertion
-            # order (O(k) per dict, no per-key sort).
-            deduped_preds = [
-                dict(zip(_RAW_PRED_KEYS, key, strict=True))
-                for key in {tuple(d[k] for k in _RAW_PRED_KEYS) for d in raw_preds}
-            ]
+            # Remove duplicates (can occur from chunking at caller level)
+            deduped_preds = _dedupe_raw_predictions(raw_preds)
 
             # Aggregate BIO tokens
             aggregated = aggregate_bio_tokens(deduped_preds, text)
