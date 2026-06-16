@@ -45,6 +45,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Reject version override on a tag release
+        # `version` is a first-release bootstrap override for when no clean tag
+        # yet contains this workflow. Running from a vX.Y.Z tag must use the
+        # tag-derived version, so refuse the combination to avoid publishing a
+        # wheel whose version disagrees with the tag.
+        if: github.ref_type == 'tag' && inputs.version != ''
+        run: |
+          echo "::error::The 'version' input is for first-release bootstrap only. When releasing from a tag (${{ github.ref_name }}), leave it blank so the tag-derived version is used." >&2
+          exit 1
+
       - name: Build sdist and wheel
         env:
           # First-release bootstrap: when a clean vX.Y.Z tag does not yet contain

@@ -73,6 +73,21 @@ echo "==> Sanity-check the build produces a clean version locally"
 rm -rf dist
 SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION" uv build >/dev/null
 uvx twine check dist/* >/dev/null
+
+# Confirm the build actually produced the requested version. If hatch-vcs
+# ignored SETUPTOOLS_SCM_PRETEND_VERSION (or resolved a different version), the
+# wheel filename won't match and we must not proceed to tag/publish.
+wheel="$(find dist -maxdepth 1 -name '*.whl' | sort | head -n1)"
+if [ -z "$wheel" ]; then
+  echo "error: no wheel was produced in dist/." >&2
+  exit 1
+fi
+built_version="$(basename "$wheel" | cut -d- -f2)"
+if [ "$built_version" != "$VERSION" ]; then
+  echo "error: built version '$built_version' does not match requested '$VERSION'." >&2
+  echo "       hatch-vcs may have ignored SETUPTOOLS_SCM_PRETEND_VERSION; aborting before tagging." >&2
+  exit 1
+fi
 echo "    OK: dist/ built and metadata valid for $VERSION"
 
 echo "==> Creating and pushing annotated tag $TAG"

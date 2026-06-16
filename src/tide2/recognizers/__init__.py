@@ -72,10 +72,9 @@ def __getattr__(name: str):
         try:
             from .llm_json_recognizer import LlmJsonRecognizer
         except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "LlmJsonRecognizer requires the optional LLM provider SDKs. "
-                "Install them with `pip install 'tide2[llm]'` (or `uv sync --extra llm`)."
-            ) from exc
+            from tide2._optional import reraise_missing_llm_sdk
+
+            reraise_missing_llm_sdk("LlmJsonRecognizer", exc)
 
         return LlmJsonRecognizer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
