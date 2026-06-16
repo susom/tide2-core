@@ -13,7 +13,6 @@ Tests cover date jittering functionality with various formats including:
 
 from datetime import datetime
 from datetime import timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -422,11 +421,10 @@ class TestDateJitterAnonymizer:
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         for day in days:
             result = self.anonymizer.operate(day, params)
-            # Result should be a valid day of the week
+            # Result is a deterministic rotation, so it is always a valid day of
+            # the week. (It can equal the original when jitter % 7 == 0, which is
+            # not the case for jitter=10; see test_day_of_week_deterministic.)
             assert result in days
-            # Result should be different from the original (with very high probability)
-            # Note: There's a small chance (1/6) it could be the same due to randomness
-            # So we'll just check it's a valid day
 
     def test_day_of_week_abbreviated(self):
         """Test replacement of abbreviated day-of-week name."""
@@ -436,7 +434,8 @@ class TestDateJitterAnonymizer:
         days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         for day in days:
             result = self.anonymizer.operate(day, params)
-            # Result should be a valid abbreviated day of the week
+            # Result is a deterministic rotation within the abbreviated table, so
+            # it is always a valid abbreviated day of the week.
             assert result in days
 
     def test_day_of_week_lowercase(self):
@@ -464,27 +463,51 @@ class TestDateJitterAnonymizer:
         assert result[1:].islower()
         assert result in self.anonymizer.days_of_week_full
 
-    def test_day_of_week_randomness(self):
-        """Test that day-of-week replacement varies and never returns the original.
-
-        Deterministic: random.choice is patched with a controlled sequence so the
-        assertions don't depend on chance (the production code uses
-        random.choice over the candidate days, excluding the original).
-        """
+    def test_day_of_week_deterministic_reproducible(self):
+        """Same jitter maps a weekday to the same replacement on every call."""
         params = {"entity_type": "DATE", "jitter": 10}
 
-        # Feed a fixed sequence of distinct, non-original days. random.choice is
-        # patched in the date_jitter module so each call returns the next value.
-        scripted_days = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        with patch("tide2.anonymizers.date_jitter.random.choice", side_effect=scripted_days) as mock_choice:
-            results = [self.anonymizer.operate("Monday", params) for _ in range(len(scripted_days))]
+        results = [self.anonymizer.operate("Monday", params) for _ in range(5)]
 
-        # Replacement candidates never include the original day.
-        for call in mock_choice.call_args_list:
-            available_days = call.args[0]
-            assert "Monday" not in available_days
+        # Deterministic: every run produces the identical output.
+        assert len(set(results)) == 1
 
-        # Output reflects the scripted choices: varied and never the original.
-        assert results == scripted_days
-        assert len(set(results)) > 1, "Day replacement should show variation"
-        assert "Monday" not in results
+    def test_day_of_week_rotation_matches_jitter(self):
+        """Replacement equals days_of_week_full[(idx + jitter) % 7]."""
+        full = self.anonymizer.days_of_week_full
+        for jitter in (3, 10, 47):
+            params = {"entity_type": "DATE", "jitter": jitter}
+            for idx, day in enumerate(full):
+                result = self.anonymizer.operate(day, params)
+                assert result == full[(idx + jitter) % 7]
+
+    def test_day_of_week_negative_jitter(self):
+        """Negative jitter wraps correctly (Python % is non-negative)."""
+        params = {"entity_type": "DATE", "jitter": -10}
+
+        # (0 + -10) % 7 == 4 -> Friday
+        result = self.anonymizer.operate("Monday", params)
+        assert result == self.anonymizer.days_of_week_full[(0 + -10) % 7]
+        assert result == "Friday"
+
+    def test_day_of_week_jitter_multiple_of_seven_maps_to_self(self):
+        """jitter % 7 == 0 maps a weekday to itself (intended, unbiased)."""
+        full = self.anonymizer.days_of_week_full
+        for jitter in (7, 14):
+            params = {"entity_type": "DATE", "jitter": jitter}
+            for day in full:
+                assert self.anonymizer.operate(day, params) == day
+
+    def test_day_of_week_abbrev_stays_abbreviated(self):
+        """Abbreviated input maps within the abbreviated table, never a full name."""
+        params = {"entity_type": "DATE", "jitter": 10}
+
+        result = self.anonymizer.operate("Mon", params)
+        assert result in self.anonymizer.days_of_week_abbrev
+        assert result not in self.anonymizer.days_of_week_full
+
+    def test_day_of_week_different_jitter_different_mapping(self):
+        """Different jitter values can produce different mappings (sanity)."""
+        result_a = self.anonymizer.operate("Monday", {"entity_type": "DATE", "jitter": 3})
+        result_b = self.anonymizer.operate("Monday", {"entity_type": "DATE", "jitter": 5})
+        assert result_a != result_b

@@ -1,11 +1,12 @@
 """Privacy-preserving date shifting operator.
 
-Adds deterministic or random jitter to dates, supporting multiple date formats
-and optional per-patient consistency via cryptographic derivation.
+Adds deterministic per-patient jitter to dates, supporting multiple date formats
+and optional per-patient consistency via cryptographic derivation. Standalone
+weekdays are rotated by the same per-patient jitter, so the whole operator is a
+deterministic function of the jitter.
 """
 
 import inspect
-import random
 import re
 from datetime import datetime
 from datetime import timedelta
@@ -164,26 +165,32 @@ class DateJitterAnonymizer(Operator):
         return f"{year}{self._pad_zero(month)}{self._pad_zero(day)}"
 
     # Pattern 15: Day of week replacement
-    def _format_day_of_week(self, original_day):
-        """Replace a day of the week with another random day of the week"""
-        # Normalize the original day to title case for comparison
+    def _format_day_of_week(self, original_day, jitter):
+        """Replace a day of the week by rotating it ``jitter`` positions.
+
+        Deterministic: the same ``jitter`` always maps a given weekday to the
+        same replacement, matching the numeric date path. The weekday can map to
+        itself when ``jitter % 7 == 0``; this is intended, unbiased behavior.
+
+        Python's ``%`` returns a non-negative result for negative operands
+        (``(0 + -10) % 7 == 4``), so negative jitter is handled with no
+        special-casing.
+        """
         original_day_normalized = original_day.strip().title()
 
-        # Determine if it's abbreviated or full name
-        is_abbreviated = original_day_normalized in self.days_of_week_abbrev
-        is_full = original_day_normalized in self.days_of_week_full
-
-        if is_abbreviated:
-            # Choose a different abbreviated day
-            available_days = [d for d in self.days_of_week_abbrev if d != original_day_normalized]
-            replacement = random.choice(available_days)
-        elif is_full:
-            # Choose a different full day name
-            available_days = [d for d in self.days_of_week_full if d != original_day_normalized]
-            replacement = random.choice(available_days)
+        if original_day_normalized in self.days_of_week_abbrev:
+            table = self.days_of_week_abbrev
+        elif original_day_normalized in self.days_of_week_full:
+            table = self.days_of_week_full
         else:
-            # Fallback if somehow we matched but don't recognize format
-            replacement = random.choice(self.days_of_week_full)
+            # Unreachable in practice: this method is only invoked after the
+            # day_of_week regex group matched an exact day name. If it is ever
+            # reached (e.g. a future refactor routes unrecognized input here),
+            # return the input unchanged rather than fabricating a weekday.
+            return original_day
+
+        idx = table.index(original_day_normalized)
+        replacement = table[(idx + jitter) % 7]
 
         # Preserve original casing
         if original_day.isupper():
@@ -364,8 +371,12 @@ class DateJitterAnonymizer(Operator):
                 # Special handling for day of week pattern
                 try:
                     day_of_week = match.group("day_of_week")
-                    # This is a standalone day of week
-                    return self._format_day_of_week(day_of_week)
+                    # This is a standalone day of week. Called directly (not via
+                    # the generic replacement(**format_params) dispatch below),
+                    # so threading the extra `jitter` arg here is safe; a future
+                    # refactor that routes this through generic dispatch must
+                    # supply `jitter` another way.
+                    return self._format_day_of_week(day_of_week, jitter)
                 except (IndexError, AttributeError):
                     # Not a day of week pattern, continue with regular date processing
                     pass
