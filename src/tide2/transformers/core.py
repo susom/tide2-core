@@ -23,6 +23,10 @@ from .config import load_model_config
 
 logger = logging.getLogger(__name__)
 
+# Fixed schema of a raw BIO token prediction (see infer_raw). Used to build a
+# stable dedupe key that does not depend on dict insertion order.
+_RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
+
 
 class TransformerCore:
     """
@@ -515,8 +519,13 @@ class TransformerCore:
                 aggregated_results.append([])
                 continue
 
-            # Remove duplicates (sort items so the dedupe key is independent of dict insertion order)
-            deduped_preds = [dict(t) for t in {tuple(sorted(d.items())) for d in raw_preds}]
+            # Remove duplicates. Build the dedupe key from the fixed prediction
+            # schema in a stable order so it does not depend on dict insertion
+            # order (O(k) per dict, no per-key sort).
+            deduped_preds = [
+                dict(zip(_RAW_PRED_KEYS, key, strict=True))
+                for key in {tuple(d[k] for k in _RAW_PRED_KEYS) for d in raw_preds}
+            ]
 
             # Aggregate BIO tokens
             aggregated = aggregate_bio_tokens(deduped_preds, text)
