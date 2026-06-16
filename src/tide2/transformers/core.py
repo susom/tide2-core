@@ -252,12 +252,13 @@ class TransformerCore:
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
 
         # Build pipeline kwargs
+        # Note: transformers 5.x removed the `framework` argument from pipeline()
+        # (TensorFlow/Flax support was dropped, so everything is PyTorch).
         pipeline_kwargs: dict[str, Any] = {
             "task": "token-classification",
             "model": model,
             "tokenizer": tokenizer,
             "aggregation_strategy": "none",  # Return raw BIO tokens
-            "framework": "pt",
             "ignore_labels": self.ignore_labels,
         }
 
