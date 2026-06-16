@@ -30,7 +30,7 @@ edit by hand.
 | Input     | Values                | Meaning                                                                 |
 | --------- | --------------------- | ----------------------------------------------------------------------- |
 | `target`  | `testpypi` / `both`   | `testpypi` = upload to TestPyPI only (dry run). `both` = TestPyPI ▶ PyPI |
-| `version` | blank / `X.Y.Z`       | First-release bootstrap override only. Leave blank for normal releases.  |
+| `version` | blank / `X.Y.Z`       | Fallback override (`SETUPTOOLS_SCM_PRETEND_VERSION`) for building from a ref with no clean tag. Leave blank for normal tag-based releases. |
 
 It runs three jobs:
 
@@ -45,9 +45,8 @@ It runs three jobs:
 
 > **Key behaviour:** `workflow_dispatch` runs the workflow file **as it exists on
 > the selected ref**. The ref you pick must therefore contain `publish.yml` (and,
-> if you want the new code published, the code changes too). This is why the very
-> first release needs the bootstrap script (see below), and why you tag the branch
-> that already carries the workflow.
+> if you want the new code published, the code changes too). This is why you tag
+> the branch that already carries the workflow.
 
 ---
 
@@ -109,7 +108,7 @@ Versions follow [SemVer](https://semver.org/) and are derived from commit types
 For TestPyPI-only dry runs you may also use a PEP 440 pre-release suffix
 (`1.1.0rc1`, `1.1.0a1`) to avoid burning a real version number.
 
-### Normal releases (after the first one)
+### Cutting a release
 
 1. Land your changes on the default branch using
    [conventional commits](CONTRIBUTING.md). `python-semantic-release` computes
@@ -147,25 +146,6 @@ gh run watch "$(gh run list --workflow=publish.yml -L1 --json databaseId --jq '.
 > onto TestPyPI before the PR merges. This is fine for **TestPyPI dry runs**. For
 > a production (`both`) release, prefer tagging `main`/`development` after merge so
 > the published version corresponds to mainline history.
-
-### The very first release (bootstrap)
-
-The first `vX.Y.Z` tag must be created **after** `publish.yml` is merged so the tag
-contains the workflow (workflow_dispatch runs the workflow as it exists on the
-selected ref). Use the helper script:
-
-```bash
-# TestPyPI only (safe dry run)
-scripts/first_release.sh 1.0.0
-
-# TestPyPI then production PyPI
-scripts/first_release.sh 1.0.0 both
-```
-
-It validates the build locally, creates and pushes the annotated tag, and
-dispatches the workflow against it. The `version` input on the workflow exists
-solely as a fallback override (`SETUPTOOLS_SCM_PRETEND_VERSION`) and is not needed
-once the tag carries the workflow.
 
 ---
 
