@@ -269,14 +269,18 @@ class TestMrnRecognizer:
             assert results == []
 
     def test_supported_entities(self):
-        """Test that only supported entity types work."""
+        """Test that the recognizer always reports its own MRN entity.
+
+        Requesting unrelated entity types does not suppress MRN detection: the
+        recognizer still reports the MRN present in the text.
+        """
         text = "MRN: 123456789"
 
         # Should work with MRN
         results = self.recognizer.analyze(text, ["MRN"])
         assert len(results) == 1
 
-        # Should not return results for other entity types (but still finds MRN)
+        # Requesting other entity types still yields the MRN found in the text
         results = self.recognizer.analyze(text, ["PERSON", "PHONE_NUMBER", "HAR"])
         assert len(results) == 1  # Still finds MRN entity since it's in the text
 

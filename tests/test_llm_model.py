@@ -327,17 +327,11 @@ class TestLlmModelAnthropicProvider:
     @patch("tide2.utils.llm_model.AnthropicVertex")
     def test_get_response_anthropic_success(self, mock_anthropic):
         """Test successful response from Anthropic provider."""
-        # Setup mock - need to properly mock the content block attributes
+        # Setup mock - the content block must expose 'text' but not 'type' so the
+        # thread-safe code takes the hasattr(content_block, 'text') branch. A
+        # spec-restricted mock limits attributes to exactly what we declare.
         mock_client = Mock()
-        mock_content = Mock()
-        mock_content.text = "Test response from Anthropic"
-
-        # Create a mock that properly handles the hasattr checks in our thread-safe code
-        # The code checks: hasattr(content_block, 'text') - this should return True
-        # Then checks: hasattr(content_block, 'type') - this should return False for the else branch
-        mock_content.configure_mock(**{"text": "Test response from Anthropic"})
-        # Mock objects have all attributes, so we need to use spec to limit them
-        mock_content = Mock(spec=["text"])  # Only has 'text' attribute, not 'type'
+        mock_content = Mock(spec=["text"])  # Only has 'text', not 'type'
         mock_content.text = "Test response from Anthropic"
 
         mock_response = Mock()
@@ -353,9 +347,10 @@ class TestLlmModelAnthropicProvider:
         assert response == "Test response from Anthropic"
         mock_client.messages.create.assert_called_once()
 
-        # Verify that max_tokens parameter uses minimum of input/output tokens
+        # Verify that max_tokens parameter uses max_output_tokens for non-Google
+        # providers (via _get_effective_max_tokens_for_non_google_providers).
         call_args = mock_client.messages.create.call_args
-        # With default values: min(8000, 1000) = 1000
+        # With the default max_output_tokens=1000.
         assert call_args.kwargs["max_tokens"] == 1000
 
     @patch("tide2.utils.llm_model.AnthropicVertex")
@@ -390,7 +385,7 @@ class TestLlmModelLlamaProvider:
     @patch("tide2.utils.llm_model.openai.OpenAI")
     @patch("tide2.utils.llm_model.auth")
     def test_get_response_llama_with_token_limits(self, mock_auth, mock_openai):
-        """Test LLAMA provider uses minimum of input/output tokens."""
+        """Test LLAMA provider uses max_output_tokens for effective max_tokens."""
         # Setup auth mock
         mock_creds = Mock()
         mock_creds.token = "test-token"
@@ -449,10 +444,10 @@ class TestLlmModelMedGemmaProvider:
         assert response == "Test response from MedGemma"
         mock_endpoint.predict.assert_called_once()
 
-        # Verify that max_tokens uses minimum of input/output tokens
+        # Verify that max_tokens uses max_output_tokens for non-Google providers
         call_args = mock_endpoint.predict.call_args
         instances = call_args.kwargs["instances"]
-        # With default values: min(8000, 1000) = 1000
+        # With the default max_output_tokens=1000.
         assert instances[0]["max_tokens"] == 1000
 
 

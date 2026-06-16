@@ -187,14 +187,18 @@ class TestHarRecognizer:
             assert results == []
 
     def test_supported_entities(self):
-        """Test that only supported entity types work."""
+        """Test that the recognizer always reports its own HAR entity.
+
+        Requesting unrelated entity types does not suppress HAR detection: the
+        recognizer still reports the HAR present in the text.
+        """
         text = "HAR: 123456"
 
         # Should work with HAR
         results = self.recognizer.analyze(text, ["HAR"])
         assert len(results) == 1
 
-        # Should not return results for other entity types (but still finds HAR)
+        # Requesting other entity types still yields the HAR found in the text
         results = self.recognizer.analyze(text, ["PERSON", "PHONE_NUMBER", "ACC_NUM"])
         assert len(results) == 1  # Still finds HAR entity since it's in the text
 

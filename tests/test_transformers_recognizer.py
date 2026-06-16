@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
 
+import pytest
+
 from tide2.recognizers.transformers_recognizer import TransformersRecognizer
 
 
@@ -326,12 +328,9 @@ class TestTransformersRecognizer:
         with patch("tide2.transformers.config.get_resource_path") as mock_get_path:
             mock_get_path.return_value = "/nonexistent/path"
 
-            try:
+            # Expected to fail when configuration file is missing or model not found
+            with pytest.raises((FileNotFoundError, KeyError)):
                 TransformersRecognizer(model_name="NONEXISTENT_MODEL")
-                raise AssertionError("Should have raised an exception")
-            except (FileNotFoundError, KeyError):
-                # Expected to fail when configuration file is missing or model not found
-                pass
 
     @patch("tide2.transformers.config.get_resource_path")
     def test_missing_model_configuration(self, mock_get_path):
@@ -340,10 +339,8 @@ class TestTransformersRecognizer:
         mock_get_path.return_value = config_path
 
         try:
-            TransformersRecognizer(model_name="MISSING_MODEL")
-            raise AssertionError("Should have raised KeyError")
-        except KeyError:
             # Expected when model configuration is not found
-            pass
+            with pytest.raises(KeyError):
+                TransformersRecognizer(model_name="MISSING_MODEL")
         finally:
             Path(config_path).unlink()

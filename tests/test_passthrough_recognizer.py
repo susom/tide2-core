@@ -2,6 +2,8 @@
 Test for the PassthroughRecognizer to ensure it behaves correctly for ablation studies.
 """
 
+import pytest
+
 from tide2.recognizers.passthrough_recognizer import PassthroughRecognizer
 
 
@@ -76,12 +78,4 @@ def test_passthrough_recognizer_integration():
 
 
 if __name__ == "__main__":
-    # Run tests manually if script is executed directly
-    test_passthrough_recognizer_initialization()
-    test_passthrough_recognizer_custom_initialization()
-    test_passthrough_recognizer_analyze_returns_empty()
-    test_passthrough_recognizer_load()
-    test_passthrough_recognizer_get_supported_entities()
-    test_passthrough_recognizer_integration()
-
-    print("All tests passed!")
+    pytest.main([__file__])
