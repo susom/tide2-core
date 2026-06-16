@@ -21,7 +21,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-      - run: uv sync --extra docs --extra gpu   # docs=pdoc; gpu=torch/transformers/spacy (required)
+      - run: uv sync --extra docs   # docs=pdoc; the ML stack (torch/transformers/spacy) ships in the base install
       - run: uv run make docs                    # reuses Makefile target (+ pyarrow workaround)
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
