@@ -641,7 +641,7 @@ class TestGCSConnectorIntegration:
         self.mock_bucket.blob.assert_called_with("data/source.txt")
 
     def test_list_then_delete_workflow(self):
-        """Test listing files by pattern then deleting exactly those matches."""
+        """Test the list→delete glue: delete_files_by_pattern lists then deletes matches."""
         mock_blob1 = Mock()
         mock_blob1.name = "data/file1.txt"
         mock_blob2 = Mock()
@@ -651,17 +651,18 @@ class TestGCSConnectorIntegration:
 
         self.mock_bucket.list_blobs.return_value = [mock_blob1, mock_blob2, mock_blob3]
 
-        listed = self.connector.list_files_by_pattern("test-bucket", "*.txt", "data/")
-        assert listed == ["data/file1.txt", "data/file2.txt"]
-
-        # Feed the listing straight into a delete and confirm only those blobs are deleted.
+        # Exercise the real higher-level method. It internally lists by pattern and
+        # forwards exactly the matching blobs to delete_multiple_files, which we mock
+        # at the GCS boundary so no real delete is attempted.
         with patch.object(self.connector, "delete_multiple_files") as mock_delete_multiple:
-            mock_delete_multiple.return_value = dict.fromkeys(listed, True)
+            mock_delete_multiple.return_value = {"data/file1.txt": True, "data/file2.txt": True}
 
-            delete_specs = [("test-bucket", blob_name) for blob_name in listed]
-            results = self.connector.delete_multiple_files(delete_specs)
+            results = self.connector.delete_files_by_pattern("test-bucket", "*.txt", "data/")
 
-            mock_delete_multiple.assert_called_once_with(delete_specs)
+            # Only the .txt matches (not keep.json) are passed through for deletion.
+            mock_delete_multiple.assert_called_once_with(
+                [("test-bucket", "data/file1.txt"), ("test-bucket", "data/file2.txt")]
+            )
             assert results == {"data/file1.txt": True, "data/file2.txt": True}
 
     @patch("tide2.utils.gcs_connector.as_completed", side_effect=list)

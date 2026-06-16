@@ -13,6 +13,7 @@ Tests cover date jittering functionality with various formats including:
 
 from datetime import datetime
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -350,15 +351,21 @@ class TestDateJitterAnonymizer:
             ("15/03/2023", {"entity_type": "DATE", "jitter": 7}),
         ]
 
+        succeeded = 0
         for date_str, params in test_cases:
             try:
                 result = self.anonymizer.operate(date_str, params)
                 # Should return either a jittered date or the default replacement
                 assert isinstance(result, str)
                 assert len(result) > 0
+                succeeded += 1
             except ValueError:
                 # Some patterns might not match, which is acceptable for this test
                 pass
+
+        # Guard against the loop silently becoming a no-op: at least one of the
+        # common formats must be handled without raising.
+        assert succeeded > 0, "Expected at least one simple date format to be handled"
 
     def test_integration_month_year_formats(self):
         """Integration test with month/year only formats."""
@@ -367,14 +374,19 @@ class TestDateJitterAnonymizer:
             ("2023-03", {"entity_type": "DATE", "jitter": -5}),
         ]
 
+        succeeded = 0
         for date_str, params in test_cases:
             try:
                 result = self.anonymizer.operate(date_str, params)
                 assert isinstance(result, str)
                 assert len(result) > 0
+                succeeded += 1
             except ValueError:
                 # Acceptable if pattern doesn't match
                 pass
+
+        # At least one month/year format must be handled without raising.
+        assert succeeded > 0, "Expected at least one month/year date format to be handled"
 
     # Test edge cases
     def test_edge_case_leap_year(self):
@@ -453,18 +465,26 @@ class TestDateJitterAnonymizer:
         assert result in self.anonymizer.days_of_week_full
 
     def test_day_of_week_randomness(self):
-        """Test that day of week replacement is different from original (statistical test)."""
+        """Test that day-of-week replacement varies and never returns the original.
+
+        Deterministic: random.choice is patched with a controlled sequence so the
+        assertions don't depend on chance (the production code uses
+        random.choice over the candidate days, excluding the original).
+        """
         params = {"entity_type": "DATE", "jitter": 10}
 
-        # Run multiple times to verify randomness
-        results = []
-        for _ in range(20):
-            result = self.anonymizer.operate("Monday", params)
-            results.append(result)
+        # Feed a fixed sequence of distinct, non-original days. random.choice is
+        # patched in the date_jitter module so each call returns the next value.
+        scripted_days = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        with patch("tide2.anonymizers.date_jitter.random.choice", side_effect=scripted_days) as mock_choice:
+            results = [self.anonymizer.operate("Monday", params) for _ in range(len(scripted_days))]
 
-        # Should have at least some variation (not all the same)
-        unique_results = set(results)
-        assert len(unique_results) > 1, "Day replacement should show variation across multiple runs"
+        # Replacement candidates never include the original day.
+        for call in mock_choice.call_args_list:
+            available_days = call.args[0]
+            assert "Monday" not in available_days
 
-        # Should never return the original day
-        assert "Monday" not in results or len([r for r in results if r == "Monday"]) < len(results)
+        # Output reflects the scripted choices: varied and never the original.
+        assert results == scripted_days
+        assert len(set(results)) > 1, "Day replacement should show variation"
+        assert "Monday" not in results
