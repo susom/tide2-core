@@ -183,7 +183,8 @@ exclude_dirs = ["tests"]
 skips = [
     "B101",
     "B601",
-] # B101: assert used in tests. B601: subprocess.run in cli/main_visualizer.py uses a hardcoded argument list (no shell=True, no user input), safe from injection.
+    "B615",
+] # B101: assert used in tests. B601: subprocess.run in cli/main_visualizer.py uses a hardcoded argument list (no shell=True, no user input), safe from injection. B615: HuggingFace model revisions are controlled via the resolved model_path/config, not pinned per from_pretrained() call; deployments select trusted model weights explicitly.
 
 
 [tool.ty.environment]
