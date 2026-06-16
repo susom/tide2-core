@@ -17,10 +17,6 @@ on:
           - testpypi
           - both
         default: testpypi
-      version:
-        description: "First-release bootstrap only: version to build when no clean tag exists (e.g. 1.0.0). Leave blank for normal tag-based releases."
-        type: string
-        default: ""
 
 # Restrict all jobs to read-only by default (satisfies Token-Permissions check).
 # The publish jobs request id-token: write explicitly for OIDC.
@@ -42,29 +38,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Reject version override on a tag release
-        # `version` is a first-release bootstrap override for when no clean tag
-        # yet contains this workflow. Running from a vX.Y.Z tag must use the
-        # tag-derived version, so refuse the combination to avoid publishing a
-        # wheel whose version disagrees with the tag.
-        if: github.ref_type == 'tag' && inputs.version != ''
-        run: |
-          echo "::error::The 'version' input is for first-release bootstrap only. When releasing from a tag (${{ github.ref_name }}), leave it blank so the tag-derived version is used." >&2
-          exit 1
-
       - name: Build sdist and wheel
-        env:
-          # First-release bootstrap: when a clean vX.Y.Z tag does not yet contain
-          # this workflow, pass `version` to override the hatch-vcs (setuptools_scm)
-          # derived version. Empty string is a no-op, so normal tag-based releases
-          # are unaffected.
-          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.version }}
         run: uv build
 
       - name: Guard against non-release versions
         # PyPI rejects PEP 440 local versions (the "+g<sha>" / ".devN" suffixes
-        # hatch-vcs emits on untagged commits). Fail fast unless a version was
-        # explicitly supplied for the first-release bootstrap.
+        # hatch-vcs emits on untagged commits). Fail fast so a dev build is never
+        # published — always run this workflow from a clean vX.Y.Z tag.
         run: |
           set -euo pipefail
           # Pick one wheel deterministically and parse the version from the
@@ -76,18 +56,9 @@ jobs:
           fi
           version="$(basename "$wheel" | cut -d- -f2)"
           echo "Built version: $version"
-          # When a bootstrap override is supplied, the built wheel must actually
-          # carry it: if hatch-vcs ignored SETUPTOOLS_SCM_PRETEND_VERSION the
-          # build would silently publish the derived (e.g. +local/.dev) version.
-          if [ -n "${{ inputs.version }}" ] && [ "$version" != "${{ inputs.version }}" ]; then
-            echo "::error::Built version '$version' does not match the requested override '${{ inputs.version }}'." >&2
-            exit 1
-          fi
-          # Always enforce a clean release version, even for bootstrap overrides:
-          # PyPI rejects local/dev versions.
           case "$version" in
             *+*|*dev*)
-              echo "::error::Version '$version' is not a clean release version. Run this workflow from a vX.Y.Z tag, or set the 'version' input for a first-release bootstrap." >&2
+              echo "::error::Version '$version' is not a clean release version. Run this workflow from a vX.Y.Z tag." >&2
               exit 1
               ;;
           esac

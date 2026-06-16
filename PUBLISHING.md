@@ -25,12 +25,11 @@ edit by hand.
 
 ## How the workflow works
 
-`publish.yml` is a `workflow_dispatch` (manual) workflow with two inputs:
+`publish.yml` is a `workflow_dispatch` (manual) workflow with one input:
 
 | Input     | Values                | Meaning                                                                 |
 | --------- | --------------------- | ----------------------------------------------------------------------- |
 | `target`  | `testpypi` / `both`   | `testpypi` = upload to TestPyPI only (dry run). `both` = TestPyPI ▶ PyPI |
-| `version` | blank / `X.Y.Z`       | Fallback override (`SETUPTOOLS_SCM_PRETEND_VERSION`) for building from a ref with no clean tag. Leave blank for normal tag-based releases. |
 
 It runs three jobs:
 
