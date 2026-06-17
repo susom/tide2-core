@@ -1,81 +1,76 @@
 # Publishing `tide2` to PyPI
 
-This project is published to [PyPI](https://pypi.org/p/tide2) with a manual
-GitHub Actions workflow ([`.github/workflows/publish.yml`](.github/workflows/publish.yml))
-that builds with `uv` and uploads via **Trusted Publishing (OIDC)** — no API
-tokens are stored anywhere.
+This project is published to [PyPI](https://pypi.org/p/tide2) with a **trunk-based,
+two-phase** release process:
 
-The release flow is **TestPyPI first, then production PyPI**:
+- **Phase 1 — Release PR (automatic).**
+  [`release-please`](https://github.com/googleapis/release-please)
+  ([`.github/workflows/release-please.yml`](.github/workflows/release-please.yml))
+  watches `main` and keeps **one** open release PR current. It computes the next
+  version from your Conventional-Commit PR titles and writes `CHANGELOG.md` +
+  `.release-please-manifest.json`. It does **not** tag or publish.
+- **Phase 2 — Publish Release (manual).**
+  ([`.github/workflows/publish.yml`](.github/workflows/publish.yml)) is a
+  `workflow_dispatch` workflow the maintainer triggers deliberately *after*
+  merging the release PR. From that click everything is automatic: read the
+  version → tag → build → PyPI → GitHub Release → verify.
+
+Uploads use **Trusted Publishing (OIDC)** and writes back to the repo (tag,
+Release) use the built-in `GITHUB_TOKEN` — **no API tokens are stored anywhere**
+(no `PYPI_API_TOKEN`, no PAT, no GitHub App token).
 
 ```
-conventional commits ──▶ python-semantic-release ──▶ vX.Y.Z tag + CHANGELOG
-                                                          │
-                                          run "Publish to PyPI" workflow
-                                                          │
-                                  target: testpypi ──▶ TestPyPI  (dry run)
-                                                          │
-                                  target: both ─────▶ TestPyPI ▶ PyPI
+feature PRs (Conventional-Commit titles) ──▶ main      (always via PR, squash-merge)
+        │
+        │  Phase 1: release-please maintains ONE release PR on main (auto, continuous)
+        ▼
+  release PR bumps CHANGELOG.md + manifest  (version decided ONCE)   ◀── a real PR
+        │  maintainer reviews + merges          ◀── HUMAN GATE 1
+        ▼
+  main carries the updated CHANGELOG.md + .release-please-manifest.json
+     (release-please does NOT tag — skip-github-release: true)
+        │
+        │  Phase 2: maintainer clicks Actions ▸ Publish Release ▸ Run workflow  ◀── HUMAN GATE 2
+        ▼
+  resolve: read version from manifest (NOT recomputed) ─▶ guard ─▶ tag: create vX.Y.Z
+        ▼
+  build (once, checked out at tag) ─▶ twine check ─▶ install-smoke-test wheel
+        ▼
+  [pypi environment: approve]   ◀── HUMAN GATE 3 ─▶ PyPI (OIDC + PEP 740 attestations)
+        ▼
+  GitHub Release vX.Y.Z (notes from CHANGELOG + dist/* artifacts)
+        ▼
+  verify-published: install from PyPI in clean venv + import smoke test
+        │
+        └─ (optional, same workflow with dry_run: true) TestPyPI dry-run — off the prod path
 ```
 
-The single source of truth for the version is the **git tag**: `hatch-vcs`
-derives the package version from it at build time. There is no version string to
-edit by hand.
+**Three human touch-points, everything between them automatic:** merge the release
+PR → click Run workflow → approve the `pypi` environment.
+
+The single build-time source of truth for the version is the **git tag**:
+`hatch-vcs` derives the package version from it. There is no static version string
+to edit by hand. The version is **decided once** by release-please (persisted to
+`.release-please-manifest.json`); Phase 2 only *reads* that number, creates the
+matching tag, and `hatch-vcs` bakes it into the wheel — it is never recomputed.
 
 ---
 
-## How the workflow works
+## The release PR (Phase 1)
 
-`publish.yml` is a `workflow_dispatch` (manual) workflow with one input:
+release-please runs on every push to `main` and maintains a single, stable release
+PR. You don't create or update it by hand — it reflects everything merged since the
+last release.
 
-| Input     | Values                | Meaning                                                                 |
-| --------- | --------------------- | ----------------------------------------------------------------------- |
-| `target`  | `testpypi` / `both`   | `testpypi` = upload to TestPyPI only (dry run). `both` = TestPyPI ▶ PyPI |
-
-It runs three jobs:
-
-1. **`build`** — checks out the selected ref with full history (needed for
-   `hatch-vcs`), runs `uv build`, then a **guard** that fails fast if the built
-   version is not a clean `X.Y.Z` (PyPI rejects PEP 440 local versions like
-   `+g<sha>` / `.devN`), then `uvx twine check`, and uploads the `dist/` artifact.
-2. **`publish-testpypi`** — downloads the artifact and uploads to TestPyPI via
-   OIDC (environment `testpypi`).
-3. **`publish-pypi`** — only when `target: both`; uploads to production PyPI via
-   OIDC (environment `pypi`). Runs after TestPyPI succeeds.
-
-> **Key behaviour:** `workflow_dispatch` runs the workflow file **as it exists on
-> the selected ref**. The ref you pick must therefore contain `publish.yml` (and,
-> if you want the new code published, the code changes too). This is why you tag
-> the branch that already carries the workflow.
-
----
-
-## One-time setup (maintainer, once per project)
-
-These steps live outside the repo and only need to be done once.
-
-### 1. Configure Trusted Publishers
-
-On **both** [PyPI](https://pypi.org/manage/account/publishing/) and
-[TestPyPI](https://test.pypi.org/manage/account/publishing/), add a *pending*
-publisher (for a project that does not exist yet) with:
-
-| Field             | Value           |
-| ----------------- | --------------- |
-| PyPI Project Name | `tide2`         |
-| Owner             | `susom`         |
-| Repository name   | `tide2-core`    |
-| Workflow name     | `publish.yml`   |
-| Environment name  | `pypi` (on PyPI) / `testpypi` (on TestPyPI) |
-
-### 2. Create GitHub Environments
-
-In **Settings ▸ Environments**, create two environments matching the names above:
-
-- `testpypi`
-- `pypi` — recommended: add a **required reviewer** so production uploads need an
-  approval click in the Actions UI.
-
-No secrets are needed — OIDC handles authentication.
+- **Squash-merge every PR** with a **Conventional-Commit PR title** — the title is
+  the squash subject release-please parses. A `feat:` title bumps minor, `fix:` /
+  `perf:` bumps patch (see [CONTRIBUTING.md](CONTRIBUTING.md)). A CI check
+  (`pr-title-lint.yml`) rejects non-conforming titles and breaking-change notation.
+- **Attribution is preserved:** GitHub adds `Co-authored-by:` trailers for every
+  author in a squashed PR.
+- The release PR updates **only** `CHANGELOG.md` + `.release-please-manifest.json`.
+  Because the version is `dynamic` (hatch-vcs), release-please is configured with
+  `release-type: simple`, which has no static version file to rewrite.
 
 ---
 
@@ -83,7 +78,8 @@ No secrets are needed — OIDC handles authentication.
 
 > **Versions are immutable on (Test)PyPI.** A given `X.Y.Z` can be uploaded only
 > once to each index — even a deleted/yanked version's filename cannot be reused.
-> Always pick the **next unused** version. Check what already exists:
+> release-please picks the next number for you; if you ever publish by hand, pick
+> the **next unused** version. Check what already exists:
 >
 > ```bash
 > # production PyPI
@@ -94,57 +90,115 @@ No secrets are needed — OIDC handles authentication.
 >   "import sys,json;print(sorted(json.load(sys.stdin)['releases']))"
 > ```
 
-### Choosing the version number
+### How the version number is chosen
 
-Versions follow [SemVer](https://semver.org/) and are derived from commit types
+Versions follow [SemVer](https://semver.org/) and are derived from commit/PR types
 (see [CONTRIBUTING.md](CONTRIBUTING.md)):
 
-- `feat:` → **minor** bump (e.g. `1.0.0` → `1.1.0`)
-- `fix:` / `perf:` → **patch** bump (e.g. `1.0.0` → `1.0.1`)
+- `feat:` → **minor** bump (e.g. `1.1.0` → `1.2.0`)
+- `fix:` / `perf:` → **patch** bump (e.g. `1.1.0` → `1.1.1`)
 - Major bumps are a **deliberate maintainer decision** (breaking-change notation
-  is forbidden in commits, so majors are never inferred automatically).
+  is forbidden in commits/PR titles, so majors are never inferred automatically).
 
-For TestPyPI-only dry runs you may also use a PEP 440 pre-release suffix
-(`1.1.0rc1`, `1.1.0a1`) to avoid burning a real version number.
+### The release sequence
 
-### Cutting a release
+1. Merge feature PRs into `main` (squash, Conventional titles).
+2. Review and **merge the release-please PR** — this decides the version and writes
+   `CHANGELOG.md` + the manifest. *(Human gate 1.)*
+3. Go to **Actions ▸ Publish Release ▸ Run workflow**, run from `main`, and leave
+   **`dry_run` unchecked**. This is the deliberate "ship it." *(Human gate 2.)*
+4. **Approve the `pypi` environment** when prompted. *(Human gate 3.)*
+5. Confirm the GitHub Release was created and `verify-published` is green.
 
-1. Land your changes on the default branch using
-   [conventional commits](CONTRIBUTING.md). `python-semantic-release` computes
-   the next version, updates `CHANGELOG.md`, and creates the `vX.Y.Z` tag.
-2. Go to **Actions ▸ Publish to PyPI ▸ Run workflow**.
-   - **Use workflow from**: select the `vX.Y.Z` tag.
-   - **target**: `testpypi` for a dry run, or `both` to release.
-3. For a `both` run, approve the `pypi` environment when prompted.
+That's it — merging the release PR and clicking Run workflow are decoupled on
+purpose, so you can merge the notes now and ship later (e.g. a coordinated
+announcement).
 
-The workflow refuses to publish anything that is not a clean `X.Y.Z` version
-(hatch-vcs emits a `+g<sha>`/`.devN` local version on untagged commits, which PyPI
-rejects), so you cannot accidentally publish a dev build.
+### TestPyPI dry-run (optional, non-blocking)
 
-### Releasing manually with the CLI
+Run **Actions ▸ Publish Release ▸ Run workflow** with **`dry_run` checked** to
+build from `main`, `twine check`, and upload to TestPyPI only — **no tag, no PyPI,
+no GitHub Release**. TestPyPI is never a hard prerequisite for a real release; the
+real quality gate is build-once + `twine check` + the wheel install-smoke-test in
+the `build` job.
 
-Equivalent to the UI steps above, once a clean `vX.Y.Z` tag exists on the ref you
-want to publish:
+> The dry-run sets `SETUPTOOLS_SCM_PRETEND_VERSION` to the manifest version so the
+> wheel built from `main` carries a clean, uploadable number (hatch-vcs would
+> otherwise stamp a `…+g<sha>`/`.devN` local version that PyPI rejects).
+
+### Pre-releases (`rcN`)
+
+To ship a pre-release, let the release PR carry an `X.Y.Z-rcN` version (via
+release-please's pre-release support). Phase 2 detects the `rc`/`a`/`b`/`dev`
+segment and routes it to **TestPyPI only**, tags it, and creates the GitHub
+Release with **`--prerelease`** — production PyPI is skipped.
+
+### Releasing with the CLI
+
+Equivalent to the UI steps once the release PR is merged:
 
 ```bash
-# 1. Create and push the annotated tag (from the branch/commit you want to ship)
-git tag -a v1.1.0 -m "Release 1.1.0"
-git push origin v1.1.0
+# Production release (after merging the release-please PR on main)
+gh workflow run publish.yml --ref main
 
-# 2. Dispatch the workflow against that tag
-gh workflow run publish.yml --ref v1.1.0 -f target=testpypi   # dry run
-# ...or release to production after the dry run looks good:
-gh workflow run publish.yml --ref v1.1.0 -f target=both
+# TestPyPI dry-run
+gh workflow run publish.yml --ref main -f dry_run=true
 
-# 3. Watch the run
+# Watch the run
 gh run watch "$(gh run list --workflow=publish.yml -L1 --json databaseId --jq '.[0].databaseId')"
 ```
 
-> **Tagging a working branch (not yet merged):** because the workflow publishes
-> the ref you select, you *can* tag a `feat/*` branch directly to get its code
-> onto TestPyPI before the PR merges. This is fine for **TestPyPI dry runs**. For
-> a production (`both`) release, prefer tagging `main`/`development` after merge so
-> the published version corresponds to mainline history.
+> `workflow_dispatch` runs the workflow file **as it exists on `main`**, and the
+> `resolve` job reads the version from `main`'s manifest. Always dispatch from
+> `main` after the release PR has merged.
+
+---
+
+## Maintainer setup (verify; already done)
+
+`tide2` already exists on PyPI, so the items below are a **checklist to confirm**,
+not first-time setup. They live outside the repo.
+
+### 1. Trusted Publishers (verify the existing config)
+
+The Trusted Publishers on
+[PyPI](https://pypi.org/manage/account/publishing/) and
+[TestPyPI](https://test.pypi.org/manage/account/publishing/) are already
+configured. For reference, the matching fields are:
+
+| Field             | Value           |
+| ----------------- | --------------- |
+| PyPI Project Name | `tide2`         |
+| Owner             | `susom`         |
+| Repository name   | `tide2-core`    |
+| Workflow name     | `publish.yml`   |
+| Environment name  | `pypi` (on PyPI) / `testpypi` (on TestPyPI) |
+
+> **The publish workflow keeps the filename `publish.yml`**, so the OIDC match
+> still holds — **no Trusted Publisher change is needed.** If the file were ever
+> renamed, the "Workflow name" on **both** PyPI and TestPyPI would have to be
+> updated to match, or OIDC fails with `invalid-publisher`.
+
+### 2. GitHub Environments (confirm)
+
+In **Settings ▸ Environments**, confirm both exist:
+
+- `testpypi`
+- `pypi` — confirm it has a **required reviewer** so production uploads need an
+  approval click in the Actions UI (this is human gate 3).
+
+No secrets are needed — OIDC handles authentication.
+
+### 3. Repo settings the automation depends on (confirm)
+
+- **Settings ▸ General ▸ Pull Requests:** enable **"Default to PR title for squash
+  merge commits."** Without it, GitHub uses the *first commit* as the squash
+  subject and release-please bumps from the wrong text — the PR-title lint passes
+  anyway, so this fails silently.
+- **Settings ▸ Rules:** confirm no `v*` tag-protection rule/ruleset blocks
+  `GITHUB_TOKEN` from pushing the Phase-2 tag. If one exists, grant the workflow's
+  token a bypass or scope the rule to exclude release tags — otherwise Phase 2
+  halts at the `tag` job.
 
 ---
 
@@ -199,13 +253,30 @@ extra adds the LLM provider SDKs (`anthropic`, `openai`, `google-genai`,
 
 ---
 
+## Rollback / bad release
+
+PyPI versions are **immutable and non-reusable**:
+
+1. **Yank** the broken version on PyPI (existing pins still resolve; new installs
+   skip it).
+2. **Never** delete + re-upload the same number — that filename is burned forever.
+3. **Bump** to the next patch via a normal release PR with the fix, then publish
+   that.
+4. Optionally annotate the GitHub Release and open a regression issue.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Guard step fails: *"not a clean release version"* | The selected ref has no `vX.Y.Z` tag, so `hatch-vcs` produced a `…+g<sha>` / `.devN` version. | Run the workflow from an actual `vX.Y.Z` **tag**, not a branch. |
-| `400 File already exists` on upload | That version was already uploaded to the index (versions are immutable). | Bump to the next unused `X.Y.Z` (or a new `rcN` for TestPyPI) and re-tag. |
-| TestPyPI install can't resolve dependencies | TestPyPI doesn't mirror all of PyPI. | Always pass `--extra-index-url https://pypi.org/simple/` when installing from TestPyPI. |
-| `publish-pypi` job is skipped | `target` was `testpypi`. | Re-run with `target: both` to promote to production. |
-| OIDC auth error / environment not found | Trusted Publisher or GitHub Environment not configured. | Complete the [one-time setup](#one-time-setup-maintainer-once-per-project). |
-| Workflow doesn't show the new tag in the ref picker | The tag predates `publish.yml`, or wasn't pushed. | Push the tag; ensure it was created on a commit that contains `publish.yml`. |
+| No release PR appears | No releasable commits since the last release | Nothing to release |
+| Guard fails: *CHANGELOG ≠ manifest* | Release PR not merged yet | Merge the release-please PR, then re-run Phase 2 |
+| Guard fails: *tag already exists* | That version was already published | Let release-please open the next release PR |
+| Wrong / no version bump | Squash subject wasn't a Conventional Commit | Fix the PR title (the `pr-title-lint` check enforces it); confirm "Default to PR title for squash" is enabled |
+| Empty / generic release notes | No matching `## …X.Y.Z` section in `CHANGELOG.md` | Confirm the release PR merged; the job falls back to `--generate-notes` |
+| `release already exists` | Re-running a finished release | `gh release delete vX.Y.Z`, or `gh release upload vX.Y.Z dist/*` |
+| Build guard: *not a clean release version* | Built ref produced a `…+g<sha>`/`.devN` local version | Real releases build at the `vX.Y.Z` tag; dry-runs set `SETUPTOOLS_SCM_PRETEND_VERSION` — re-run from `main` after merging the release PR |
+| `400 File already exists` on upload | That version was already uploaded (immutable) | Bump to the next unused `X.Y.Z` via a new release PR |
+| TestPyPI install can't resolve deps | TestPyPI doesn't mirror all of PyPI | Always pass `--extra-index-url https://pypi.org/simple/` |
+| OIDC `invalid-publisher` / environment not found | Trusted Publisher or GitHub Environment misconfigured, or workflow renamed | Verify the [maintainer setup](#maintainer-setup-verify-already-done); keep the filename `publish.yml` |

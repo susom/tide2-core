@@ -1,0 +1,36 @@
+name: Release PR
+
+# Phase 1 of the release process (see PUBLISHING.md). This workflow's ONLY job is
+# to keep a single release pull request current as commits land on main. It does
+# NOT tag, build, or publish — those live in publish.yml (Phase 2), behind the
+# `pypi` reviewer gate.
+#
+# release-please reads commit history since the last release, computes the next
+# version (feat -> minor, fix/perf -> patch), and maintains one open PR that bumps
+# CHANGELOG.md + .release-please-manifest.json. Merging that PR is human gate 1.
+on:
+  push:
+    branches: [main] # refresh the single release PR as commits land
+
+# Restrict all jobs to read-only by default (satisfies the Token-Permissions
+# scorecard check). The release-please job restates the writes it needs.
+permissions: read-all
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false # never cancel a half-written release PR
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the single, stable release-PR branch
+      pull-requests: write # open/update the release PR
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          target-branch: main
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # skip-github-release lives in release-please-config.json so the tag and
+          # GitHub Release are owned by Phase 2 (publish.yml) — NOT created here.

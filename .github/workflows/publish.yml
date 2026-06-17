@@ -1,35 +1,141 @@
-name: Publish to PyPI
+name: Publish Release
 
-# Manual publishing workflow. Select the git tag (vX.Y.Z) to release from the
-# "Use workflow from" ref picker, then choose the target:
-#   - testpypi: build + upload to TestPyPI only (default, safe dry run)
-#   - both:     upload to TestPyPI, then promote to production PyPI
+# Phase 2 of the release process (see PUBLISHING.md). The maintainer runs this
+# deliberately from Actions > Publish Release > Run workflow AFTER merging the
+# release-please PR (Phase 1). From that click everything is automatic:
+#   resolve -> tag -> build -> publish-pypi -> github-release -> verify-published
 #
-# Authentication uses PyPI Trusted Publishing (OIDC) — no API tokens are stored.
-# See PUBLISHING.md for the one-time PyPI/TestPyPI/GitHub Environment setup.
+# The version is decided ONCE by release-please (in .release-please-manifest.json);
+# this workflow only READS it, creates the tag, and lets hatch-vcs derive the wheel
+# version from that tag. The number is never recomputed.
+#
+# Authentication uses PyPI Trusted Publishing (OIDC) for the upload and the built-in
+# GITHUB_TOKEN for tag/Release writes — no API tokens are stored. The filename is
+# deliberately kept as publish.yml so the existing Trusted Publisher config (which
+# matches on workflow filename) keeps working.
+#
+# `dry_run: true` runs an optional, non-blocking TestPyPI dry-run from main with a
+# pretend version — no tag, no PyPI, no GitHub Release.
 on:
   workflow_dispatch:
     inputs:
-      target:
-        description: "Where to publish"
-        type: choice
-        options:
-          - testpypi
-          - both
-        default: testpypi
+      dry_run:
+        description: "TestPyPI dry-run only — no tag, no PyPI, no GitHub Release"
+        type: boolean
+        default: false
 
-# Restrict all jobs to read-only by default (satisfies Token-Permissions check).
-# The publish jobs request id-token: write explicitly for OIDC.
+# Restrict all jobs to read-only by default (Token-Permissions scorecard check).
+# Jobs that write (tag, Release) or need OIDC (id-token) restate those scopes.
 permissions: read-all
 
+concurrency:
+  group: publish-release
+  cancel-in-progress: false # never cancel a half-finished release
+
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # Job 1: resolve — read the already-decided version and run precondition guards.
+  # ---------------------------------------------------------------------------
+  resolve:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
-      - name: Checkout
+      - name: Checkout main
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          # Full history + tags are required for hatch-vcs to derive the version.
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read version from manifest (NOT recomputed)
+        id: v
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json;print(json.load(open(".release-please-manifest.json"))["."])')"
+          if [ -z "$version" ]; then
+            echo "::error::Could not read version from .release-please-manifest.json." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          # Pre-release if the PEP 440 version carries an a/b/rc/dev segment.
+          if printf '%s' "$version" | grep -Eq '(a|b|rc)[0-9]+|\.dev[0-9]+'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved version: $version"
+
+      - name: Guard — release PR merged & not already published
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ver="${{ steps.v.outputs.version }}"
+          tag="v$ver"
+          # The newest CHANGELOG header must match the manifest. release-please writes
+          # "## [X.Y.Z](url) (date)"; tolerate an optional leading "v" and the link.
+          head_ver="$(grep -m1 -E '^## \[?v?[0-9]' CHANGELOG.md \
+            | sed -E 's/^## \[?v?([0-9][0-9A-Za-z.\-]*).*/\1/')"
+          if [ "$head_ver" != "$ver" ]; then
+            echo "::error::CHANGELOG top ($head_ver) != manifest ($ver). Merge the release PR first." >&2
+            exit 1
+          fi
+          git fetch --tags --quiet
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "::error::Tag $tag already exists — already released. Let release-please open the next release PR." >&2
+            exit 1
+          fi
+          echo "Guards passed: CHANGELOG == manifest ($ver), tag $tag not present."
+
+  # ---------------------------------------------------------------------------
+  # Job 2: tag — create the annotated tag (a tag is NOT a commit -> no PR needed).
+  # ---------------------------------------------------------------------------
+  tag:
+    needs: resolve
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the vX.Y.Z tag
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Create and push tag
+        run: |
+          set -euo pipefail
+          tag="${{ needs.resolve.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
+          echo "Pushed tag $tag."
+
+  # ---------------------------------------------------------------------------
+  # Job 3: build — build ONCE at the tag; the real quality gate.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: [resolve, tag]
+    # Real release: after the tag job. Dry-run: no tag, build from main.
+    if: ${{ always() && needs.resolve.result == 'success' && (inputs.dry_run || needs.tag.result == 'success') }}
+    runs-on: ubuntu-latest
+    env:
+      # Dry-run builds from main, which hatch-vcs would stamp with a PEP 440 local
+      # version (X.Y.Z.devN+g<sha>) that (Test)PyPI rejects. Pretend the manifest
+      # version so the dry-run wheel is uploadable. Empty on a real release, so
+      # hatch-vcs derives the version from the freshly created tag instead.
+      SETUPTOOLS_SCM_PRETEND_VERSION: ${{ inputs.dry_run && needs.resolve.outputs.version || '' }}
+    steps:
+      - name: Checkout build ref
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Real release: check out the new tag so hatch-vcs bakes in the exact
+          # version. Dry-run: build from main (version comes from the pretend env).
+          ref: ${{ inputs.dry_run && 'main' || needs.resolve.outputs.tag }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -42,13 +148,11 @@ jobs:
         run: uv build
 
       - name: Guard against non-release versions
-        # PyPI rejects PEP 440 local versions (the "+g<sha>" / ".devN" suffixes
-        # hatch-vcs emits on untagged commits). Fail fast so a dev build is never
-        # published — always run this workflow from a clean vX.Y.Z tag.
+        # Defense in depth: building at a clean tag (or with the pretend version)
+        # should already yield a clean X.Y.Z, but reject a "+g<sha>"/".devN" local
+        # version in case the ref is ever misconfigured. PyPI rejects these anyway.
         run: |
           set -euo pipefail
-          # Pick one wheel deterministically and parse the version from the
-          # standard wheel filename: {name}-{version}-{pytag}-{abitag}-{plat}.whl
           wheel="$(find dist -maxdepth 1 -name '*.whl' | sort | head -n1)"
           if [ -z "$wheel" ]; then
             echo "::error::No wheel found in dist/." >&2
@@ -57,14 +161,26 @@ jobs:
           version="$(basename "$wheel" | cut -d- -f2)"
           echo "Built version: $version"
           case "$version" in
-            *+*|*dev*)
-              echo "::error::Version '$version' is not a clean release version. Run this workflow from a vX.Y.Z tag." >&2
+            *+*)
+              echo "::error::Version '$version' carries a PEP 440 local segment (+...). Refusing to publish." >&2
               exit 1
               ;;
           esac
+          # On a real release the version must also match the resolved tag exactly.
+          if [ "${{ inputs.dry_run }}" != "true" ] && [ "$version" != "${{ needs.resolve.outputs.version }}" ]; then
+            echo "::error::Built version '$version' != resolved '${{ needs.resolve.outputs.version }}'." >&2
+            exit 1
+          fi
 
       - name: Validate package metadata
         run: uvx twine check dist/*
+
+      - name: Install-smoke-test the built wheel (real gate, not TestPyPI)
+        run: |
+          set -euo pipefail
+          uv venv /tmp/smoke --python 3.12
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/python -c "import tide2; print(tide2.__version__)"
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -74,43 +190,19 @@ jobs:
           if-no-files-found: error
           retention-days: 5
 
-  publish-testpypi:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: testpypi
-      url: https://test.pypi.org/p/tide2
-    permissions:
-      # Required for Trusted Publishing (OIDC).
-      id-token: write
-      # Required to download the dist artifact (job-level permissions replace the
-      # workflow-level read-all default, so the read scopes must be restated).
-      contents: read
-      actions: read
-    steps:
-      - name: Download dist artifact
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
-        with:
-          name: dist
-          path: dist/
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
-        with:
-          repository-url: https://test.pypi.org/legacy/
-
+  # ---------------------------------------------------------------------------
+  # Job 4a: publish-pypi — production upload (OIDC + attestations). HUMAN GATE 3.
+  # Skipped for pre-releases (rcN go to TestPyPI only) and on dry-runs.
+  # ---------------------------------------------------------------------------
   publish-pypi:
-    needs: publish-testpypi
-    if: inputs.target == 'both'
+    needs: [resolve, build]
+    if: ${{ !inputs.dry_run && needs.resolve.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi
       url: https://pypi.org/p/tide2
     permissions:
-      # Required for Trusted Publishing (OIDC).
-      id-token: write
-      # Required to download the dist artifact (job-level permissions replace the
-      # workflow-level read-all default, so the read scopes must be restated).
+      id-token: write # OIDC for Trusted Publishing
       contents: read
       actions: read
     steps:
@@ -119,6 +211,128 @@ jobs:
         with:
           name: dist
           path: dist/
-
       - name: Publish to PyPI
+        # attestations: true is the PEP 740 default under OIDC — keep it on.
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+
+  # ---------------------------------------------------------------------------
+  # Job 4b: publish-testpypi — TestPyPI upload for dry-runs AND pre-releases.
+  # Optional, non-blocking: never a `needs:` of the prod jobs, so TestPyPI
+  # flakiness can't block a real release.
+  # ---------------------------------------------------------------------------
+  publish-testpypi:
+    needs: [resolve, build]
+    if: ${{ inputs.dry_run || needs.resolve.outputs.prerelease == 'true' }}
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/tide2
+    permissions:
+      id-token: write # OIDC for Trusted Publishing
+      contents: read
+      actions: read
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  # ---------------------------------------------------------------------------
+  # Job 5: github-release — final publish step, reusing the exact dist/*.
+  # Pre-releases get --prerelease and depend on the TestPyPI upload instead.
+  # ---------------------------------------------------------------------------
+  github-release:
+    needs: [resolve, build, publish-pypi, publish-testpypi]
+    # Run on a real release once the matching upload (PyPI for stable, TestPyPI for
+    # pre-release) succeeded. always() lets us evaluate per-result since one of the
+    # two publish jobs is always skipped.
+    if: >-
+      ${{ always() && !inputs.dry_run && needs.build.result == 'success' &&
+          ((needs.resolve.outputs.prerelease == 'false' && needs.publish-pypi.result == 'success') ||
+           (needs.resolve.outputs.prerelease == 'true' && needs.publish-testpypi.result == 'success')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          persist-credentials: false
+      - name: Download dist artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: dist
+          path: dist/
+      - name: Extract changelog section
+        run: |
+          set -euo pipefail
+          ver="${{ needs.resolve.outputs.version }}"
+          # release-please headers look like "## [X.Y.Z](url) (date)"; tolerate an
+          # optional leading "v" and an optional link. Print lines until the next
+          # version header.
+          awk -v ver="$ver" '
+            $0 ~ "^## \\[?v?" ver "([](. )]|$)" {flag=1; next}
+            flag && /^## \[?v?[0-9]/ {flag=0}
+            flag {print}
+          ' CHANGELOG.md > release-notes.md || true
+          if [ -s release-notes.md ]; then
+            echo "Extracted changelog section for $ver."
+          else
+            echo "No changelog section found for $ver; will fall back to --generate-notes."
+          fi
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.resolve.outputs.tag }}"
+          args=(--title "$tag" --verify-tag)
+          if [ "${{ needs.resolve.outputs.prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          if [ -s release-notes.md ]; then
+            args+=(--notes-file release-notes.md)
+          else
+            args+=(--generate-notes)
+          fi
+          gh release create "$tag" "${args[@]}" dist/*.whl dist/*.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Job 6: verify-published — post-publish smoke test (closes the loop).
+  # Runs in parallel with github-release; an alarm, not a gate (PyPI is immutable).
+  # Stable releases only — pre-releases live on TestPyPI, not the prod index.
+  # ---------------------------------------------------------------------------
+  verify-published:
+    needs: [resolve, publish-pypi]
+    if: ${{ !inputs.dry_run && needs.resolve.outputs.prerelease == 'false' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.12"
+      - name: Install from PyPI and smoke test
+        run: |
+          set -euo pipefail
+          ver="${{ needs.resolve.outputs.version }}"
+          uv venv /tmp/v --python 3.12
+          installed=false
+          for i in $(seq 1 10); do
+            if uv pip install --python /tmp/v/bin/python "tide2==$ver"; then
+              installed=true
+              break
+            fi
+            echo "PyPI not propagated yet; retry $i"
+            sleep 30
+          done
+          if [ "$installed" != "true" ]; then
+            echo "::error::tide2==$ver did not install from PyPI after retries." >&2
+            exit 1
+          fi
+          /tmp/v/bin/python -c "import tide2; print(tide2.__version__)"

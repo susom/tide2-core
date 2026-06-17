@@ -36,61 +36,59 @@ Notes:
 - Python **3.12 only** (`>=3.12,<3.13`), constrained by the `spacy`/`thinc`
   C-extension stack.
 
-## Branching & workflow (Gitflow-style)
+## Branching & workflow (trunk-based)
 
-TIDE 2.0 uses a [Gitflow-style branching model](https://www.atlassian.com/git/tutorials/comparing-workflows/gitflow-workflow)
-with two long-lived branches — `main` and `development` — plus short-lived
-working branches:
+TIDE 2.0 uses a **trunk-based** branching model: a single long-lived branch
+(`main`) plus short-lived working branches. There is **no `development` branch**.
 
 | Branch | Role | Releases |
 |---|---|---|
-| `main` | Stable production history | Stable releases (e.g. `v1.0.0`) |
-| `development` | Integration / the pre-release branch | The prerelease |
-| `feat/*`, `fix/*`, etc. | Working branches | None |
-| `hotfix/*` | Urgent production fix | Patch |
+| `main` | The trunk — stable, always-releasable history | All releases (e.g. `v1.1.0`) |
+| `feat/*`, `fix/*`, etc. | Short-lived working branches | None |
 
 Contributor rules:
 
-- **Branch features from `development`** and open your **PR against `development`**.
-- `main` is stable production history — **never** PR a feature straight to `main`.
-- **Hotfixes** branch from `main`. Open **two PRs** for a hotfix: one into `main`
-  (to ship the fix) and one into `development` (to back-merge it), so the fix
-  lands on both lines and history stays linear.
+- **Branch features from `main`** and open your **PR against `main`**.
+- **Hotfixes** are just normal `fix:` PRs into `main` — there is no second line to
+  back-merge to, so no two-PR dance.
 - **Branch naming:** use `<type>/<short-desc>`, where `<type>` is one of the
-  allowed [commit types](#commit-messages--conventional-commits) (or `hotfix`) —
-  e.g. `feat/regex-recognizer`. A repository ruleset enforces this prefix and
+  allowed [commit types](#commit-messages--conventional-commits) — e.g.
+  `feat/regex-recognizer`. A repository ruleset enforces this prefix and
   **rejects** branches that don't match. If you have a tracking ticket you may
   include it (e.g. `fix/STAR-12269-changelog-order`), but it is **optional** —
   outside contributors won't have one. Keep names short, lowercase, and descriptive.
 
-You do **not** bump versions or edit `CHANGELOG.md` — see
+PRs are **squash-merged** with the **PR title as the squash commit subject**, and
+that title must be a valid [Conventional Commit](#commit-messages--conventional-commits)
+— it is what the release automation reads to compute the next version (a CI check
+enforces this). You do **not** bump versions or edit `CHANGELOG.md` — see
 [Releases](#releases-how-versioning-works).
 
 ### Day-to-day Git workflow
 
-**Start a feature branch** from an up-to-date `development`:
+**Start a feature branch** from an up-to-date `main`:
 
 ```bash
-git checkout development
+git checkout main
 git pull --rebase          # fast-forward to remote; should not produce conflicts
 git checkout -b feat/<short-desc>
 ```
 
-**Rebase onto `development` regularly** (do this daily, and always before opening
-or updating a PR — `development` changes often):
+**Rebase onto `main` regularly** (do this daily, and always before opening or
+updating a PR — `main` changes often):
 
 ```bash
-git checkout development
-git pull --rebase          # update local development to match remote
+git checkout main
+git pull --rebase          # update local main to match remote
 git checkout feat/<short-desc>
-git rebase development     # resolve any conflicts, then `git rebase --continue`
+git rebase main            # resolve any conflicts, then `git rebase --continue`
 git push --force-with-lease # your branch history was rewritten; safe-force the update
 ```
 
-Keep your branch rebased on the latest `development` until it merges, so the PR
-diff shows **only your changes**. PRs are **squash-merged**, so intermediate
-commits are collapsed — keep commit messages [conventional](#commit-messages--conventional-commits)
-since the squash message is what lands in history.
+Keep your branch rebased on the latest `main` until it merges, so the PR diff
+shows **only your changes**. PRs are **squash-merged**, so intermediate commits
+are collapsed — the **PR title** is what lands in history and drives the version
+bump, so keep it [conventional](#commit-messages--conventional-commits).
 
 ## Commit messages — Conventional Commits
 
@@ -199,8 +197,11 @@ coverage reports.
 
 Before opening a PR, confirm:
 
-- [ ] Branched from and rebased on `development`.
-- [ ] PR targets **`development`** (not `main`).
+- [ ] Branched from and rebased on `main`.
+- [ ] PR targets **`main`**.
+- [ ] The **PR title** is a valid [Conventional Commit](#commit-messages--conventional-commits)
+      (no breaking-change notation) — it becomes the squash subject and drives the
+      version bump.
 - [ ] Commit messages follow [Conventional Commits](#commit-messages--conventional-commits)
       (no breaking-change notation).
 - [ ] `uv run pre-commit run --all-files` passes clean.
@@ -209,12 +210,17 @@ Before opening a PR, confirm:
 
 ## Releases (how versioning works)
 
-Releases are produced by maintainers using
-[`python-semantic-release`](https://python-semantic-release.readthedocs.io/)
-along the two long-lived branches: `development` is the single pre-release line,
-while `main` produces stable releases. The next version and the `CHANGELOG.md`
-entries are derived **from your commit types** — `feat` → minor, `fix`/`perf` →
-patch. That's *why* commit hygiene matters.
+Releases are automated with
+[`release-please`](https://github.com/googleapis/release-please) on the `main`
+trunk. As Conventional-Commit PRs merge, release-please maintains a single open
+**release PR** that bumps `CHANGELOG.md` and the version manifest. The next
+version and the changelog entries are derived **from your PR titles / commit
+types** — `feat` → minor, `fix`/`perf` → patch. That's *why* title and commit
+hygiene matter.
+
+Merging that release PR cuts the version; a maintainer then runs the **Publish
+Release** workflow to tag, build, and publish to PyPI. See
+[PUBLISHING.md](PUBLISHING.md) for the full flow.
 
 Contributors do **not** bump versions or hand-edit `CHANGELOG.md`; the automation
 owns both.
