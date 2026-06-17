@@ -621,6 +621,7 @@ class AnonymizerSupervisor:
         acc_num_study_id: str | None = None,
         timeout: int = NOTE_PROCESSING_TIMEOUT_SECONDS,
         jitter_required: bool = False,
+        worker_num_cpus: int | float | None = None,
     ) -> None:
         """
         Initialize supervisor with a worker actor.
@@ -633,6 +634,8 @@ class AnonymizerSupervisor:
             timeout: Legacy per-note timeout (kept for backwards compatibility).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
+            worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
+                default (1). Set lower to fit small boxes.
         """
         self.salt = salt
         self.key = key
@@ -640,13 +643,20 @@ class AnonymizerSupervisor:
         self.acc_num_study_id = acc_num_study_id
         self.timeout = timeout
         self.jitter_required = jitter_required
-        self.worker = self._create_worker()
+        self._worker_num_cpus = worker_num_cpus
+        self.worker = self._spawn_worker()
         self.worker_kills = 0
-        logger.info(f"AnonymizerSupervisor initialized with {self.BATCH_TIMEOUT_SECONDS}s batch timeout")
+        logger.info(
+            f"AnonymizerSupervisor initialized with {self.BATCH_TIMEOUT_SECONDS}s batch timeout, "
+            f"worker_num_cpus={self._worker_num_cpus}"
+        )
 
-    def _create_worker(self) -> ray.actor.ActorHandle:
-        """Create a new AnonymizerWorker actor."""
-        return AnonymizerWorker.remote(
+    def _spawn_worker(self) -> ray.actor.ActorHandle:
+        """Create a new AnonymizerWorker actor, applying the CPU override when set."""
+        cls = AnonymizerWorker
+        if self._worker_num_cpus is not None:
+            cls = cls.options(num_cpus=self._worker_num_cpus)
+        return cls.remote(
             salt=self.salt,
             key=self.key,
             acc_num_salt=self.acc_num_salt,
@@ -687,7 +697,7 @@ class AnonymizerSupervisor:
         except ray.exceptions.GetTimeoutError:
             logger.warning(f"Batch timeout after {self.BATCH_TIMEOUT_SECONDS}s ({batch_size} notes), killing worker")
             ray.kill(self.worker)
-            self.worker = self._create_worker()
+            self.worker = self._spawn_worker()
             self.worker_kills += 1
 
             return self._failed_batch(
@@ -697,7 +707,7 @@ class AnonymizerSupervisor:
 
         except ray.exceptions.ActorDiedError as e:
             logger.warning("Worker died anonymizing batch of %d notes, respawning", batch_size)
-            self.worker = self._create_worker()
+            self.worker = self._spawn_worker()
             self.worker_kills += 1
 
             return self._failed_batch(
@@ -757,6 +767,7 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
+    worker_num_cpus: int | float | None = None,
 ) -> type[AnonymizerSupervisor]:
     """
     Factory function to create an AnonymizerSupervisor class with specific keys.
@@ -771,6 +782,8 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
+        worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
+            default (1). Set lower to fit small boxes.
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -799,6 +812,7 @@ def create_anonymizer_actor(
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
                 jitter_required=jitter_required,
+                worker_num_cpus=worker_num_cpus,
             )
 
     return ConfiguredAnonymizerActor

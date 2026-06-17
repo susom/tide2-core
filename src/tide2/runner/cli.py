@@ -59,6 +59,9 @@ def cmd_run(args: argparse.Namespace) -> None:
         ("read_op_min_num_blocks", "read_op_min_num_blocks"),
         ("target_max_block_size_mb", "target_max_block_size_mb"),
         ("target_min_block_size_mb", "target_min_block_size_mb"),
+        ("worker_num_cpus", "worker_num_cpus"),
+        ("write_cpus", "write_cpus"),
+        ("enable_checkpoint", "enable_checkpoint"),
     ]:
         val = getattr(args, attr, None)
         if val is not None:
@@ -107,6 +110,12 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("compile_cache_path", "compile_cache_path"),
                 ("num_agg_actors", "num_agg_actors"),
                 ("short_seq_budget", "short_seq_budget"),
+                ("read_cpus", "read_cpus"),
+                ("flat_map_cpus", "flat_map_cpus"),
+                ("write_cpus", "write_cpus"),
+                ("agg_num_cpus", "agg_num_cpus"),
+                ("transformer_cpus", "transformer_cpus"),
+                ("enable_checkpoint", "enable_checkpoint"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -166,6 +175,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("read_op_min_num_blocks", "read_op_min_num_blocks"),
                 ("target_max_block_size_mb", "target_max_block_size_mb"),
                 ("target_min_block_size_mb", "target_min_block_size_mb"),
+                ("write_cpus", "write_cpus"),
                 ("prompt_name", "prompt_name"),
             ]:
                 val = getattr(args, attr, None)
@@ -197,6 +207,12 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("compile_cache_path", "compile_cache_path"),
                 ("num_agg_actors", "num_agg_actors"),
                 ("short_seq_budget", "short_seq_budget"),
+                ("read_cpus", "read_cpus"),
+                ("flat_map_cpus", "flat_map_cpus"),
+                ("write_cpus", "write_cpus"),
+                ("agg_num_cpus", "agg_num_cpus"),
+                ("transformer_cpus", "transformer_cpus"),
+                ("enable_checkpoint", "enable_checkpoint"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -210,6 +226,10 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("batch_size", "batch_size"),
                 ("batch_timeout", "batch_timeout"),
                 ("cpus_per_actor", "num_cpus"),
+                ("read_cpus", "read_cpus"),
+                ("worker_num_cpus", "worker_num_cpus"),
+                ("write_cpus", "write_cpus"),
+                ("enable_checkpoint", "enable_checkpoint"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -227,6 +247,10 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("cpus_per_actor", "num_cpus"),
                 ("acc_num_salt", "acc_num_salt"),
                 ("acc_num_study_id", "acc_num_study_id"),
+                ("read_cpus", "read_cpus"),
+                ("worker_num_cpus", "worker_num_cpus"),
+                ("write_cpus", "write_cpus"),
+                ("enable_checkpoint", "enable_checkpoint"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -359,6 +383,42 @@ Examples:
     run_p.add_argument("--read-op-min-num-blocks", type=int, help="Min read output blocks (default: 200)")
     run_p.add_argument("--target-max-block-size-mb", type=int, help="Max block size in MB (default: 128)")
     run_p.add_argument("--target-min-block-size-mb", type=int, help="Min block size in MB (default: 1)")
+    run_p.add_argument(
+        "--worker-num-cpus",
+        type=float,
+        help="CPUs per supervisor worker actor (recognizer/anonymizer/pipeline). "
+        "Lower (with --cpus-per-actor) to fit small boxes; default: Ray default (1)",
+    )
+    run_p.add_argument(
+        "--write-cpus",
+        type=float,
+        help="CPUs per write_parquet task (recognizer/anonymizer/transformer/llm-recognizer/pipeline, default: 1.0)",
+    )
+    run_p.add_argument(
+        "--flat-map-cpus",
+        type=float,
+        help="CPUs per chunking flat_map task (transformer/pipeline jobs, default: 1.0)",
+    )
+    run_p.add_argument(
+        "--agg-num-cpus",
+        type=float,
+        help="CPUs per BIO aggregation actor (transformer/pipeline jobs, default: 1.0)",
+    )
+    run_p.add_argument(
+        "--transformer-cpus",
+        type=float,
+        help="CPU floor for the transformer actor (transformer/pipeline jobs). On CPU-only "
+        "small boxes set ~(total CPUs - 1); default: Ray default (0 GPU mode, 1 CPU mode)",
+    )
+    run_p.add_argument(
+        "--no-checkpoint",
+        dest="enable_checkpoint",
+        action="store_false",
+        default=None,
+        help="Disable Ray Data row-level checkpointing (recognizer/anonymizer/transformer/"
+        "pipeline). REQUIRED on tiny clusters (≲4 CPUs, e.g. Colab): the checkpoint shuffle "
+        "deadlocks Ray's reservation allocator. Trades resume capability, not correctness.",
+    )
     run_p.add_argument("--model", help="Model name (required for transformer jobs)")
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")
     run_p.add_argument("--bucket-name", help="GCS bucket for model loading (transformer jobs)")

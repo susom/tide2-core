@@ -52,6 +52,41 @@ logger = logging.getLogger(__name__)
 KEY_SIZE_BYTES = 32
 
 
+def _configure_checkpoint(
+    ctx: "ray.data.DataContext",
+    *,
+    enable: bool,
+    output_dir: Path,
+    id_column: str,
+) -> None:
+    """Configure (or clear) Ray Data row-level checkpointing on ``ctx``.
+
+    When ``enable`` is True, points the checkpoint at a sibling
+    ``<output_dir>_ray_checkpoint`` directory keyed on ``id_column``. When False,
+    clears any checkpoint config so it does not leak into the stage.
+
+    CRITICAL on tiny clusters (≲4 CPUs, e.g. 2-CPU Colab): enabling checkpointing
+    injects a sort + repartition shuffle whose per-operator CPU reservations,
+    under Ray 2.55's ReservationOpResourceAllocator, sum to more than the cluster
+    has — so nothing schedules and the stage hangs at 0/1
+    (``backpressured:tasks(ResourceBudget)``). Pass ``enable=False`` on such boxes;
+    the cost is loss of row-level resume, not correctness.
+
+    Note: ``ctx.op_resource_reservation_enabled = False`` does NOT resolve this —
+    the per-operator reservation floors still exceed a ≲4-CPU cluster. The
+    fractional-CPU knobs + ``enable=False`` are the validated fix.
+    """
+    if enable:
+        checkpoint_dir = output_dir.parent / (output_dir.name + "_ray_checkpoint")
+        ctx.checkpoint_config = CheckpointConfig(
+            id_column=id_column,
+            checkpoint_path=str(checkpoint_dir),
+            delete_checkpoint_on_success=False,
+        )
+    else:
+        ctx.checkpoint_config = None
+
+
 class LocalJobRunner:
     """
     Ray-based job runner for single-node execution (local machine or VM).
@@ -182,12 +217,15 @@ class LocalJobRunner:
         num_actors: int | None = None,
         batch_size: int = 150,
         batch_timeout: int = 120,
-        num_cpus: int = 2,
+        num_cpus: int | float = 2,
         read_parallelism: int | None = None,
         read_cpus: float = 0.25,
         read_op_min_num_blocks: int = 200,
         target_max_block_size_mb: int = 128,
         target_min_block_size_mb: int = 1,
+        worker_num_cpus: int | float | None = None,
+        write_cpus: float = 1.0,
+        enable_checkpoint: bool = True,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """
@@ -204,6 +242,18 @@ class LocalJobRunner:
             read_op_min_num_blocks: Minimum read output blocks for DataContext
             target_max_block_size_mb: Max block size in MB for DataContext
             target_min_block_size_mb: Min block size in MB for DataContext
+            worker_num_cpus: CPUs to reserve for each supervisor's worker actor.
+                None = Ray default (1). Each pool slot needs supervisor
+                (num_cpus) + worker (worker_num_cpus) CPUs; lower both to fit
+                small boxes.
+            write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
+                reproduces Ray's default task reservation.
+            enable_checkpoint: If True (default), enable Ray Data row-level
+                checkpointing for resume. MUST be set to False on tiny clusters
+                (≲4 CPUs, e.g. Google Colab): the checkpoint pipeline adds a
+                sort+repartition shuffle whose per-operator CPU reservations
+                exceed the cluster, deadlocking the stage at 0/1. Disabling it
+                trades resume capability (not correctness) for the ability to run.
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -266,14 +316,12 @@ class LocalJobRunner:
                     "columns_detected": columns,
                 }
 
-            # Configure Ray Data checkpointing for row-level resume
-            checkpoint_dir = output_dir.parent / (output_dir.name + "_ray_checkpoint")
+            # Configure Ray Data checkpointing for row-level resume. See
+            # _configure_checkpoint for why enable_checkpoint=False is REQUIRED on
+            # tiny clusters (≲4 CPUs, e.g. 2-CPU Colab) and why disabling
+            # op_resource_reservation_enabled does NOT help.
             ctx = ray.data.DataContext.get_current()
-            ctx.checkpoint_config = CheckpointConfig(
-                id_column="text_hash",
-                checkpoint_path=str(checkpoint_dir),
-                delete_checkpoint_on_success=False,
-            )
+            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column="text_hash")
 
             # Single streaming pipeline — no repartition, no segment loop.
             num_blocks = read_parallelism if read_parallelism is not None else len(input_files)
@@ -289,10 +337,13 @@ class LocalJobRunner:
                 RecognizerActor,
                 batch_size=batch_size,
                 compute=ray.data.ActorPoolStrategy(size=num_actors),
-                fn_constructor_kwargs={"batch_timeout": batch_timeout},
+                fn_constructor_kwargs={
+                    "batch_timeout": batch_timeout,
+                    "worker_num_cpus": worker_num_cpus,
+                },
                 **ray_remote_args,
             )
-            processed.write_parquet(str(output_dir), compression="zstd")
+            processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
             # Clear checkpoint config to avoid leaking to subsequent pipelines
             ctx.checkpoint_config = None
@@ -331,13 +382,15 @@ class LocalJobRunner:
         num_actors: int | None = None,
         batch_size: int = 10,
         batch_timeout: int = 300,
-        num_cpus: int = 1,
+        num_cpus: int | float = 1,
         worker_num_cpus: int | float | None = None,
         read_parallelism: int | None = None,
         read_cpus: float = 0.25,
         read_op_min_num_blocks: int = 200,
         target_max_block_size_mb: int = 128,
         target_min_block_size_mb: int = 1,
+        write_cpus: float = 1.0,
+        enable_checkpoint: bool = True,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """
@@ -373,6 +426,13 @@ class LocalJobRunner:
             read_op_min_num_blocks: Minimum read output blocks for DataContext
             target_max_block_size_mb: Max block size in MB for DataContext
             target_min_block_size_mb: Min block size in MB for DataContext
+            write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
+                reproduces Ray's default task reservation. Lower (e.g. 0.25) to
+                fit small boxes where concurrent operators contend for CPUs.
+            enable_checkpoint: If True (default), enable Ray Data row-level
+                checkpointing for resume. Set False on tiny clusters (≲4 CPUs):
+                the checkpoint sort+repartition shuffle deadlocks Ray 2.55's
+                reservation allocator. See run_recognition for details.
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -438,14 +498,12 @@ class LocalJobRunner:
                     "provider_type": provider_type,
                 }
 
-            # Configure Ray Data checkpointing for row-level resume
-            checkpoint_dir = output_dir.parent / (output_dir.name + "_ray_checkpoint")
+            # Configure Ray Data checkpointing for row-level resume. See
+            # _configure_checkpoint for why this must be disabled on tiny clusters
+            # (the checkpoint shuffle deadlocks Ray 2.55's reservation allocator, and
+            # disabling op_resource_reservation_enabled does NOT help).
             ctx = ray.data.DataContext.get_current()
-            ctx.checkpoint_config = CheckpointConfig(
-                id_column="text_hash",
-                checkpoint_path=str(checkpoint_dir),
-                delete_checkpoint_on_success=False,
-            )
+            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column="text_hash")
 
             # Single streaming pipeline
             # Default to num_actors blocks so data is distributed across all actors
@@ -476,7 +534,7 @@ class LocalJobRunner:
                 },
                 **ray_remote_args,
             )
-            processed.write_parquet(str(output_dir), compression="zstd")
+            processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
             # Clear checkpoint config to avoid leaking to subsequent pipelines
             ctx.checkpoint_config = None
@@ -509,7 +567,7 @@ class LocalJobRunner:
         key_path: str,
         num_actors: int | None = None,
         batch_size: int = 200,
-        num_cpus: int = 2,
+        num_cpus: int | float = 2,
         read_parallelism: int | None = None,
         read_cpus: float = 0.25,
         read_op_min_num_blocks: int = 200,
@@ -518,6 +576,9 @@ class LocalJobRunner:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        worker_num_cpus: int | float | None = None,
+        write_cpus: float = 1.0,
+        enable_checkpoint: bool = True,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """
@@ -540,6 +601,19 @@ class LocalJobRunner:
             acc_num_study_id: Study ID for accession number hashing
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically
+            worker_num_cpus: CPUs to reserve for each supervisor's worker actor.
+                None = Ray default (1). Each pool slot needs supervisor
+                (num_cpus) + worker (worker_num_cpus) CPUs; lower both to fit
+                small boxes.
+            write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
+                reproduces Ray's default task reservation. Also applies to the
+                follow-up ``processed.count()``, which re-executes the plan.
+            enable_checkpoint: If True (default), enable Ray Data row-level
+                checkpointing for resume. MUST be set to False on tiny clusters
+                (≲4 CPUs, e.g. Google Colab): the checkpoint pipeline adds a
+                sort+repartition shuffle whose per-operator CPU reservations
+                exceed the cluster, deadlocking the stage at 0/1. Disabling it
+                trades resume capability (not correctness) for the ability to run.
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -601,6 +675,7 @@ class LocalJobRunner:
             acc_num_salt=acc_num_salt,
             acc_num_study_id=acc_num_study_id,
             jitter_required=jitter_required,
+            worker_num_cpus=worker_num_cpus,
         )
 
         ray_remote_args = get_ray_remote_args_cpu(num_cpus=num_cpus)
@@ -622,15 +697,13 @@ class LocalJobRunner:
                     "keys_loaded": True,
                 }
 
-            # Configure Ray Data checkpointing for row-level resume
-            checkpoint_dir = output_dir.parent / (output_dir.name + "_ray_checkpoint")
+            # Configure Ray Data checkpointing for row-level resume. See
+            # _configure_checkpoint for why this must be disabled on tiny clusters
+            # (the checkpoint shuffle deadlocks Ray 2.55's reservation allocator, and
+            # disabling op_resource_reservation_enabled does NOT help).
             ctx = ray.data.DataContext.get_current()
             id_col = "row_id" if "row_id" in columns else "text_hash"
-            ctx.checkpoint_config = CheckpointConfig(
-                id_column=id_col,
-                checkpoint_path=str(checkpoint_dir),
-                delete_checkpoint_on_success=False,
-            )
+            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=id_col)
 
             # Single streaming pipeline — no repartition, no segment loop.
             num_blocks = read_parallelism if read_parallelism is not None else len(input_files)
@@ -648,7 +721,7 @@ class LocalJobRunner:
                 compute=ray.data.ActorPoolStrategy(size=num_actors),
                 **ray_remote_args,
             )
-            processed.write_parquet(str(output_dir), compression="zstd")
+            processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
             # Guard against silent total failure: Ray's max_errored_blocks and the
             # supervisor's _failed_batch fallback can turn every dropped batch into a
@@ -700,12 +773,60 @@ class LocalJobRunner:
         compile_cache_path: str | None = None,
         num_agg_actors: int | None = None,
         pre_chunked: bool = False,
+        read_cpus: float = 1.0,
+        flat_map_cpus: float = 1.0,
+        write_cpus: float = 1.0,
+        agg_num_cpus: float = 1.0,
+        transformer_cpus: float | None = None,
+        enable_checkpoint: bool = True,
     ) -> dict[str, Any]:
         """
         Run transformer NER job with proper document chunking.
 
         Documents are chunked into overlapping windows before inference,
         then predictions are aggregated back to document-level entities.
+
+        Hardware sizing (CPU/actor knobs)
+        ---------------------------------
+        Ray Data runs every operator of this stage concurrently
+        (read -> flat_map -> transformer actor -> BIO actor -> write) and, under
+        Ray 2.55's ReservationOpResourceAllocator, must reserve a minimum CPU
+        slice for each *eligible* operator at once. If those minimums sum to more
+        than the cluster's CPUs, NOTHING schedules and the stage hangs at 0/1
+        (``backpressured:tasks(ResourceBudget)``). Two independent levers avoid
+        this on small boxes:
+
+        1. **Fractional CPU knobs** (``read_cpus``, ``flat_map_cpus``,
+           ``write_cpus``, ``agg_num_cpus``, ``transformer_cpus``) shrink each
+           operator's reservation so the concurrent sum fits.
+        2. **``enable_checkpoint=False``** removes the checkpoint shuffle
+           (sort + repartition), which otherwise adds several more eligible
+           operators and re-triggers the deadlock *even with* fractional CPUs.
+           Both levers are required together on ≲4-CPU boxes.
+
+        Note: ``ctx.op_resource_reservation_enabled = False`` does NOT resolve this
+        — the per-operator reservation floors still exceed a ≲4-CPU cluster. The
+        fractional-CPU knobs + ``enable_checkpoint=False`` are the validated fix.
+
+        Recommended settings by hardware (C = total CPUs, G = total GPUs):
+
+        - **Big VM (C≳16), GPU or CPU**: use defaults (all knobs 1.0,
+          ``transformer_cpus=None``, ``enable_checkpoint=True``). The library
+          auto-scales actor counts; reservations fit comfortably.
+        - **Small GPU box (e.g. C=2, G=1 — Colab T4)**: the transformer actor is
+          GPU-pinned (0 CPU), so budget the CPU operators fractionally:
+          ``read_cpus=flat_map_cpus=write_cpus=0.25``, ``agg_num_cpus=0.5``,
+          ``transformer_cpus=0.25`` (small optional floor),
+          ``num_transformer_actors=1``, ``num_agg_actors=1``,
+          ``enable_checkpoint=False``.
+        - **Small CPU box (e.g. C=2, G=0 — Colab CPU)**: the actor needs ~1 CPU
+          and ``transformer_cpus`` also caps its torch thread count
+          (``transformer.py``: ``int(transformer_cpus) or 1``), so give it most
+          of the box: ``transformer_cpus=max(0.5, C-1.0)``,
+          ``read_cpus=flat_map_cpus=write_cpus=0.25``, ``agg_num_cpus=0.25``,
+          ``num_transformer_actors=1``, ``num_agg_actors=1``,
+          ``enable_checkpoint=False``. Expect SLOW single-threaded inference —
+          this restores correctness, not speed.
 
         Args:
             input_path: Input parquet files
@@ -733,6 +854,25 @@ class LocalJobRunner:
             pre_chunked: If True, input is already chunked (skip flat_map).
                 Expects columns: chunk_text, text_hash, chunk_id,
                 char_offset_start, patient_id.
+            read_cpus: CPUs to reserve for each read_parquet task. Default 1.0
+                reproduces Ray's default reservation. Lower (e.g. 0.25) to fit
+                small boxes where concurrent operators contend for CPUs.
+            flat_map_cpus: CPUs to reserve for each chunking flat_map task.
+                Default 1.0 reproduces Ray's default reservation.
+            write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
+                reproduces Ray's default reservation.
+            agg_num_cpus: CPUs to reserve for each BIO aggregation actor.
+                Default 1.0 reproduces Ray's default actor reservation.
+            transformer_cpus: CPU floor for the transformer actor. None leaves
+                the Ray default (0 CPU in GPU mode, since the actor is GPU-pinned;
+                1 CPU in CPU mode). In CPU mode this also caps torch threads, so
+                set it to ~(total CPUs - 1) on small CPU boxes.
+            enable_checkpoint: If True (default), enable Ray Data row-level
+                checkpointing for resume. MUST be set to False on tiny clusters
+                (≲4 CPUs): the checkpoint sort+repartition shuffle deadlocks the
+                stage regardless of the fractional CPU knobs above (see the
+                "Hardware sizing" section). Disabling it loses resume capability,
+                not correctness.
 
         Returns:
             Processing statistics dictionary
@@ -798,19 +938,22 @@ class LocalJobRunner:
         # text_hash is always present in the raw input parquet. chunk_uid is
         # produced by chunk_document_row after ReadParquet, so it does not
         # exist in the input schema when the checkpoint filter runs.
-        checkpoint_id_column = "text_hash"
-        checkpoint_dir = (Path(output_path).parent / (Path(output_path).name + "_ray_checkpoint")).resolve()
+        #
+        # CRITICAL on tiny clusters (≲4 CPUs): this is THE transformer-stage
+        # deadlock — fractional CPU knobs alone do NOT fix it, and disabling
+        # op_resource_reservation_enabled does NOT help either. See
+        # _configure_checkpoint for the full explanation; pass
+        # enable_checkpoint=False on small boxes.
         ctx = ray.data.DataContext.get_current()
-        ctx.checkpoint_config = CheckpointConfig(
-            id_column=checkpoint_id_column,
-            checkpoint_path=str(checkpoint_dir),
-            delete_checkpoint_on_success=False,
+        _configure_checkpoint(
+            ctx, enable=enable_checkpoint, output_dir=Path(output_path).resolve(), id_column="text_hash"
         )
 
         # Phase 1: Read documents (only columns needed for chunking + inference)
         ds: Dataset = ray.data.read_parquet(
             input_pattern,
             columns=["text_hash", "note_text", "patient_id"],
+            ray_remote_args={"num_cpus": read_cpus},
         )
 
         # Phase 2: Chunk documents (or skip if pre-chunked)
@@ -823,11 +966,15 @@ class LocalJobRunner:
             def chunk_fn(row):
                 return chunk_document_row(row, chunk_size, chunk_overlap)
 
-            ds_chunks = ds.flat_map(chunk_fn)
+            ds_chunks = ds.flat_map(chunk_fn, num_cpus=flat_map_cpus)
 
         # Phase 3: Transformer inference (raw BIO tokens only, no aggregation)
         # Use GPU remote args with num_gpus=0 for CPU-only mode (no GPU resource request)
         ray_remote_args_transformer = get_ray_remote_args_gpu(num_gpus=0 if cpu_only_mode else 1)
+        if transformer_cpus is not None:
+            # Set a CPU floor for the transformer actor. Never add num_gpus here
+            # in CPU mode; GPU pinning (num_gpus=1) is preserved in GPU mode.
+            ray_remote_args_transformer["num_cpus"] = transformer_cpus
 
         ds_raw = ds_chunks.map_batches(
             transformer_actor,
@@ -838,7 +985,7 @@ class LocalJobRunner:
         )
 
         # Phase 4: CPU BIO aggregation (runs concurrently with GPU via streaming)
-        ray_remote_args_cpu = get_ray_remote_args_cpu()
+        ray_remote_args_cpu = get_ray_remote_args_cpu(num_cpus=agg_num_cpus)
 
         ds_predictions = ds_raw.map_batches(
             BIOAggregationActor,
@@ -849,7 +996,7 @@ class LocalJobRunner:
         )
 
         # Phase 5: Write chunk-level predictions (fully streaming, no groupby)
-        ds_predictions.write_parquet(output_path, compression="zstd")
+        ds_predictions.write_parquet(output_path, compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
         # Clear checkpoint config to avoid leaking to subsequent pipelines
         ctx.checkpoint_config = None
