@@ -8,7 +8,7 @@ Available anonymizers:
 - AccessionNumberHashAnonymizer: SHA256-based hashing for accession numbers (BQ compatible)
 - FakerAnonymizer: Uses Faker library for realistic fake data generation
 - AgeGroupAnonymizer: Groups ages into ranges for anonymization
-- DateJitterAnonymizer: Adds random noise to dates
+- DateJitterAnonymizer: Adds deterministic per-patient jitter to dates
 - HipsAlphaNumericAnonymizer: HIPS-based alphanumeric anonymization
 - HipsLocationAnonymizer: HIPS-based location anonymization
 - HipsNamesAnonymizer: HIPS-based name anonymization

@@ -13,7 +13,6 @@ Tests cover date jittering functionality with various formats including:
 
 from datetime import datetime
 from datetime import timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -216,6 +215,14 @@ class TestDateJitterAnonymizer:
         result = self.anonymizer._format_mm_dd(12, 5, 2022, "-")
         assert result == "12-05"
 
+    def test_format_dd_mm(self):
+        """Test _format_dd_mm method (day-first, no year)."""
+        result = self.anonymizer._format_dd_mm(3, 15, 2023, "/")
+        assert result == "15/03"
+
+        result = self.anonymizer._format_dd_mm(12, 5, 2022, "-")
+        assert result == "05-12"
+
     def test_format_yyyy_mm(self):
         """Test _format_yyyy_mm method."""
         result = self.anonymizer._format_yyyy_mm(3, 15, 2023, "/")
@@ -343,29 +350,21 @@ class TestDateJitterAnonymizer:
 
     # Integration tests with real date patterns
     def test_integration_simple_date_formats(self):
-        """Integration test with simple date formats that should work."""
+        """Integration test asserting full-date formats jitter to an exact value.
+
+        These assert the exact expected output (not just "a non-empty string"),
+        so a regression that drops a component or fails to shift the date is
+        caught instead of silently passing.
+        """
         test_cases = [
-            # Simple cases that are likely to work with real patterns
-            ("03/15/2023", {"entity_type": "DATE", "jitter": 10}),
-            ("2023-03-15", {"entity_type": "DATE", "jitter": -5}),
-            ("15/03/2023", {"entity_type": "DATE", "jitter": 7}),
+            ("03/15/2023", {"entity_type": "DATE", "jitter": 10}, "03/25/2023"),  # US mm/dd/yyyy
+            ("2023-03-15", {"entity_type": "DATE", "jitter": -5}, "2023-03-10"),  # ISO yyyy-mm-dd
+            ("15/03/2023", {"entity_type": "DATE", "jitter": 7}, "22/03/2023"),  # day-first dd/mm/yyyy
         ]
 
-        succeeded = 0
-        for date_str, params in test_cases:
-            try:
-                result = self.anonymizer.operate(date_str, params)
-                # Should return either a jittered date or the default replacement
-                assert isinstance(result, str)
-                assert len(result) > 0
-                succeeded += 1
-            except ValueError:
-                # Some patterns might not match, which is acceptable for this test
-                pass
-
-        # Guard against the loop silently becoming a no-op: at least one of the
-        # common formats must be handled without raising.
-        assert succeeded > 0, "Expected at least one simple date format to be handled"
+        for date_str, params, expected in test_cases:
+            result = self.anonymizer.operate(date_str, params)
+            assert result == expected, f"{date_str} -> {result!r}, expected {expected!r}"
 
     def test_integration_month_year_formats(self):
         """Integration test with month/year only formats."""
@@ -422,11 +421,11 @@ class TestDateJitterAnonymizer:
         days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         for day in days:
             result = self.anonymizer.operate(day, params)
-            # Result should be a valid day of the week
+            # Result is a deterministic rotation, so it is always a valid day of
+            # the week. (It can equal the original when jitter % 7 == 0, which is
+            # not the case for jitter=10; see
+            # test_day_of_week_jitter_multiple_of_seven_maps_to_self.)
             assert result in days
-            # Result should be different from the original (with very high probability)
-            # Note: There's a small chance (1/6) it could be the same due to randomness
-            # So we'll just check it's a valid day
 
     def test_day_of_week_abbreviated(self):
         """Test replacement of abbreviated day-of-week name."""
@@ -436,7 +435,8 @@ class TestDateJitterAnonymizer:
         days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         for day in days:
             result = self.anonymizer.operate(day, params)
-            # Result should be a valid abbreviated day of the week
+            # Result is a deterministic rotation within the abbreviated table, so
+            # it is always a valid abbreviated day of the week.
             assert result in days
 
     def test_day_of_week_lowercase(self):
@@ -464,27 +464,133 @@ class TestDateJitterAnonymizer:
         assert result[1:].islower()
         assert result in self.anonymizer.days_of_week_full
 
-    def test_day_of_week_randomness(self):
-        """Test that day-of-week replacement varies and never returns the original.
-
-        Deterministic: random.choice is patched with a controlled sequence so the
-        assertions don't depend on chance (the production code uses
-        random.choice over the candidate days, excluding the original).
-        """
+    def test_day_of_week_deterministic_reproducible(self):
+        """Same jitter maps a weekday to the same replacement on every call."""
         params = {"entity_type": "DATE", "jitter": 10}
 
-        # Feed a fixed sequence of distinct, non-original days. random.choice is
-        # patched in the date_jitter module so each call returns the next value.
-        scripted_days = ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        with patch("tide2.anonymizers.date_jitter.random.choice", side_effect=scripted_days) as mock_choice:
-            results = [self.anonymizer.operate("Monday", params) for _ in range(len(scripted_days))]
+        results = [self.anonymizer.operate("Monday", params) for _ in range(5)]
 
-        # Replacement candidates never include the original day.
-        for call in mock_choice.call_args_list:
-            available_days = call.args[0]
-            assert "Monday" not in available_days
+        # Deterministic: every run produces the identical output.
+        assert len(set(results)) == 1
 
-        # Output reflects the scripted choices: varied and never the original.
-        assert results == scripted_days
-        assert len(set(results)) > 1, "Day replacement should show variation"
-        assert "Monday" not in results
+    def test_day_of_week_rotation_matches_jitter(self):
+        """Replacement equals days_of_week_full[(idx + jitter) % 7]."""
+        full = self.anonymizer.days_of_week_full
+        for jitter in (3, 10, 47):
+            params = {"entity_type": "DATE", "jitter": jitter}
+            for idx, day in enumerate(full):
+                result = self.anonymizer.operate(day, params)
+                assert result == full[(idx + jitter) % 7]
+
+    def test_day_of_week_negative_jitter(self):
+        """Negative jitter wraps correctly (Python % is non-negative)."""
+        params = {"entity_type": "DATE", "jitter": -10}
+
+        # (0 + -10) % 7 == 4 -> Friday
+        result = self.anonymizer.operate("Monday", params)
+        assert result == self.anonymizer.days_of_week_full[(0 + -10) % 7]
+        assert result == "Friday"
+
+    def test_day_of_week_jitter_multiple_of_seven_maps_to_self(self):
+        """jitter % 7 == 0 maps a weekday to itself (intended, unbiased)."""
+        full = self.anonymizer.days_of_week_full
+        for jitter in (7, 14):
+            params = {"entity_type": "DATE", "jitter": jitter}
+            for day in full:
+                assert self.anonymizer.operate(day, params) == day
+
+    def test_day_of_week_abbrev_stays_abbreviated(self):
+        """Abbreviated input maps within the abbreviated table, never a full name."""
+        params = {"entity_type": "DATE", "jitter": 10}
+
+        result = self.anonymizer.operate("Mon", params)
+        assert result in self.anonymizer.days_of_week_abbrev
+        assert result not in self.anonymizer.days_of_week_full
+
+    def test_day_of_week_different_jitter_different_mapping(self):
+        """Different jitter values can produce different mappings (sanity)."""
+        result_a = self.anonymizer.operate("Monday", {"entity_type": "DATE", "jitter": 3})
+        result_b = self.anonymizer.operate("Monday", {"entity_type": "DATE", "jitter": 5})
+        assert result_a != result_b
+
+    # Regression tests: numeric day-first dates (dd/mm/yyyy) must jitter the
+    # whole date, not silently drop the day and pass month/year through. The
+    # earlier integration tests only asserted isinstance(result, str) and
+    # len(result) > 0, so they missed that "15-03-2010" collapsed to "03-2010".
+    def test_day_first_with_year_jitters_full_date(self):
+        """dd-mm-yyyy where the leading number is unambiguously a day (>12)."""
+        # 15 March 2010 + 10 days = 25 March 2010, format preserved.
+        assert self.anonymizer.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10}) == "25-03-2010"
+        assert self.anonymizer.operate("15/03/2010", {"entity_type": "DATE", "jitter": 10}) == "25/03/2010"
+
+    def test_day_first_with_year_rolls_over_month(self):
+        """Day-first jitter must roll over month/year boundaries."""
+        # 25 Dec 2010 + 10 days = 4 Jan 2011.
+        assert self.anonymizer.operate("25/12/2010", {"entity_type": "DATE", "jitter": 10}) == "04/01/2011"
+
+    def test_day_first_does_not_drop_day(self):
+        """Guard against the original bug: the day component must not disappear."""
+        result = self.anonymizer.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10})
+        # The buggy behavior produced "03-2010" (two components). A correct
+        # dd-mm-yyyy result always has three dash-separated components.
+        assert result.count("-") == 2
+        assert result != "03-2010"
+
+    def test_day_first_without_year(self):
+        """dd/mm (no year) with an unambiguous leading day must stay day-first."""
+        # 15/03 + 7 days = 22/03.
+        assert self.anonymizer.operate("15/03", {"entity_type": "DATE", "jitter": 7}) == "22/03"
+
+    def test_ambiguous_leading_value_stays_us_month_first(self):
+        """A leading 01-12 is ambiguous and keeps the US mm/dd interpretation."""
+        # 03/04/2010 is read as March 4th (mm/dd/yyyy); +10 days = March 14th.
+        assert self.anonymizer.operate("03/04/2010", {"entity_type": "DATE", "jitter": 10}) == "03/14/2010"
+
+    def test_separator_preserved_across_instances(self):
+        """The dash separator must survive on a second instance.
+
+        Regression for the class-level _separator_acceptance cache being keyed by
+        bound methods: a fresh instance used to miss the cache and silently fall
+        back to '/', so "15-03-2010" came out as "25/03/2010".
+        """
+        first = DateJitterAnonymizer()
+        first.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10})  # populate class cache
+
+        second = DateJitterAnonymizer()
+        assert second.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10}) == "25-03-2010"
+        assert second.operate("2023-03-15", {"entity_type": "DATE", "jitter": -5}) == "2023-03-10"
+
+    def test_iso_datetime_with_time_jitters_date_component(self):
+        """ISO datetime (yyyy-mm-ddTHH:MM:SS) must jitter the date, not truncate.
+
+        Regression: the ISO pattern used ``(T?:...)`` which required a literal
+        ':' after the optional 'T', so a real ``...T15:11:00`` value never
+        matched the ISO branch and collapsed to ``yyyy-mm`` instead.
+        """
+        # 2008-08-09 + 5 days = 2008-08-14 (date jittered; the ISO branch fires).
+        assert self.anonymizer.operate("2008-08-09T15:11:00", {"entity_type": "DATE_TIME", "jitter": 5}) == "2008-08-14"
+
+    def test_embedded_weekday_does_not_drop_rest_of_value(self):
+        """A weekday embedded in a longer date must not short-circuit the scan.
+
+        Regression: the standalone day-of-week fast-path used ``search`` and
+        returned only the rotated weekday, dropping the trailing date (e.g.
+        "Monday, 2023-03-15" became just a weekday). The fast-path now only fires
+        when the weekday IS the whole stripped value.
+        """
+        # The embedded ISO date should jitter; the weekday must not hijack it.
+        # 2023-03-15 + 5 days = 2023-03-20.
+        assert self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5}) == "2023-03-20"
+
+    def test_standalone_weekday_with_trailing_punctuation_still_rotates(self):
+        """A weekday-only entity with surrounding punctuation/space must rotate.
+
+        Regression: the standalone fast-path checked ``match.group(0) ==
+        stripped``, so "Monday," or " Monday " skipped the fast-path and fell
+        through to the default replacement. Standalone now means "no other
+        alphanumeric content outside the weekday match".
+        """
+        params = {"entity_type": "DATE_TIME", "jitter": 5}
+        # Monday + 5 = Saturday; punctuation/whitespace must not break the path.
+        for value in ("Monday,", "  Monday  ", "Monday."):
+            assert self.anonymizer.operate(value, params) == "Saturday"
