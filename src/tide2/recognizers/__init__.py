@@ -28,6 +28,7 @@ High-performance recognizers (faster regex-only, used as default in workflows):
 - AccessionRecognizer: High-performance accession number detection (23x faster)
 - SsnRecognizer: High-performance US SSN detection (10-20x faster than Presidio)
 - AddressRecognizer: High-performance US address detection using usaddress library
+- InstitutionRecognizer: Institution-specific PHI detection (ships with Stanford Health Care patterns)
 
 Note: For batch processing, use the runner module:
     from tide2.runner import LocalJobRunner
@@ -46,9 +47,9 @@ from .cached_results_transformers_recognizer import create_cached_recognizer
 from .email_recognizer import EmailRecognizer
 from .genetic_sequence_recognizer import GeneticSequenceRecognizer
 from .har_recognizer import HarRecognizer
+from .institution_recognizer import InstitutionRecognizer
 from .known_values import KnownValuesRecognizer
 from .known_values import create_recognizers_for_patient
-from .llm_json_recognizer import LlmJsonRecognizer
 from .mrn_recognizer import MrnRecognizer
 from .passthrough_recognizer import PassthroughRecognizer
 from .phone_recognizer import PhoneRecognizer
@@ -57,11 +58,26 @@ from .url_recognizer import UrlRecognizer
 
 
 def __getattr__(name: str):
-    """Lazy import for torch-dependent recognizers."""
+    """Lazy import for recognizers with heavy/optional dependencies.
+
+    ``TransformersRecognizer`` pulls in torch; ``LlmJsonRecognizer`` pulls in
+    the provider SDKs from the optional ``[llm]`` extra. Importing them lazily
+    keeps ``import tide2.recognizers`` working without those extras installed.
+    """
     if name == "TransformersRecognizer":
         from .transformers_recognizer import TransformersRecognizer
 
         return TransformersRecognizer
+    if name == "LlmJsonRecognizer":
+        try:
+            from .llm_json_recognizer import LlmJsonRecognizer
+        except ModuleNotFoundError as exc:
+            from tide2._optional import reraise_missing_llm_sdk
+
+            reraise_missing_llm_sdk("LlmJsonRecognizer", exc)
+            raise  # real internal import failure: propagate unchanged
+
+        return LlmJsonRecognizer
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -73,6 +89,7 @@ __all__ = [
     "EmailRecognizer",
     "GeneticSequenceRecognizer",
     "HarRecognizer",
+    "InstitutionRecognizer",
     "KnownValuesRecognizer",
     "LlmJsonRecognizer",
     "MrnRecognizer",

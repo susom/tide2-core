@@ -27,14 +27,19 @@ Example:
 from tide2.actors.anonymizer import AnonymizerActor
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.actors.anonymizer import create_anonymizer_actor_class  # Backwards compatibility
-from tide2.actors.llm_recognizer import LlmRecognizerActor
 from tide2.actors.reassembly import ReassemblyActor
 from tide2.actors.recognizer import NoOpContextEnhancer
 from tide2.actors.recognizer import RecognizerActor
 
 
 def __getattr__(name: str):
-    """Lazy import for torch-dependent transformer actors."""
+    """Lazy import for actors with heavy/optional dependencies.
+
+    Transformer actors pull in torch; the LLM recognizer pulls in the provider
+    SDKs from the optional ``[llm]`` extra (openai/anthropic/google-genai).
+    Importing them lazily keeps ``import tide2.actors`` working for non-LLM,
+    non-transformer jobs even when those extras are not installed.
+    """
     _transformer_exports = {
         "BIOAggregationActor",
         "TransformerInferenceActor",
@@ -45,6 +50,16 @@ def __getattr__(name: str):
         from tide2.actors import transformer as _mod
 
         return getattr(_mod, name)
+    if name == "LlmRecognizerActor":
+        try:
+            from tide2.actors.llm_recognizer import LlmRecognizerActor as _LlmRecognizerActor
+        except ModuleNotFoundError as exc:
+            from tide2._optional import reraise_missing_llm_sdk
+
+            reraise_missing_llm_sdk("LlmRecognizerActor", exc)
+            raise  # real internal import failure: propagate unchanged
+
+        return _LlmRecognizerActor
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
