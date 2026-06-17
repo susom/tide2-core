@@ -423,7 +423,8 @@ class TestDateJitterAnonymizer:
             result = self.anonymizer.operate(day, params)
             # Result is a deterministic rotation, so it is always a valid day of
             # the week. (It can equal the original when jitter % 7 == 0, which is
-            # not the case for jitter=10; see test_day_of_week_deterministic.)
+            # not the case for jitter=10; see
+            # test_day_of_week_jitter_multiple_of_seven_maps_to_self.)
             assert result in days
 
     def test_day_of_week_abbreviated(self):

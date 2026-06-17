@@ -190,7 +190,7 @@ class DateJitterAnonymizer(Operator):
             return original_day
 
         idx = table.index(original_day_normalized)
-        replacement = table[(idx + jitter) % 7]
+        replacement = table[(idx + jitter) % len(table)]
 
         # Preserve original casing
         if original_day.isupper():
