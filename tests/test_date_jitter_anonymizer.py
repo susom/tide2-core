@@ -568,10 +568,7 @@ class TestDateJitterAnonymizer:
         matched the ISO branch and collapsed to ``yyyy-mm`` instead.
         """
         # 2008-08-09 + 5 days = 2008-08-14 (date jittered; the ISO branch fires).
-        assert (
-            self.anonymizer.operate("2008-08-09T15:11:00", {"entity_type": "DATE_TIME", "jitter": 5})
-            == "2008-08-14"
-        )
+        assert self.anonymizer.operate("2008-08-09T15:11:00", {"entity_type": "DATE_TIME", "jitter": 5}) == "2008-08-14"
 
     def test_embedded_weekday_does_not_drop_rest_of_value(self):
         """A weekday embedded in a longer date must not short-circuit the scan.
@@ -583,7 +580,4 @@ class TestDateJitterAnonymizer:
         """
         # The embedded ISO date should jitter; the weekday must not hijack it.
         # 2023-03-15 + 5 days = 2023-03-20.
-        assert (
-            self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5})
-            == "2023-03-20"
-        )
+        assert self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5}) == "2023-03-20"
