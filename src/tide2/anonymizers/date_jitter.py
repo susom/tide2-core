@@ -454,14 +454,19 @@ class DateJitterAnonymizer(Operator):
 
     @staticmethod
     def _extract_separator(match: re.Match) -> str:
-        """Return the date separator captured by the pattern (defaults to '/')."""
-        try:
-            # The separator is typically in group 2 for most patterns.
-            return match.group(2)
-        except (IndexError, AttributeError):
-            # Fallback to group 1 for some patterns.
-            with contextlib.suppress(IndexError, AttributeError):
-                return match.group(1)
+        """Return the date separator captured by the pattern (defaults to '/').
+
+        Only ``/`` and ``-`` are valid separators in the grammar. ``match.group``
+        can return ``None`` for a non-participating group, and the group may hold
+        a non-separator value; in either case we fall back to ``/`` so the
+        separator can never leak a literal ``None`` or a date component into the
+        output.
+        """
+        with contextlib.suppress(IndexError):
+            # The separator is captured in group 2 for every separator pattern.
+            candidate = match.group(2)
+            if candidate in ("/", "-"):
+                return candidate
         return "/"
 
     def validate(self, params: dict) -> None:
