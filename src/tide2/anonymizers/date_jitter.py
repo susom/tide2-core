@@ -9,6 +9,7 @@ deterministic function of the jitter.
 import contextlib
 import inspect
 import re
+from collections.abc import Callable
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -241,10 +242,12 @@ class DateJitterAnonymizer(Operator):
             return replacement.lower()
         return replacement
 
-    def _compile_patterns(self) -> list[tuple[Pattern, str]]:
+    def _compile_patterns(self) -> list[tuple[Pattern, Callable]]:
         """
         Compile all date patterns used for matching.
-        Returns a list of tuples containing (compiled_pattern, replacement_template)
+        Returns a list of tuples containing (compiled_pattern, format_function),
+        where format_function is a bound formatter method (e.g. _format_mm_dd_yyyy)
+        that builds the jittered replacement string for a match.
         """
 
         patterns = [
@@ -263,6 +266,13 @@ class DateJitterAnonymizer(Operator):
             (
                 f"{_PRECEDING}{_DAY_FIRST}(/|-){_MON}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING}",
                 self._format_dd_mm_yyyy,
+            ),
+            # 2008-08-09T15:11:00 (ISO format). Checked before the plain
+            # yyyy-mm-dd / yyyy-mm patterns so the 'T'-separated time does not
+            # get truncated by an earlier, shorter match.
+            (
+                f"{_PRECEDING}{_YEAR}(/|-){_MON}\\2{_DAY}(?:T\\s*{_TIME})?{_FOLLOWING}",
+                self._format_iso_date,
             ),
             # yyyy-mm-dd or yyyy/mm/dd
             (
@@ -307,11 +317,6 @@ class DateJitterAnonymizer(Operator):
             (f"{_PRECEDING}{_MON}(/|-){_DAY}\\b", self._format_mm_dd),
             # yyyy/mm (year/month without day)
             (f"{_PRECEDING}{_YEAR}(/|-){_MON}\\b", self._format_yyyy_mm),
-            # 2008-08-09T15:11:00 (ISO format)
-            (
-                f"{_PRECEDING}{_YEAR}(/|-){_MON}\\2{_DAY}(T?:\\s*{_TIME})?",
-                self._format_iso_date,
-            ),
             # 20080809151100 (compact format)
             (f"{_PRECEDING}{_YEAR}{_MON}{_DAY}(?:\\s*{_TIME})?", self._format_compact_date),
         ]
@@ -355,8 +360,13 @@ class DateJitterAnonymizer(Operator):
             text: The original date text in any supported format.
             params: Operator parameters. Required/supported keys:
                 - jitter (int): Number of days to shift the date. Required.
-                - entity_type (str): Entity type label (e.g. "DATE_TIME").
-                  Defaults to "DEFAULT".
+                - entity_type (str): Entity type label. Required: must be one of
+                  the supported types ("DATE_TIME", "DATE"). Any other value
+                  (including the absent default) raises ValueError.
+
+        Raises:
+            ValueError: If ``jitter`` is missing or ``entity_type`` is not a
+                supported type.
 
         Returns:
             The date-shifted text preserving the original format, or the
@@ -380,12 +390,28 @@ class DateJitterAnonymizer(Operator):
 
         # Return the result for the first pattern that matches; non-date input
         # that matches nothing falls through to the default replacement.
+        stripped = text.strip()
         for pattern, replacement in self.substitutions:
             match = pattern.search(text)
-            if match:
-                return self._replace_match(match, replacement, jitter)
+            if not match:
+                continue
+            # The day-of-week pattern is a "standalone" fast-path: only take it
+            # when the matched weekday IS the whole (stripped) value. Otherwise a
+            # weekday embedded in a longer date (e.g. "Monday, 2023-03-15") would
+            # match here and drop the rest of the string, so keep scanning.
+            if self._matched_day_of_week(match) and match.group(0) != stripped:
+                continue
+            return self._replace_match(match, replacement, jitter)
 
         return self.default_replacement
+
+    @staticmethod
+    def _matched_day_of_week(match: re.Match) -> bool:
+        """Return True if this match captured a standalone day-of-week group."""
+        try:
+            return match.group("day_of_week") is not None
+        except (IndexError, AttributeError):
+            return False
 
     def _is_passthrough(self, text: str) -> bool:
         """Return True for values that should be returned unchanged (non-PHI)."""
@@ -407,12 +433,8 @@ class DateJitterAnonymizer(Operator):
     def _replace_match(self, match: re.Match, replacement, jitter: int) -> str:
         """Build the jittered replacement string for a single regex match."""
         # Standalone day of week: rotate directly (it carries no numeric date).
-        try:
-            day_of_week = match.group("day_of_week")
-        except (IndexError, AttributeError):
-            day_of_week = None
-        if day_of_week is not None:
-            return self._format_day_of_week(day_of_week, jitter)
+        if self._matched_day_of_week(match):
+            return self._format_day_of_week(match.group("day_of_week"), jitter)
 
         month, month_format_str = self._extract_month(match)
         year_str = self._extract_year(match)

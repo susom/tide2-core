@@ -559,3 +559,31 @@ class TestDateJitterAnonymizer:
         second = DateJitterAnonymizer()
         assert second.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10}) == "25-03-2010"
         assert second.operate("2023-03-15", {"entity_type": "DATE", "jitter": -5}) == "2023-03-10"
+
+    def test_iso_datetime_with_time_jitters_date_component(self):
+        """ISO datetime (yyyy-mm-ddTHH:MM:SS) must jitter the date, not truncate.
+
+        Regression: the ISO pattern used ``(T?:...)`` which required a literal
+        ':' after the optional 'T', so a real ``...T15:11:00`` value never
+        matched the ISO branch and collapsed to ``yyyy-mm`` instead.
+        """
+        # 2008-08-09 + 5 days = 2008-08-14 (date jittered; the ISO branch fires).
+        assert (
+            self.anonymizer.operate("2008-08-09T15:11:00", {"entity_type": "DATE_TIME", "jitter": 5})
+            == "2008-08-14"
+        )
+
+    def test_embedded_weekday_does_not_drop_rest_of_value(self):
+        """A weekday embedded in a longer date must not short-circuit the scan.
+
+        Regression: the standalone day-of-week fast-path used ``search`` and
+        returned only the rotated weekday, dropping the trailing date (e.g.
+        "Monday, 2023-03-15" became just a weekday). The fast-path now only fires
+        when the weekday IS the whole stripped value.
+        """
+        # The embedded ISO date should jitter; the weekday must not hijack it.
+        # 2023-03-15 + 5 days = 2023-03-20.
+        assert (
+            self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5})
+            == "2023-03-20"
+        )
