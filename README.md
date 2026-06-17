@@ -173,7 +173,45 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
 # Run anonymization
 tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
     --salt /path/to/salt.bin --key /path/to/key.bin
+
+# Run on a small box (e.g. 2-CPU Google Colab) WITHOUT deadlocking. Two fixes
+# are required together (see below): fractional CPUs AND --no-checkpoint.
+# GPU box (T4): the transformer actor is GPU-pinned, so budget read/flat-map/
+# write/agg fractionally; CPU-only box: also give the transformer actor ~C-1.
+tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
+    --model StanfordAIMI/stanford-deidentifier-v2 \
+    --num-actors 1 --cpus-per-actor 0.5 --worker-num-cpus 1.0 \
+    --read-cpus 0.25 --flat-map-cpus 0.25 --write-cpus 0.25 \
+    --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 ```
+
+#### Why small boxes deadlock (and how to size knobs by hardware)
+
+Ray Data runs every operator of a stage concurrently and, under Ray 2.55's
+reservation allocator, must reserve a minimum CPU slice for **every** eligible
+operator at once. When that sum exceeds the cluster's CPUs, nothing schedules and
+the stage hangs forever at `0/1` (`backpressured:tasks(ResourceBudget)`). On a
+2-CPU box there are **two independent causes — both must be fixed together**:
+
+1. **Whole-CPU operator reservations.** Defaults reserve ~1 CPU per operator;
+   read + flat_map + actor + agg + write exceeds 2. Fix with fractional CPUs.
+2. **The checkpoint shuffle.** Row-level resume injects a sort + repartition
+   shuffle (extra operators) that re-triggers the deadlock *even with* fractional
+   CPUs. Fix with `--no-checkpoint` (trades resume capability, not correctness).
+
+The knobs are additive and default to today's whole-CPU reservations + checkpointing
+on, so omitting them preserves large-VM behavior. Size them to fit the sum of a
+stage's *concurrent* operator reservations within the available CPUs (C = total CPUs):
+
+- **Big box (C ≳ 16)**: use defaults (omit all knobs).
+- **Transformer stage**: `--read-cpus`, `--flat-map-cpus`, `--write-cpus`,
+  `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
+  transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
+  caps the actor's torch threads).
+- **Recognizer / anonymizer stages**: `--cpus-per-actor` (supervisor), `--worker-num-cpus`
+  (worker actor), `--read-cpus`, `--write-cpus`. Each pool slot needs supervisor +
+  worker CPUs, so budget both.
+- **All stages on C ≲ 4**: add `--no-checkpoint`.
 
 
 ### Interactive Visualizer

@@ -516,17 +516,34 @@ class RecognizerSupervisor:
     # At ~50ms/note, 100 notes = 5s expected. 120s allows for outlier notes.
     BATCH_TIMEOUT_SECONDS = 120
 
-    def __init__(self, batch_timeout: int = BATCH_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        batch_timeout: int = BATCH_TIMEOUT_SECONDS,
+        worker_num_cpus: int | float | None = None,
+    ) -> None:
         """
         Initialize supervisor with a worker actor.
 
         Args:
             batch_timeout: Seconds before a batch is killed and marked failed.
+            worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
+                default (1). Set lower to fit small boxes.
         """
         self.batch_timeout = batch_timeout
-        self.worker = RecognizerWorker.remote()
+        self._worker_num_cpus = worker_num_cpus
+        self.worker = self._spawn_worker()
         self.worker_kills = 0
-        logger.info(f"RecognizerSupervisor initialized with {self.batch_timeout}s batch timeout")
+        logger.info(
+            f"RecognizerSupervisor initialized with {self.batch_timeout}s batch timeout, "
+            f"worker_num_cpus={self._worker_num_cpus}"
+        )
+
+    def _spawn_worker(self) -> ray.actor.ActorHandle:
+        """Create a new RecognizerWorker, applying the CPU override when set."""
+        cls = RecognizerWorker
+        if self._worker_num_cpus is not None:
+            cls = cls.options(num_cpus=self._worker_num_cpus)
+        return cls.remote()
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
@@ -556,7 +573,7 @@ class RecognizerSupervisor:
         except ray.exceptions.GetTimeoutError:
             logger.warning(f"Batch timeout after {self.batch_timeout}s ({batch_size} notes), killing worker")
             ray.kill(self.worker)
-            self.worker = RecognizerWorker.remote()
+            self.worker = self._spawn_worker()
             self.worker_kills += 1
 
             return self._failed_batch(
@@ -566,7 +583,7 @@ class RecognizerSupervisor:
 
         except ray.exceptions.ActorDiedError as e:
             logger.warning("Worker died processing batch of %d notes, respawning", batch_size)
-            self.worker = RecognizerWorker.remote()
+            self.worker = self._spawn_worker()
             self.worker_kills += 1
 
             return self._failed_batch(
