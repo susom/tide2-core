@@ -47,9 +47,15 @@ class TestGCSRetryDecorator:
                 raise Exception("Temporary failure")
             return "success"
 
-        result = failing_function(mock_connector)
+        # tenacity's wait_exponential uses min=1, so it would otherwise sleep
+        # ~1s between retries. Patch time.sleep (tenacity naps via time.sleep)
+        # to keep the test fast while still exercising the retry path.
+        with patch("time.sleep") as mock_sleep:
+            result = failing_function(mock_connector)
         assert result == "success"
         assert call_count == 3
+        # Two failures before success => two backoff naps.
+        assert mock_sleep.call_count == 2
 
 
 class TestGCSConnectorInitialization:
