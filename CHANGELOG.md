@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.1.0 (2026-06-16)
+
+### Features
+
+- **recognizers**: Add InstitutionRecognizer for institution-specific PHI detection
+  ([#7](https://github.com/susom/tide2-core/pull/7),
+  [`6f6ae38`](https://github.com/susom/tide2-core/commit/6f6ae38b10e13c1f79cdd778656506acfb9cff1f))
+
+- Require ML stack, upgrade to transformers 5, and add PyPI publishing
+  ([#17](https://github.com/susom/tide2-core/pull/17),
+  [`13e3047`](https://github.com/susom/tide2-core/commit/13e3047636b97c7e30e104c930a97219ce6acba4))
+
+- **notebooks**: Make tide2_pipeline runnable in Google Colab
+  ([#20](https://github.com/susom/tide2-core/pull/20),
+  [`336c194`](https://github.com/susom/tide2-core/commit/336c194b3726ada65803c3bb4844eb5bcd09b31e))
+
 ## v1.0.0 (2026-06-12)
 
 _This release is published under the MIT License._
