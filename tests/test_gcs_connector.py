@@ -675,19 +675,25 @@ class TestGCSConnectorIntegration:
     @patch("tide2.utils.gcs_connector.ThreadPoolExecutor")
     def test_concurrent_operations_limit(self, mock_executor, mock_as_completed):
         """Test that concurrent operations size the ThreadPoolExecutor with max_workers."""
-        mock_future = Mock()
-        mock_future.result.return_value = True
+        # Distinct futures per submit() so the future->blob mapping keeps both
+        # entries (a single shared Future would collapse into one dict key).
+        future1 = Mock()
+        future1.result.return_value = True
+        future2 = Mock()
+        future2.result.return_value = True
 
         mock_executor_instance = Mock()
         mock_executor.return_value.__enter__.return_value = mock_executor_instance
-        mock_executor_instance.submit.return_value = mock_future
+        mock_executor_instance.submit.side_effect = [future1, future2]
 
         download_specs = [("bucket", "blob1", "/tmp/file1"), ("bucket", "blob2", "/tmp/file2")]
-        self.connector.download_multiple_files(download_specs)
+        results = self.connector.download_multiple_files(download_specs)
 
         # The pool must be created with the connector's configured worker cap.
         mock_executor.assert_called_once_with(max_workers=2)
         assert mock_executor_instance.submit.call_count == 2
+        # Both blobs must be represented in the returned results mapping.
+        assert results == {"blob1": True, "blob2": True}
 
 
 if __name__ == "__main__":

@@ -234,10 +234,14 @@ class TestTransformersRecognizer:
             text = "John lives in Seattle"
             results = recognizer.analyze(text, ["PERSON", "LOCATION"])
 
-            # Should have processed the predictions into RecognizerResult objects
+            # The two deterministic BIO predictions must be converted into two
+            # RecognizerResults with the mapped entity types and original spans.
             assert isinstance(results, list)
-            # Note: The actual conversion logic is complex and would need more detailed mocking
-            # This test verifies the basic flow works
+            assert len(results) == 2
+            by_type = {r.entity_type: r for r in results}
+            assert set(by_type) == {"PERSON", "LOCATION"}
+            assert (by_type["PERSON"].start, by_type["PERSON"].end) == (0, 4)
+            assert (by_type["LOCATION"].start, by_type["LOCATION"].end) == (14, 21)
         finally:
             Path(config_path).unlink()
 

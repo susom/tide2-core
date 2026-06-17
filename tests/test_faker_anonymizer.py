@@ -9,6 +9,8 @@ Tests cover faker-based anonymization including:
 - Validation
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from tide2.anonymizers.faker import FakerAnonymizer
@@ -152,19 +154,23 @@ class TestFakerAnonymizer:
         assert result1 != result2
 
     def test_operate_no_seed_uses_random(self):
-        """Test that no seed parameter uses random seeding."""
+        """Test that no seed parameter falls back to random seeding per call."""
         params = {"entity_type": "EMAIL"}
 
-        # Test that multiple calls without seed produce different results
-        results = []
-        for _ in range(3):
-            result = self.anonymizer.operate("test@example.com", params)
-            results.append(result)
-            assert isinstance(result, str)
+        # When no faker_seed is supplied, operate() draws one via random.randint.
+        # Patch it with a deterministic sequence of distinct seeds so the test is
+        # reproducible while still proving that different draws vary the output.
+        with patch("tide2.anonymizers.faker.random.randint", side_effect=[1, 2, 3]) as mock_randint:
+            results = []
+            for _ in range(3):
+                result = self.anonymizer.operate("test@example.com", params)
+                results.append(result)
+                assert isinstance(result, str)
 
-        # Results should vary since no fixed seed is used
-        # Note: There's a small chance they could be the same, but very unlikely
-        assert len(set(results)) > 1 or len(results[0]) > 0  # At least generate valid output
+        # randint is consulted once per call to seed the generator...
+        assert mock_randint.call_count == 3
+        # ...and distinct seeds must produce distinct fake values.
+        assert len(set(results)) == 3
 
     # Test specific entity types
     def test_operate_age_entity(self):

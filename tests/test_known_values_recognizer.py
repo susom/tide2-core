@@ -482,15 +482,19 @@ class TestKnownValuesRecognizer:
 
         text = "Patient John Doe can be reached at 555-1234 or johnny@work.com"
 
-        # Test person recognition if person data exists
+        # Test person recognition if person data exists. The fixture DB stores
+        # "John Doe" for patient_123, which appears verbatim in the text.
         if "person" in patient_known_values:
             person_results = person_recognizer.analyze(text, ["PATIENT"])
-            assert len(person_results) >= 0  # May or may not find matches
+            assert len(person_results) >= 1
+            assert all(r.entity_type == "PATIENT" for r in person_results)
 
-        # Test phone recognition if phone data exists
+        # Test phone recognition if phone data exists. The fixture DB stores
+        # "555-1234" for patient_123, which appears verbatim in the text.
         if "phone_number" in patient_known_values:
             phone_results = phone_recognizer.analyze(text, ["PHONE"])
-            assert len(phone_results) >= 0  # May or may not find matches
+            assert len(phone_results) >= 1
+            assert all(r.entity_type == "PHONE" for r in phone_results)
 
     def test_all_spurious_values_empty_automaton(self):
         """Test that recognizer handles all values being filtered as spurious.
