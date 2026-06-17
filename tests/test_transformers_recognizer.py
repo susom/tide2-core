@@ -147,7 +147,9 @@ class TestTransformersRecognizer:
             assert call_args.kwargs.get("model") == mock_model_instance
             assert call_args.kwargs.get("tokenizer") == mock_tokenizer_instance
             assert call_args.kwargs.get("aggregation_strategy") == "none"
-            assert call_args.kwargs.get("framework") == "pt"
+            # transformers 5.x removed the `framework` argument from pipeline()
+            # (TF/Flax support dropped; everything is PyTorch), so it must not be passed.
+            assert "framework" not in call_args.kwargs
         finally:
             Path(config_path).unlink()
 
