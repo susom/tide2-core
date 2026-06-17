@@ -23,6 +23,23 @@ from .config import load_model_config
 
 logger = logging.getLogger(__name__)
 
+# Fixed schema of a raw BIO token prediction (see infer_raw). Used to build a
+# stable dedupe key that does not depend on dict insertion order.
+_RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
+
+
+def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
+    """Remove duplicate raw BIO predictions (can occur from chunking).
+
+    The dedupe key is built from the fixed prediction schema in a stable order
+    so it does not depend on dict insertion order (O(k) per dict, no per-key
+    sort).
+    """
+    return [
+        dict(zip(_RAW_PRED_KEYS, key, strict=True))
+        for key in {tuple(d[k] for k in _RAW_PRED_KEYS) for d in raw_predictions}
+    ]
+
 
 class TransformerCore:
     """
@@ -252,12 +269,13 @@ class TransformerCore:
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
 
         # Build pipeline kwargs
+        # Note: transformers 5.x removed the `framework` argument from pipeline()
+        # (TensorFlow/Flax support was dropped, so everything is PyTorch).
         pipeline_kwargs: dict[str, Any] = {
             "task": "token-classification",
             "model": model,
             "tokenizer": tokenizer,
             "aggregation_strategy": "none",  # Return raw BIO tokens
-            "framework": "pt",
             "ignore_labels": self.ignore_labels,
         }
 
@@ -491,7 +509,7 @@ class TransformerCore:
             return []
 
         # Remove duplicates (can occur from chunking at caller level)
-        raw_predictions = [dict(t) for t in {tuple(d.items()) for d in raw_predictions}]
+        raw_predictions = _dedupe_raw_predictions(raw_predictions)
 
         # Aggregate BIO tokens
         return aggregate_bio_tokens(raw_predictions, text)
@@ -514,11 +532,11 @@ class TransformerCore:
                 aggregated_results.append([])
                 continue
 
-            # Remove duplicates
-            raw_preds = [dict(t) for t in {tuple(d.items()) for d in raw_preds}]
+            # Remove duplicates (can occur from chunking at caller level)
+            deduped_preds = _dedupe_raw_predictions(raw_preds)
 
             # Aggregate BIO tokens
-            aggregated = aggregate_bio_tokens(raw_preds, text)
+            aggregated = aggregate_bio_tokens(deduped_preds, text)
             aggregated_results.append(aggregated)
 
         return aggregated_results

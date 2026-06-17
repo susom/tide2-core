@@ -13,7 +13,9 @@ version-file = "src/tide2/_version.py"
 name = "tide2"
 dynamic = ["version"]
 description = "An advanced data de-identification and anonymization toolkit combining multiple strategies with cryptographic techniques and ML-based entity recognition"
-license = { text = "MIT" }
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE-MIT"]
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "TIDE 2.0 Team" }]
 keywords = [
@@ -34,23 +36,21 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Security :: Cryptography",
     "Topic :: Text Processing :: Linguistic",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    # LLM and AI providers
-    "anthropic",
-    "google-cloud-aiplatform[prediction]",
-    "google-genai",
-    "openai",
     # Google Cloud services
-    "db-dtypes",
+    "db-dtypes", # implicit: required by bigquery.to_dataframe() for pandas dtype mapping
     "google-cloud-bigquery",
     "google-cloud-storage",
-    # NLP (CPU-only components)
+    # NLP and ML-based entity recognition (required: no model runs without these)
+    "accelerate", # required by transformers for device_map="auto" (device="auto")
     "presidio-analyzer",
     "presidio-anonymizer",
+    "spacy>=3.8.0",
+    "torch",
+    "transformers>=5.0.0",
     # Data processing
     "numpy",
     "intervaltree>=3.1.0",
@@ -64,10 +64,11 @@ dependencies = [
     "usaddress",
     # Orchestration
     "ray[default,data]>=2.54.0",
+    "aiohttp>=3.14.0", # transitive via ray[default]; pinned for security/compat
     # Web and CLI
-    "click>=8.1",
     "httpx>=0.25.0",
     "streamlit",
+    "starlette>=1.0.1", # transitive via streamlit; pinned for security/compat
     # Utilities
     "psutil",
     "pyyaml>=6.0",
@@ -75,17 +76,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = [
-    "presidio-analyzer[transformers]",
-    "spacy>=3.8.0",
-    "torch",
-    "transformers",
+
+llm = [
+    "anthropic",
+    "google-cloud-aiplatform",
+    "google-genai",
+    "openai"
 ]
+
 evaluation = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.0",
 ]
 dev = [
     "pytest>=7.4.0",
@@ -101,7 +103,6 @@ dev = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.0",
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
     "python-semantic-release>=10.5.3",
@@ -114,10 +115,10 @@ tide2-visualizer = "tide2.cli.main_visualizer:main"
 tide2-runner = "tide2.runner.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/susom/tide2"
-Repository = "https://github.com/susom/tide2"
-Issues = "https://github.com/susom/tide2/issues"
-Documentation = "https://github.com/susom/tide2"
+Homepage = "https://github.com/susom/tide2-core"
+Repository = "https://github.com/susom/tide2-core"
+Issues = "https://github.com/susom/tide2-core/issues"
+Documentation = "https://susom.github.io/tide2-core/"
 
 [tool.semantic_release]
 commit_parser = "conventional"
@@ -146,6 +147,10 @@ prerelease = false
 [tool.semantic_release.branches.development]
 match = "development"
 prerelease = true
+
+[tool.semantic_release.branches."v*"]
+match = "^v\\d+\\.\\d+$"
+prerelease = false
 
 [tool.semantic_release.commit_parser_options]
 allowed_tags = [
@@ -179,7 +184,8 @@ exclude_dirs = ["tests"]
 skips = [
     "B101",
     "B601",
-] # B101: assert used in tests. B601: subprocess.run in cli/main_visualizer.py uses a hardcoded argument list (no shell=True, no user input), safe from injection.
+    "B615",
+] # B101: assert used in tests. B601: subprocess.run in cli/main_visualizer.py uses a hardcoded argument list (no shell=True, no user input), safe from injection. B615: HuggingFace model revisions are controlled via the resolved model_path/config, not pinned per from_pretrained() call; deployments select trusted model weights explicitly.
 
 
 [tool.ty.environment]
@@ -283,7 +289,7 @@ packages = ["src/tide2"]
 allow-direct-references = true
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/README.md", "/LICENSE-MIT"]
+include = ["/src", "/README.md", "/LICENSE-MIT", "/CHANGELOG.md", "/PUBLISHING.md"]
 exclude = [
     "/.git",
     "/.gitignore",
@@ -320,17 +326,16 @@ exclude_lines = [
 ]
 
 [dependency-groups]
-gpu = [
-    "presidio-analyzer[transformers]",
-    "spacy>=3.8.0",
-    "torch",
-    "transformers",
+llm = [
+    "anthropic",
+    "google-cloud-aiplatform",
+    "google-genai",
+    "openai",
 ]
 evaluation = [
     "scikit-learn>=1.8.0",
     "scipy>=1.12.0",
     "tqdm>=4.67.1",
-    "umap-learn>=0.5.0",
 ]
 dev = [
     "pytest>=7.4.0",

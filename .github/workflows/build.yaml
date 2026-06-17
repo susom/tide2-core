@@ -57,11 +57,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
 
@@ -80,12 +80,29 @@ jobs:
         id: push_base
         run: |
           before="${{ github.event.before }}"
-          # On a brand-new branch, github.event.before is all-zeros and cannot be
-          # used as a git revision. Fall back to diffing against the default branch.
+          # Integration branch feature branches are cut from. Falls back to the
+          # repo default branch if it does not exist, so the workflow stays valid
+          # for any repo/branch layout.
+          base_branch="development"
+          if ! git ls-remote --exit-code --heads origin "$base_branch" >/dev/null 2>&1; then
+            base_branch="${{ github.event.repository.default_branch }}"
+          fi
+          # Fall back to diffing against the base branch when the "before" SHA is
+          # unusable as a git revision. This happens on a brand-new branch
+          # (all-zeros sentinel) and after a force-push/rebase (the previous tip
+          # is orphaned and no longer exists in the repo).
+          use_base=false
           if [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            default_branch="${{ github.event.repository.default_branch }}"
-            git fetch --depth=1 origin "$default_branch"
-            echo "from_ref=origin/$default_branch" >> "$GITHUB_OUTPUT"
+            use_base=true
+          else
+            git fetch --depth=1 origin "$before" 2>/dev/null || true
+            if ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+              use_base=true
+            fi
+          fi
+          if [ "$use_base" = true ]; then
+            git fetch --depth=1 origin "$base_branch"
+            echo "from_ref=origin/$base_branch" >> "$GITHUB_OUTPUT"
           else
             echo "from_ref=$before" >> "$GITHUB_OUTPUT"
           fi

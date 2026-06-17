@@ -1,0 +1,124 @@
+name: Publish to PyPI
+
+# Manual publishing workflow. Select the git tag (vX.Y.Z) to release from the
+# "Use workflow from" ref picker, then choose the target:
+#   - testpypi: build + upload to TestPyPI only (default, safe dry run)
+#   - both:     upload to TestPyPI, then promote to production PyPI
+#
+# Authentication uses PyPI Trusted Publishing (OIDC) — no API tokens are stored.
+# See PUBLISHING.md for the one-time PyPI/TestPyPI/GitHub Environment setup.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Where to publish"
+        type: choice
+        options:
+          - testpypi
+          - both
+        default: testpypi
+
+# Restrict all jobs to read-only by default (satisfies Token-Permissions check).
+# The publish jobs request id-token: write explicitly for OIDC.
+permissions: read-all
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Full history + tags are required for hatch-vcs to derive the version.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Guard against non-release versions
+        # PyPI rejects PEP 440 local versions (the "+g<sha>" / ".devN" suffixes
+        # hatch-vcs emits on untagged commits). Fail fast so a dev build is never
+        # published — always run this workflow from a clean vX.Y.Z tag.
+        run: |
+          set -euo pipefail
+          # Pick one wheel deterministically and parse the version from the
+          # standard wheel filename: {name}-{version}-{pytag}-{abitag}-{plat}.whl
+          wheel="$(find dist -maxdepth 1 -name '*.whl' | sort | head -n1)"
+          if [ -z "$wheel" ]; then
+            echo "::error::No wheel found in dist/." >&2
+            exit 1
+          fi
+          version="$(basename "$wheel" | cut -d- -f2)"
+          echo "Built version: $version"
+          case "$version" in
+            *+*|*dev*)
+              echo "::error::Version '$version' is not a clean release version. Run this workflow from a vX.Y.Z tag." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Validate package metadata
+        run: uvx twine check dist/*
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 5
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/tide2
+    permissions:
+      # Required for Trusted Publishing (OIDC).
+      id-token: write
+      # Required to download the dist artifact (job-level permissions replace the
+      # workflow-level read-all default, so the read scopes must be restated).
+      contents: read
+      actions: read
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    needs: publish-testpypi
+    if: inputs.target == 'both'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tide2
+    permissions:
+      # Required for Trusted Publishing (OIDC).
+      id-token: write
+      # Required to download the dist artifact (job-level permissions replace the
+      # workflow-level read-all default, so the read scopes must be restated).
+      contents: read
+      actions: read
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
