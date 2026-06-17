@@ -170,12 +170,14 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("batch_size", "batch_size"),
                 ("batch_timeout", "batch_timeout"),
                 ("cpus_per_actor", "num_cpus"),
+                ("worker_num_cpus", "worker_num_cpus"),
                 ("read_parallelism", "read_parallelism"),
                 ("read_cpus", "read_cpus"),
                 ("read_op_min_num_blocks", "read_op_min_num_blocks"),
                 ("target_max_block_size_mb", "target_max_block_size_mb"),
                 ("target_min_block_size_mb", "target_min_block_size_mb"),
                 ("write_cpus", "write_cpus"),
+                ("enable_checkpoint", "enable_checkpoint"),
                 ("prompt_name", "prompt_name"),
             ]:
                 val = getattr(args, attr, None)
@@ -386,7 +388,7 @@ Examples:
     run_p.add_argument(
         "--worker-num-cpus",
         type=float,
-        help="CPUs per supervisor worker actor (recognizer/anonymizer/pipeline). "
+        help="CPUs per supervisor worker actor (recognizer/anonymizer/llm-recognizer/pipeline). "
         "Lower (with --cpus-per-actor) to fit small boxes; default: Ray default (1)",
     )
     run_p.add_argument(
@@ -416,8 +418,8 @@ Examples:
         action="store_false",
         default=None,
         help="Disable Ray Data row-level checkpointing (recognizer/anonymizer/transformer/"
-        "pipeline). REQUIRED on tiny clusters (≲4 CPUs, e.g. Colab): the checkpoint shuffle "
-        "deadlocks Ray's reservation allocator. Trades resume capability, not correctness.",
+        "llm-recognizer/pipeline). REQUIRED on tiny clusters (≲4 CPUs, e.g. Colab): the checkpoint "
+        "shuffle deadlocks Ray's reservation allocator. Trades resume capability, not correctness.",
     )
     run_p.add_argument("--model", help="Model name (required for transformer jobs)")
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")

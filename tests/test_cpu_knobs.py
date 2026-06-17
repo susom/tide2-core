@@ -293,3 +293,44 @@ def test_cli_help_lists_write_cpus(monkeypatch, capsys):
         cli.main()
     out = capsys.readouterr().out
     assert "--write-cpus" in out
+
+
+def test_cli_llm_recognizer_forwards_cpu_knobs(monkeypatch):
+    """The llm-recognizer CLI path must forward worker_num_cpus and the
+    --no-checkpoint flag into run_llm_recognition (review: Copilot)."""
+    from tide2.runner import cli
+    from tide2.runner.local_runner import LocalJobRunner
+
+    captured: dict = {}
+
+    def fake_run_llm_recognition(self, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(LocalJobRunner, "run_llm_recognition", fake_run_llm_recognition)
+    monkeypatch.setattr(LocalJobRunner, "shutdown", lambda _self: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "tide2-runner",
+            "run",
+            "llm-recognizer",
+            "-i",
+            "in",
+            "-o",
+            "out",
+            "--project-id",
+            "proj",
+            "--worker-num-cpus",
+            "0.0",
+            "--write-cpus",
+            "0.25",
+            "--no-checkpoint",
+        ],
+    )
+
+    cli.main()
+
+    assert captured["worker_num_cpus"] == 0.0
+    assert captured["write_cpus"] == 0.25
+    assert captured["enable_checkpoint"] is False

@@ -606,8 +606,9 @@ class LocalJobRunner:
                 (num_cpus) + worker (worker_num_cpus) CPUs; lower both to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
-                reproduces Ray's default task reservation. Also applies to the
-                follow-up ``processed.count()``, which re-executes the plan.
+                reproduces Ray's default task reservation. Note the follow-up
+                zero-row guard ``processed.count()`` re-executes the read +
+                map_batches plan (not the write), so it is unaffected by this knob.
             enable_checkpoint: If True (default), enable Ray Data row-level
                 checkpointing for resume. MUST be set to False on tiny clusters
                 (≲4 CPUs, e.g. Google Colab): the checkpoint pipeline adds a
