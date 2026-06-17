@@ -390,16 +390,15 @@ class DateJitterAnonymizer(Operator):
 
         # Return the result for the first pattern that matches; non-date input
         # that matches nothing falls through to the default replacement.
-        stripped = text.strip()
         for pattern, replacement in self.substitutions:
             match = pattern.search(text)
             if not match:
                 continue
             # The day-of-week pattern is a "standalone" fast-path: only take it
-            # when the matched weekday IS the whole (stripped) value. Otherwise a
+            # when the weekday is the only date content in the value. Otherwise a
             # weekday embedded in a longer date (e.g. "Monday, 2023-03-15") would
             # match here and drop the rest of the string, so keep scanning.
-            if self._matched_day_of_week(match) and match.group(0) != stripped:
+            if self._matched_day_of_week(match) and not self._is_standalone_weekday(match, text):
                 continue
             return self._replace_match(match, replacement, jitter)
 
@@ -412,6 +411,18 @@ class DateJitterAnonymizer(Operator):
             return match.group("day_of_week") is not None
         except (IndexError, AttributeError):
             return False
+
+    @staticmethod
+    def _is_standalone_weekday(match: re.Match, text: str) -> bool:
+        """Return True if the weekday match is the only date content in ``text``.
+
+        The text outside the matched span may contain whitespace or punctuation
+        (e.g. "Monday," or " Monday ") and still count as standalone; what must
+        NOT appear is any other alphanumeric content, which would indicate the
+        weekday is embedded in a longer value (e.g. "Monday, 2023-03-15").
+        """
+        outside = text[: match.start()] + text[match.end() :]
+        return not any(char.isalnum() for char in outside)
 
     def _is_passthrough(self, text: str) -> bool:
         """Return True for values that should be returned unchanged (non-PHI)."""

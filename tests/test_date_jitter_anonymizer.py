@@ -581,3 +581,16 @@ class TestDateJitterAnonymizer:
         # The embedded ISO date should jitter; the weekday must not hijack it.
         # 2023-03-15 + 5 days = 2023-03-20.
         assert self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5}) == "2023-03-20"
+
+    def test_standalone_weekday_with_trailing_punctuation_still_rotates(self):
+        """A weekday-only entity with surrounding punctuation/space must rotate.
+
+        Regression: the standalone fast-path checked ``match.group(0) ==
+        stripped``, so "Monday," or " Monday " skipped the fast-path and fell
+        through to the default replacement. Standalone now means "no other
+        alphanumeric content outside the weekday match".
+        """
+        params = {"entity_type": "DATE_TIME", "jitter": 5}
+        # Monday + 5 = Saturday; punctuation/whitespace must not break the path.
+        for value in ("Monday,", "  Monday  ", "Monday."):
+            assert self.anonymizer.operate(value, params) == "Saturday"
