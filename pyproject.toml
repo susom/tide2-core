@@ -148,10 +148,6 @@ prerelease = false
 match = "development"
 prerelease = true
 
-[tool.semantic_release.branches."v*"]
-match = "^v\\d+\\.\\d+$"
-prerelease = false
-
 [tool.semantic_release.commit_parser_options]
 allowed_tags = [
     "build",
@@ -273,6 +269,20 @@ force-single-line = true
     "PLR2004", # Magic value in comparison
     "ARG001",  # Unused function argument (fixtures)
     "S101",    # Use of assert detected
+    "S105",    # Hardcoded password — test fixtures use dummy secrets
+    "S108",    # Hardcoded temp file path — used as mock GCS/IO targets, never written
+    "DTZ001",  # datetime() without tzinfo — date math tests are tz-agnostic
+    "PD011",   # .values usage — test DataFrames are explicit
+    "PT011",   # pytest.raises too broad — acceptable in tests
+    "PT018",   # Composite assertion — readable in test context
+    "PTH109",  # os.getcwd — test cwd manipulation
+    "PTH118",  # os.path.join — test path construction
+    "PTH123",  # builtin open — test file helpers
+    "PLR0911", # Too many return statements — test helpers
+    "PLR0915", # Too many statements — verbose test setup
+    "SIM115",  # open() without context manager — test temp-file helpers
+    "SIM117",  # Nested with statements — readable in test mocking
+    "TRY002",  # Raise vanilla Exception — test stubs
 ]
 "notebooks/**/*.*py*" = [
     "E402",   # Module level import not at top of file
