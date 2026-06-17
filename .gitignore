@@ -79,3 +79,4 @@ TODO.md
 src/tide2/_version.py
 
 temp/**
+.claude/worktrees/

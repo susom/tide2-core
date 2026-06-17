@@ -215,6 +215,14 @@ class TestDateJitterAnonymizer:
         result = self.anonymizer._format_mm_dd(12, 5, 2022, "-")
         assert result == "12-05"
 
+    def test_format_dd_mm(self):
+        """Test _format_dd_mm method (day-first, no year)."""
+        result = self.anonymizer._format_dd_mm(3, 15, 2023, "/")
+        assert result == "15/03"
+
+        result = self.anonymizer._format_dd_mm(12, 5, 2022, "-")
+        assert result == "05-12"
+
     def test_format_yyyy_mm(self):
         """Test _format_yyyy_mm method."""
         result = self.anonymizer._format_yyyy_mm(3, 15, 2023, "/")
@@ -342,29 +350,21 @@ class TestDateJitterAnonymizer:
 
     # Integration tests with real date patterns
     def test_integration_simple_date_formats(self):
-        """Integration test with simple date formats that should work."""
+        """Integration test asserting full-date formats jitter to an exact value.
+
+        These assert the exact expected output (not just "a non-empty string"),
+        so a regression that drops a component or fails to shift the date is
+        caught instead of silently passing.
+        """
         test_cases = [
-            # Simple cases that are likely to work with real patterns
-            ("03/15/2023", {"entity_type": "DATE", "jitter": 10}),
-            ("2023-03-15", {"entity_type": "DATE", "jitter": -5}),
-            ("15/03/2023", {"entity_type": "DATE", "jitter": 7}),
+            ("03/15/2023", {"entity_type": "DATE", "jitter": 10}, "03/25/2023"),  # US mm/dd/yyyy
+            ("2023-03-15", {"entity_type": "DATE", "jitter": -5}, "2023-03-10"),  # ISO yyyy-mm-dd
+            ("15/03/2023", {"entity_type": "DATE", "jitter": 7}, "22/03/2023"),  # day-first dd/mm/yyyy
         ]
 
-        succeeded = 0
-        for date_str, params in test_cases:
-            try:
-                result = self.anonymizer.operate(date_str, params)
-                # Should return either a jittered date or the default replacement
-                assert isinstance(result, str)
-                assert len(result) > 0
-                succeeded += 1
-            except ValueError:
-                # Some patterns might not match, which is acceptable for this test
-                pass
-
-        # Guard against the loop silently becoming a no-op: at least one of the
-        # common formats must be handled without raising.
-        assert succeeded > 0, "Expected at least one simple date format to be handled"
+        for date_str, params, expected in test_cases:
+            result = self.anonymizer.operate(date_str, params)
+            assert result == expected, f"{date_str} -> {result!r}, expected {expected!r}"
 
     def test_integration_month_year_formats(self):
         """Integration test with month/year only formats."""
@@ -512,3 +512,50 @@ class TestDateJitterAnonymizer:
         result_a = self.anonymizer.operate("Monday", {"entity_type": "DATE", "jitter": 3})
         result_b = self.anonymizer.operate("Monday", {"entity_type": "DATE", "jitter": 5})
         assert result_a != result_b
+
+    # Regression tests: numeric day-first dates (dd/mm/yyyy) must jitter the
+    # whole date, not silently drop the day and pass month/year through. The
+    # earlier integration tests only asserted isinstance(result, str) and
+    # len(result) > 0, so they missed that "15-03-2010" collapsed to "03-2010".
+    def test_day_first_with_year_jitters_full_date(self):
+        """dd-mm-yyyy where the leading number is unambiguously a day (>12)."""
+        # 15 March 2010 + 10 days = 25 March 2010, format preserved.
+        assert self.anonymizer.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10}) == "25-03-2010"
+        assert self.anonymizer.operate("15/03/2010", {"entity_type": "DATE", "jitter": 10}) == "25/03/2010"
+
+    def test_day_first_with_year_rolls_over_month(self):
+        """Day-first jitter must roll over month/year boundaries."""
+        # 25 Dec 2010 + 10 days = 4 Jan 2011.
+        assert self.anonymizer.operate("25/12/2010", {"entity_type": "DATE", "jitter": 10}) == "04/01/2011"
+
+    def test_day_first_does_not_drop_day(self):
+        """Guard against the original bug: the day component must not disappear."""
+        result = self.anonymizer.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10})
+        # The buggy behavior produced "03-2010" (two components). A correct
+        # dd-mm-yyyy result always has three dash-separated components.
+        assert result.count("-") == 2
+        assert result != "03-2010"
+
+    def test_day_first_without_year(self):
+        """dd/mm (no year) with an unambiguous leading day must stay day-first."""
+        # 15/03 + 7 days = 22/03.
+        assert self.anonymizer.operate("15/03", {"entity_type": "DATE", "jitter": 7}) == "22/03"
+
+    def test_ambiguous_leading_value_stays_us_month_first(self):
+        """A leading 01-12 is ambiguous and keeps the US mm/dd interpretation."""
+        # 03/04/2010 is read as March 4th (mm/dd/yyyy); +10 days = March 14th.
+        assert self.anonymizer.operate("03/04/2010", {"entity_type": "DATE", "jitter": 10}) == "03/14/2010"
+
+    def test_separator_preserved_across_instances(self):
+        """The dash separator must survive on a second instance.
+
+        Regression for the class-level _separator_acceptance cache being keyed by
+        bound methods: a fresh instance used to miss the cache and silently fall
+        back to '/', so "15-03-2010" came out as "25/03/2010".
+        """
+        first = DateJitterAnonymizer()
+        first.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10})  # populate class cache
+
+        second = DateJitterAnonymizer()
+        assert second.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10}) == "25-03-2010"
+        assert second.operate("2023-03-15", {"entity_type": "DATE", "jitter": -5}) == "2023-03-10"

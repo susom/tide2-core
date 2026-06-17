@@ -35,6 +35,10 @@ _FOLLOWING_TO_CUTOFF_NUM = r"(?=(?:[^0-9]*\b))"
 _MON = r"(?P<month>1|2|3|4|5|6|7|8|9|01|02|03|04|05|06|07|08|09|10|11|12)"
 _MONTH = r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
 _DAY = r"(?P<day>1|2|3|4|5|6|7|8|9|01|02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)"
+# Unambiguous day-first value (13-31): too large to be a month, so a numeric
+# date starting with it must be dd/mm, not mm/dd. Ambiguous leading values
+# (01-12) keep the US mm/dd interpretation handled by the _MON patterns.
+_DAY_FIRST = r"(?P<day>13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)"
 _DAY_SUFFIX = r"(?i:st|nd|rd|th)?"
 _YEAR = r"(?P<year>(?:19|20)[0-9][0-9])"
 
@@ -182,6 +186,11 @@ class DateJitterAnonymizer(Operator):
         """Format as mm/dd"""
         return f"{self._pad_zero(month)}{separator}{self._pad_zero(day)}"
 
+    # Pattern 13b: dd/mm (day/month without year, day-first)
+    def _format_dd_mm(self, month, day, year, separator="/"):
+        """Format as dd/mm"""
+        return f"{self._pad_zero(day)}{separator}{self._pad_zero(month)}"
+
     # Pattern 14: yyyy/mm (year/month without day)
     def _format_yyyy_mm(self, month, day, year, separator="/"):
         """Format as yyyy/mm"""
@@ -244,9 +253,15 @@ class DateJitterAnonymizer(Operator):
                 f"{_PRECEDING}{_DAY_OF_WEEK}{_FOLLOWING}",
                 self._format_day_of_week,
             ),
-            # dd/mm/yyyy or dd-mm-yyyy
+            # dd/mm/yyyy or dd-mm-yyyy (full month name)
             (
                 f"{_PRECEDING}{_DAY}(/|-){_MONTH}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING}",
+                self._format_dd_mm_yyyy,
+            ),
+            # dd/mm/yyyy or dd-mm-yyyy (numeric, day-first). Only matches when the
+            # leading number is 13-31 so it cannot be confused with mm/dd/yyyy.
+            (
+                f"{_PRECEDING}{_DAY_FIRST}(/|-){_MON}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING}",
                 self._format_dd_mm_yyyy,
             ),
             # yyyy-mm-dd or yyyy/mm/dd
@@ -285,6 +300,9 @@ class DateJitterAnonymizer(Operator):
             (f"{_PRECEDING}{_MONTH}\\s*(?:of\\s+)?{_YEAR}", self._format_month_of_year),
             # March 10
             (f"{_PRECEDING}{_MONTH}\\s+{_DAY}{_DAY_SUFFIX}?\\b", self._format_month_day),
+            # dd/mm (day/month without year, day-first). Leading 13-31 only, so it
+            # cannot collide with the mm/dd interpretation below.
+            (f"{_PRECEDING}{_DAY_FIRST}(/|-){_MON}\\b", self._format_dd_mm),
             # mm/dd (month/day without year)
             (f"{_PRECEDING}{_MON}(/|-){_DAY}\\b", self._format_mm_dd),
             # yyyy/mm (year/month without day)
@@ -305,12 +323,19 @@ class DateJitterAnonymizer(Operator):
         Pre-compute which format functions accept 'separator' parameter.
 
         This avoids calling inspect.signature() in the hot path of operate().
+
+        Keyed by the underlying function (``__func__``) rather than the bound
+        method: this cache is class-level and shared across instances, but a
+        bound method is unique per instance, so keying by the bound method would
+        make every instance after the first miss the cache and silently lose the
+        date separator.
         """
         acceptance = {}
         for _pattern, replacement in self.substitutions:
-            if replacement not in acceptance:
+            key = replacement.__func__
+            if key not in acceptance:
                 sig = inspect.signature(replacement)
-                acceptance[replacement] = "separator" in sig.parameters
+                acceptance[key] = "separator" in sig.parameters
         return acceptance
 
     def _get_jittered_date(self, jitter: int, date_of_service: datetime) -> dict[str, int]:
@@ -408,8 +433,9 @@ class DateJitterAnonymizer(Operator):
             "day": jittered["day"],
             "year": jittered["year"],
         }
-        # Add separator only if the format function accepts it (pre-computed lookup).
-        if self._separator_acceptance.get(replacement, False):
+        # Add separator only if the format function accepts it (pre-computed
+        # lookup keyed by the underlying function, see _compute_separator_acceptance).
+        if self._separator_acceptance.get(replacement.__func__, False):
             format_params["separator"] = self._extract_separator(match)
 
         return replacement(**format_params)
