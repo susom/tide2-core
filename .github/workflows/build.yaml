@@ -50,8 +50,7 @@ env:
 jobs:
   lint:
     if: >-
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
-       github.event.pull_request.base.ref != 'main') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
       (github.event_name == 'push' && github.ref_name != 'main')
 
     runs-on: ubuntu-latest
@@ -117,8 +116,7 @@ jobs:
     if: >-
       !inputs.skip_tests &&
       (github.event_name != 'pull_request' ||
-       (github.event.pull_request.draft == false &&
-        github.event.pull_request.base.ref != 'main'))
+       github.event.pull_request.draft == false)
 
     uses: ARPA-H-BDF/bdfkb-schema/.github/workflows/ci-validate.yaml@6afe39430894512131b7f86f75ac165e8db65551 # main
     with:
@@ -132,8 +130,7 @@ jobs:
       (inputs.version != '' ||
        github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' &&
-        github.event.pull_request.draft == false &&
-        github.event.pull_request.base.ref != 'main'))
+        github.event.pull_request.draft == false))
       # Trunk-based: there is no integration branch to gate a push build on. Pushes
       # to main are excluded by the top-level `branches-ignore: [main]` trigger
       # (they fire release-please.yml instead), and PRs already cover the build

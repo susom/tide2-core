@@ -83,7 +83,9 @@ jobs:
             echo "::error::CHANGELOG top ($head_ver) != manifest ($ver). Merge the release PR first." >&2
             exit 1
           fi
-          git fetch --tags --quiet
+          # Tags are already present from the fetch-depth: 0 checkout above, so no
+          # extra `git fetch --tags` is needed (it would also fail under
+          # persist-credentials: false on private repos).
           if git rev-parse "$tag" >/dev/null 2>&1; then
             echo "::error::Tag $tag already exists — already released. Let release-please open the next release PR." >&2
             exit 1
