@@ -45,6 +45,12 @@ repos:
     hooks:
       - id: nbstripout
 
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+        name: actionlint (GitHub workflow expressions/schema)
+
   - repo: local
     hooks:
       - id: forbid-breaking-change
