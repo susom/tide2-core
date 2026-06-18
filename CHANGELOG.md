@@ -2,6 +2,18 @@
 
 <!-- version list -->
 
+## [1.2.0](https://github.com/susom/tide2-core/compare/v1.1.1...v1.2.0) (2026-06-18)
+
+
+### Features
+
+* **runner:** add fractional-CPU and checkpoint knobs for small boxes ([e5b46ab](https://github.com/susom/tide2-core/commit/e5b46abe08beba86c3f697cc5ed0252d39101f95))
+
+
+### Bug Fixes
+
+* **cli:** forward worker_num_cpus and enable_checkpoint to llm-recognizer ([6b2b549](https://github.com/susom/tide2-core/commit/6b2b54972561cd0980972f216536cb8a0703b5e7))
+
 ## v1.0.0 (2026-06-12)
 
 _This release is published under the MIT License._
