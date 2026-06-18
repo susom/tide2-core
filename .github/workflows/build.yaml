@@ -124,17 +124,22 @@ jobs:
 
   build-prepare:
     needs: [validate-tool]
-    if: |
+    # Trunk-based: there is no integration branch to gate a push build on. Pushes
+    # to main are excluded by the top-level `branches-ignore: [main]` trigger
+    # (they fire release-please.yml instead), and PRs already cover the build
+    # path, so the former `push: development` clause is dropped (§5.3).
+    #
+    # NOTE: keep this comment OUTSIDE the `if:` expression. A `|` literal block
+    # scalar includes trailing `# ...` lines as part of the expression content,
+    # which GitHub's expression lexer rejects ("unexpected character '#'") — a
+    # workflow startup failure.
+    if: >-
       always() &&
       (needs.validate-tool.result == 'success' || needs.validate-tool.result == 'skipped') &&
       (inputs.version != '' ||
        github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.draft == false))
-      # Trunk-based: there is no integration branch to gate a push build on. Pushes
-      # to main are excluded by the top-level `branches-ignore: [main]` trigger
-      # (they fire release-please.yml instead), and PRs already cover the build
-      # path, so the former `push: development` clause is dropped (§5.3).
 
     runs-on: ubuntu-latest
     steps:
