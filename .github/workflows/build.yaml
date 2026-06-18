@@ -129,9 +129,10 @@ jobs:
     # (they fire release-please.yml instead), and PRs already cover the build
     # path, so the former `push: development` clause is dropped (§5.3).
     #
-    # NOTE: keep this comment OUTSIDE the `if:` expression. A `|` block scalar
-    # folds trailing comment lines into the expression, which GitHub's expression
-    # lexer rejects ("unexpected character '#'") — a workflow startup failure.
+    # NOTE: keep this comment OUTSIDE the `if:` expression. A `|` literal block
+    # scalar includes trailing `# ...` lines as part of the expression content,
+    # which GitHub's expression lexer rejects ("unexpected character '#'") — a
+    # workflow startup failure.
     if: >-
       always() &&
       (needs.validate-tool.result == 'success' || needs.validate-tool.result == 'skipped') &&
