@@ -105,7 +105,6 @@ dev = [
     "tqdm>=4.67.1",
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
-    "python-semantic-release>=10.5.3",
 ]
 test = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
 docs = ["pdoc>=14.0"]
@@ -120,49 +119,10 @@ Repository = "https://github.com/susom/tide2-core"
 Issues = "https://github.com/susom/tide2-core/issues"
 Documentation = "https://susom.github.io/tide2-core/"
 
-[tool.semantic_release]
-commit_parser = "conventional"
-commit_message = "chore(release): {version} [skip ci]"
-major_on_zero = false
-tag_format = "v{version}"
-version_source = "tag"
-
-[tool.semantic_release.changelog]
-mode = "update"
-default_templates = { changelog_file = "CHANGELOG.md" }
-exclude_commit_patterns = [
-    '''chore(?:\([^)]*?\))?: .+''',
-    '''ci(?:\([^)]*?\))?: .+''',
-    '''refactor(?:\([^)]*?\))?: .+''',
-    '''style(?:\([^)]*?\))?: .+''',
-    '''test(?:\([^)]*?\))?: .+''',
-    '''build\((?!deps\): .+)''',
-    '''Merged? .*''',
-]
-
-[tool.semantic_release.branches.main]
-match = "main"
-prerelease = false
-
-[tool.semantic_release.branches.development]
-match = "development"
-prerelease = true
-
-[tool.semantic_release.commit_parser_options]
-allowed_tags = [
-    "build",
-    "chore",
-    "ci",
-    "docs",
-    "feat",
-    "fix",
-    "perf",
-    "refactor",
-    "style",
-    "test",
-]
-minor_tags = ["feat"]
-patch_tags = ["fix", "perf"]
+# Versioning/changelog are handled by release-please (see release-please-config.json
+# and .github/workflows/release-please.yml). The commit-type -> bump map and the
+# changelog section/exclude config that used to live in [tool.semantic_release] are
+# ported there. hatch-vcs derives the wheel version from the git tag.
 
 [tool.uv]
 # Build these from source to ensure numpy ABI compatibility
@@ -361,7 +321,6 @@ dev = [
     { include-group = "evaluation" },
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
-    "python-semantic-release>=10.5.3",
 ]
 test = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
 docs = ["pdoc>=14.0"]

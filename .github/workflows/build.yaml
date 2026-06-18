@@ -50,8 +50,7 @@ env:
 jobs:
   lint:
     if: >-
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false &&
-       github.event.pull_request.base.ref != 'main') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
       (github.event_name == 'push' && github.ref_name != 'main')
 
     runs-on: ubuntu-latest
@@ -80,10 +79,10 @@ jobs:
         id: push_base
         run: |
           before="${{ github.event.before }}"
-          # Integration branch feature branches are cut from. Falls back to the
-          # repo default branch if it does not exist, so the workflow stays valid
-          # for any repo/branch layout.
-          base_branch="development"
+          # Trunk-based: feature branches are cut from main. Falls back to the repo
+          # default branch if it differs, so the workflow stays valid for any
+          # repo/branch layout.
+          base_branch="main"
           if ! git ls-remote --exit-code --heads origin "$base_branch" >/dev/null 2>&1; then
             base_branch="${{ github.event.repository.default_branch }}"
           fi
@@ -117,8 +116,7 @@ jobs:
     if: >-
       !inputs.skip_tests &&
       (github.event_name != 'pull_request' ||
-       (github.event.pull_request.draft == false &&
-        github.event.pull_request.base.ref != 'main'))
+       github.event.pull_request.draft == false)
 
     uses: ARPA-H-BDF/bdfkb-schema/.github/workflows/ci-validate.yaml@6afe39430894512131b7f86f75ac165e8db65551 # main
     with:
@@ -132,11 +130,11 @@ jobs:
       (inputs.version != '' ||
        github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'pull_request' &&
-        github.event.pull_request.draft == false &&
-        github.event.pull_request.base.ref != 'main') ||
-       (github.event_name == 'push' && github.ref_name == 'development' &&
-        !contains(github.event.head_commit.message || '', '!ignore') &&
-        !startsWith(github.event.head_commit.message || '', 'docs:')))
+        github.event.pull_request.draft == false))
+      # Trunk-based: there is no integration branch to gate a push build on. Pushes
+      # to main are excluded by the top-level `branches-ignore: [main]` trigger
+      # (they fire release-please.yml instead), and PRs already cover the build
+      # path, so the former `push: development` clause is dropped (§5.3).
 
     runs-on: ubuntu-latest
     steps:

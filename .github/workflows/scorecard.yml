@@ -21,7 +21,6 @@ on:
   pull_request:
     branches:
       - main
-      - development
 
   # Run weekly on Saturdays at 01:30 UTC.
   schedule:

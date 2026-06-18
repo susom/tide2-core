@@ -1,0 +1,77 @@
+name: PR Title Lint
+
+# Trunk-based releases squash-merge every PR, and "Default to PR title for squash
+# merge commits" is enabled, so the PR title becomes the squash subject that
+# release-please parses for the version bump (see CONTRIBUTING.md / PUBLISHING.md).
+# The title is therefore load-bearing: this workflow rejects PR titles that are not
+# valid Conventional Commits, and rejects breaking-change notation (`!` / the
+# BREAKING CHANGE footer), which is forbidden in this repo so majors are never
+# inferred automatically.
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+# Read-only default (Token-Permissions scorecard check). The linter only needs to
+# read the PR title from the event payload.
+permissions: read-all
+
+concurrency:
+  group: pr-title-lint-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Validate Conventional-Commit PR title
+        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          # The ten allowed commit types (must match CONTRIBUTING.md exactly).
+          types: |
+            feat
+            fix
+            perf
+            docs
+            build
+            refactor
+            style
+            test
+            ci
+            chore
+          # Scopes are optional; do not require one.
+          requireScope: false
+          # Subject must be lowercase-first and have no trailing period, matching
+          # the repo's commit-message style.
+          subjectPattern: ^(?![A-Z])(?!.*\.$).+$
+          subjectPatternError: |
+            The PR title subject "{subject}" is invalid. It must start with a
+            lowercase letter and must not end with a period, e.g.
+            "feat(anonymizer): add regex recognizer".
+
+      - name: Forbid breaking-change notation in PR title
+        # Repo-specific rule (CONTRIBUTING.md): no `!` after type/scope and no
+        # BREAKING CHANGE footer. Major bumps are a deliberate maintainer decision,
+        # never inferred from commit/PR syntax. release-please would bump a major on
+        # either notation, so reject it here too — the local commit-msg hook only
+        # guards intermediate commits, not the squash subject taken from this title.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          # Match `<type>!:` or `<type>(scope)!:` at the start of the title.
+          if printf '%s' "$PR_TITLE" | grep -Eq '^[a-z]+(\([^)]*\))?!:'; then
+            echo "::error::PR title uses breaking-change notation ('!'). It is forbidden in this repo — see CONTRIBUTING.md. Major bumps are a maintainer decision." >&2
+            exit 1
+          fi
+          if printf '%s' "$PR_TITLE" | grep -q 'BREAKING CHANGE'; then
+            echo "::error::PR title contains 'BREAKING CHANGE'. It is forbidden in this repo — see CONTRIBUTING.md." >&2
+            exit 1
+          fi
