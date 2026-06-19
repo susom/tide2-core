@@ -330,8 +330,13 @@ jobs:
           # cache-bust with a query string so any CDN edge re-fetches.
           listed=false
           for i in $(seq 1 30); do
+            # A curl transport failure (DNS/TLS/timeout) exits non-zero; under
+            # `set -e` that would kill the step — the very hard-failure this job
+            # avoids. Bound each request and fall back to a synthetic "000" so a
+            # transient network blip just retries instead of failing the release.
             code="$(curl -s -o /dev/null -w '%{http_code}' \
-              "https://pypi.org/pypi/tide2/${ver}/json?cb=${i}")"
+              --connect-timeout 10 --max-time 30 \
+              "https://pypi.org/pypi/tide2/${ver}/json?cb=${i}" || echo 000)"
             if [ "$code" = "200" ]; then
               listed=true
               break
