@@ -15,6 +15,12 @@ two-phase** release process:
   merging the release PR. From that click everything is automatic: read the
   version → tag → build → PyPI → GitHub Release → verify.
 
+  > A `verify-published` **warning** ("PyPI propagation lag") does not mean the
+  > release failed. PyPI is immutable and the upload is already confirmed by
+  > `publish-pypi`; the public index can take 10+ minutes to list a new version.
+  > Confirm with `uv pip install "tide2==<ver>"` after a few minutes. Only a
+  > `verify-published` *error after the version is listed* indicates a real problem.
+
 Uploads use **Trusted Publishing (OIDC)** and writes back to the repo (tag,
 Release) use the built-in `GITHUB_TOKEN` — **no API tokens are stored anywhere**
 (no `PYPI_API_TOKEN`, no PAT, no GitHub App token).
