@@ -123,15 +123,17 @@ class TransformerCore:
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
         """
-        # local_files_only takes precedence: it makes HuggingFace fail fast on any
-        # cache miss instead of downloading, so allow_huggingface_download can never
-        # take effect. Reconcile the two here (library-side) so behavior is coherent
-        # for every caller and resolve_model_path receives a consistent value.
+        # Treat local_files_only=True as an offline / no-network mode. It already
+        # stops transformers.from_pretrained from reaching the Hub, but the
+        # name-only branch below calls resolve_model_path, which would still attempt
+        # a HuggingFace snapshot_download when allow_huggingface_download is set.
+        # Disable that here so both code paths honor the offline contract and every
+        # caller gets coherent behavior.
         if local_files_only and allow_huggingface_download:
             logger.warning(
-                "local_files_only=True overrides allow_huggingface_download=True; "
-                "HuggingFace Hub download is disabled. Set local_files_only=False to "
-                "permit downloads."
+                "local_files_only=True implies offline mode; disabling "
+                "allow_huggingface_download=True so no HuggingFace Hub download is "
+                "attempted. Set local_files_only=False to permit downloads."
             )
             allow_huggingface_download = False
 

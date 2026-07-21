@@ -108,14 +108,22 @@ class TestTransformersRecognizer:
         config_path = create_temp_config(self.mock_config)
         mock_get_path.return_value = config_path
 
+        # Build a guaranteed-nonexistent absolute path under a temp dir that is
+        # removed before the assertion, so the test is deterministic regardless of
+        # what happens to exist on the host filesystem.
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = str(Path(tmp) / "definitely" / "missing" / "model")
+        assert not Path(missing_path).exists()
+
         try:
-            missing_path = "/data/models/StanfordAIMI/stanford-deidentifier-v2"
-            with pytest.raises(ValueError, match="absolute path but does not exist"):
+            with pytest.raises(ValueError) as exc_info:
                 TransformersRecognizer(model_name="TEST_MODEL", model_path=missing_path)
 
-            # Message names the node so the mount issue is self-diagnosing.
-            with pytest.raises(ValueError, match=socket.gethostname()):
-                TransformersRecognizer(model_name="TEST_MODEL", model_path=missing_path)
+            # One instantiation; assert both the diagnosis and the node name (so the
+            # mount issue is self-diagnosing) from the single captured message.
+            message = str(exc_info.value)
+            assert "absolute path but does not exist" in message
+            assert socket.gethostname() in message
         finally:
             Path(config_path).unlink()
 
