@@ -331,19 +331,27 @@ jobs:
           sha="$(git rev-parse HEAD)"
           # The merged release PR is the one whose merge commit carries this tag.
           # Fall back to the newest merged PR still labeled pending.
+          # Keep `|| true` for best-effort, but let stderr through so an auth/API
+          # failure is visible in the log instead of masquerading as "no PR found".
+          # `--limit 100` guards against the default page size (30) missing an
+          # older still-pending release PR.
           pr="$(gh pr list --state merged --label 'autorelease: pending' \
-            --json number,mergeCommit \
+            --limit 100 --json number,mergeCommit \
             --jq "[.[] | select(.mergeCommit.oid == \"$sha\")][0].number" \
-            2>/dev/null || true)"
+            || true)"
           if [ -z "$pr" ] || [ "$pr" = "null" ]; then
             pr="$(gh pr list --state merged --label 'autorelease: pending' \
-              --json number --jq '.[0].number' 2>/dev/null || true)"
+              --limit 100 --json number --jq '.[0].number' || true)"
           fi
           if [ -z "$pr" ] || [ "$pr" = "null" ]; then
             echo "::warning title=No pending release PR::No merged PR labeled 'autorelease: pending' found to mark tagged. If the next release-please run does not open a PR, relabel the last release PR manually."
             exit 0
           fi
-          # Ensure the target label exists (idempotent), then flip pending -> tagged.
+          # Ensure the target label exists, then flip pending -> tagged. Unlike the
+          # lookups above, `gh label create` is EXPECTED to fail on every run after
+          # the first (label already exists), so its stderr is suppressed to avoid
+          # noise; a genuine failure here (e.g. auth) still surfaces at the visible
+          # `gh pr edit` step below, so nothing is silently lost.
           gh label create 'autorelease: tagged' --color ededed >/dev/null 2>&1 || true
           if gh pr edit "$pr" \
             --add-label 'autorelease: tagged' \
