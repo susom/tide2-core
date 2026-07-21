@@ -64,8 +64,9 @@ uv run pytest -m "not integration"               # skip slow integration tests
 uv run pytest tests/test_masking_anonymizer.py   # single file
 
 # Quality — ruff (line-length 120, double quotes, single-line imports),
-# ty (type check), bandit (security), nbstripout
+# bandit (security), nbstripout
 uv run pre-commit run --all-files
+uv run ty check              # type check (not a pre-commit hook; run separately)
 
 # Docs preview (hot reload at localhost:8080)
 uv sync --extra docs --extra llm && make docs-serve
