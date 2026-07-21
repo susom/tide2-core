@@ -10,6 +10,8 @@ Classes:
 Functions:
     load_model_config: Load model configuration from config file
     get_available_models: List available model configurations
+    format_transformer_recognizer_name: Canonical Presidio recognizer_name
+        for transformer NER results
 
 Example:
     from tide2.transformers import TransformerCore
