@@ -260,6 +260,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the GitHub Release
+      # Labels live in the Issues API namespace, so both `gh label create` and
+      # `gh pr edit --add-label/--remove-label` (which hits
+      # POST /repos/.../issues/{n}/labels) need `issues: write`. `pull-requests:
+      # write` covers the `gh pr list`/`gh pr edit` calls on the PR itself.
+      issues: write # create + apply the autorelease label
+      pull-requests: write # flip the merged release PR's autorelease label
     steps:
       - name: Checkout at tag
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -304,6 +310,60 @@ jobs:
             args+=(--generate-notes)
           fi
           gh release create "$tag" "${args[@]}" dist/*.whl dist/*.tar.gz
+
+      - name: Mark release PR as tagged
+        # Because release-please runs with skip-github-release (Phase 2 owns the
+        # tag + Release), it never transitions the merged release PR's label from
+        # "autorelease: pending" to "autorelease: tagged". If left pending, the
+        # NEXT release-please run sees an "untagged, merged release PR outstanding"
+        # and silently aborts without opening the next release PR. Close that loop
+        # here, now that the tag and Release exist. Best-effort: a labeling hiccup
+        # must not fail an already-published, immutable release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # This job is checked out at the tag ref, so HEAD is the tagged commit —
+          # i.e. the release PR's merge commit. Compute it in its own variable so
+          # the value (a plain hex SHA) is all that gets interpolated into the jq
+          # expression below; nesting the command substitution inside the quoted
+          # --jq string would break the shell quoting.
+          sha="$(git rev-parse HEAD)"
+          # The merged release PR is the one whose merge commit carries this tag.
+          # Fall back to the newest merged PR still labeled pending.
+          # Keep `|| true` for best-effort, but let stderr through so an auth/API
+          # failure is visible in the log instead of masquerading as "no PR found".
+          # `--limit 100` guards against the default page size (30) missing an
+          # older still-pending release PR.
+          pr="$(gh pr list --state merged --label 'autorelease: pending' \
+            --limit 100 --json number,mergeCommit \
+            --jq "[.[] | select(.mergeCommit.oid == \"$sha\")][0].number" \
+            || true)"
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            pr="$(gh pr list --state merged --label 'autorelease: pending' \
+              --limit 100 --json number --jq '.[0].number' || true)"
+          fi
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "::warning title=No pending release PR::No merged PR labeled 'autorelease: pending' found to mark tagged. If the next release-please run does not open a PR, relabel the last release PR manually."
+            exit 0
+          fi
+          # Ensure the target label exists, then flip pending -> tagged. Creation is
+          # EXPECTED to fail on every run after the first (the label already exists),
+          # so swallow only that case — anything else (auth, rate-limit, network) is
+          # surfaced as a warning rather than hidden by a blanket `2>/dev/null`.
+          if ! err="$(gh label create 'autorelease: tagged' --color ededed 2>&1)"; then
+            case "$err" in
+              *"already exists"*) : ;; # idempotent no-op — fine
+              *) echo "::warning title=Label create failed::$err" ;;
+            esac
+          fi
+          if gh pr edit "$pr" \
+            --add-label 'autorelease: tagged' \
+            --remove-label 'autorelease: pending'; then
+            echo "Marked release PR #$pr as autorelease: tagged."
+          else
+            echo "::warning title=Label transition failed::Could not relabel PR #$pr; relabel it manually so release-please can open the next release PR."
+          fi
 
   # ---------------------------------------------------------------------------
   # Job 6: verify-published — post-publish smoke test (closes the loop).
