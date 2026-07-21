@@ -345,11 +345,13 @@ jobs:
           fi
           # Ensure the target label exists (idempotent), then flip pending -> tagged.
           gh label create 'autorelease: tagged' --color ededed >/dev/null 2>&1 || true
-          gh pr edit "$pr" \
+          if gh pr edit "$pr" \
             --add-label 'autorelease: tagged' \
-            --remove-label 'autorelease: pending' \
-            || echo "::warning title=Label transition failed::Could not relabel PR #$pr; relabel it manually so release-please can open the next release PR."
-          echo "Marked release PR #$pr as autorelease: tagged."
+            --remove-label 'autorelease: pending'; then
+            echo "Marked release PR #$pr as autorelease: tagged."
+          else
+            echo "::warning title=Label transition failed::Could not relabel PR #$pr; relabel it manually so release-please can open the next release PR."
+          fi
 
   # ---------------------------------------------------------------------------
   # Job 6: verify-published — post-publish smoke test (closes the loop).
