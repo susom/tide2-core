@@ -42,9 +42,11 @@ run distributed via **Ray** (`ray.data.map_batches` over CPU/GPU actors).
   - feature/CLI/architecture changes → update `README.md`.
   Both auto-publish on every push to `main` via `.github/workflows/docs.yml`.
 - **Don't remove the `pyarrow` pre-import** in the `docs` / `docs-serve` Makefile
-  targets — it prevents a native-init segfault in the Presidio→transformers→pyarrow
-  import chain. Every module must import cleanly, since pdoc imports them all (the
-  docs build uses `uv sync --extra docs --extra llm`).
+  targets — it prevents a native-init segfault triggered by the deep import chain
+  `presidio_anonymizer → ahds_surrogate → presidio_analyzer → transformers →
+  sklearn → pandas → pyarrow` (see the comment on the `docs` target for the exact
+  chain). Every module must import cleanly, since pdoc imports them all (the docs
+  build uses `uv sync --extra docs --extra llm`).
 - **Small-box / Colab Ray deadlock:** on ≲4-CPU boxes the pipeline hangs at `0/1`
   unless you pass **fractional CPUs *and* `--no-checkpoint` together** — both fixes
   are required. See README → *"Why small boxes deadlock"* for the knob table; don't
@@ -68,8 +70,9 @@ uv run pytest tests/test_masking_anonymizer.py   # single file
 uv run pre-commit run --all-files
 uv run ty check              # type check (not a pre-commit hook; run separately)
 
-# Docs preview (hot reload at localhost:8080)
-uv sync --extra docs --extra llm && make docs-serve
+# Docs preview (hot reload at localhost:8080). Use `uv run make` so the Makefile's
+# bare `python` resolves to the venv even without an active activation (matches CI).
+uv sync --extra docs --extra llm && uv run make docs-serve
 ```
 
 ## Making changes
@@ -87,8 +90,12 @@ The **10 allowed commit types** and their effect:
 | `feat` | minor | yes |
 | `fix`, `perf` | patch | yes |
 | `docs` | none | yes |
-| `build` | none | only `build(deps)` |
+| `build` | none | yes |
 | `refactor`, `style`, `test`, `ci`, `chore` | none | no |
+
+Changelog inclusion follows `release-please-config.json` (`changelog-sections`):
+`feat`/`fix`/`perf`/`docs`/`build` are visible; `refactor`/`style`/`test`/`ci`/`chore`
+are hidden.
 
 Description: lowercase imperative, no trailing period; add a scope noun where it
 helps (`feat(anonymizer):`).
