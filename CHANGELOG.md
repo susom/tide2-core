@@ -2,6 +2,13 @@
 
 <!-- version list -->
 
+## [1.2.1](https://github.com/susom/tide2-core/compare/v1.2.0...v1.2.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **recognizer:** stop eager en_core_web_lg load crashing actors ([#28](https://github.com/susom/tide2-core/issues/28)) ([67d10e8](https://github.com/susom/tide2-core/commit/67d10e8c7e13ede6fb881a9e5e20bac68a80dbb6))
+
 ## [1.2.0](https://github.com/susom/tide2-core/compare/v1.1.1...v1.2.0) (2026-06-18)
 
 
