@@ -260,6 +260,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the GitHub Release
+      # Labels live in the Issues API namespace, so both `gh label create` and
+      # `gh pr edit --add-label/--remove-label` (which hits
+      # POST /repos/.../issues/{n}/labels) need `issues: write`. `pull-requests:
+      # write` covers the `gh pr list`/`gh pr edit` calls on the PR itself.
+      issues: write # create + apply the autorelease label
       pull-requests: write # flip the merged release PR's autorelease label
     steps:
       - name: Checkout at tag
