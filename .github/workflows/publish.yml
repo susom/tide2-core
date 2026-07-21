@@ -318,12 +318,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${{ needs.resolve.outputs.tag }}"
+          # This job is checked out at the tag ref, so HEAD is the tagged commit —
+          # i.e. the release PR's merge commit. Compute it in its own variable so
+          # the value (a plain hex SHA) is all that gets interpolated into the jq
+          # expression below; nesting the command substitution inside the quoted
+          # --jq string would break the shell quoting.
+          sha="$(git rev-parse HEAD)"
           # The merged release PR is the one whose merge commit carries this tag.
           # Fall back to the newest merged PR still labeled pending.
           pr="$(gh pr list --state merged --label 'autorelease: pending' \
             --json number,mergeCommit \
-            --jq "[.[] | select(.mergeCommit.oid | startswith(\"$(git rev-parse "$tag^{commit}")\"))][0].number" \
+            --jq "[.[] | select(.mergeCommit.oid == \"$sha\")][0].number" \
             2>/dev/null || true)"
           if [ -z "$pr" ] || [ "$pr" = "null" ]; then
             pr="$(gh pr list --state merged --label 'autorelease: pending' \
