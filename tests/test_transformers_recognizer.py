@@ -89,12 +89,50 @@ class TestTransformersRecognizer:
         config_path = create_temp_config(self.mock_config)
         mock_get_path.return_value = config_path
 
-        try:
-            custom_path = "/custom/model/path"
-            recognizer = TransformersRecognizer(model_name="TEST_MODEL", model_path=custom_path)
+        # An absolute model_path is now validated to exist on this node, so use a
+        # real directory (bare/relative repo ids are exempt from the check).
+        with tempfile.TemporaryDirectory() as custom_path:
+            try:
+                recognizer = TransformersRecognizer(model_name="TEST_MODEL", model_path=custom_path)
 
-            assert recognizer.model_path == custom_path
-            assert recognizer.model_name == "TEST_MODEL"
+                assert recognizer.model_path == custom_path
+                assert recognizer.model_name == "TEST_MODEL"
+            finally:
+                Path(config_path).unlink()
+
+    @patch("tide2.transformers.config.get_resource_path")
+    def test_absolute_model_path_missing_raises(self, mock_get_path):
+        """An absolute model_path that does not exist fails fast with a clear error."""
+        import socket
+
+        config_path = create_temp_config(self.mock_config)
+        mock_get_path.return_value = config_path
+
+        try:
+            missing_path = "/data/models/StanfordAIMI/stanford-deidentifier-v2"
+            with pytest.raises(ValueError, match="absolute path but does not exist"):
+                TransformersRecognizer(model_name="TEST_MODEL", model_path=missing_path)
+
+            # Message names the node so the mount issue is self-diagnosing.
+            with pytest.raises(ValueError, match=socket.gethostname()):
+                TransformersRecognizer(model_name="TEST_MODEL", model_path=missing_path)
+        finally:
+            Path(config_path).unlink()
+
+    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.config.get_resource_path")
+    def test_bare_repo_id_model_path_skips_check(self, mock_get_path, mock_resolve_model):
+        """A bare HF repo-id model_path is not absolute, so it skips the existence check."""
+        config_path = create_temp_config(self.mock_config)
+        mock_get_path.return_value = config_path
+
+        try:
+            repo_id = "StanfordAIMI/stanford-deidentifier-v2"
+            recognizer = TransformersRecognizer(model_name="TEST_MODEL", model_path=repo_id)
+
+            # The repo id is passed through verbatim (no resolution, no validation).
+            assert recognizer.model_path == repo_id
+            mock_resolve_model.assert_not_called()
         finally:
             Path(config_path).unlink()
 
