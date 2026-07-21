@@ -14,9 +14,10 @@ Architecture:
     ray.kill() terminates the worker process and a new worker is spawned.
 
 Thread/Process Safety:
-    Each Actor maintains its own AnalyzerEngine instance. The expensive spaCy
-    model and stopwords are loaded once per actor at initialization. Pre-computed
-    DL results and known values are passed as ad-hoc recognizers per-note.
+    Each Actor maintains its own AnalyzerEngine instance. A blank spaCy tokenizer
+    (no NER/POS/DEP pipeline, no ``en_core_web_*`` download) is built once per actor
+    at initialization. Pre-computed DL results and known values are passed as ad-hoc
+    recognizers per-note.
 """
 
 import json
@@ -34,6 +35,7 @@ from presidio_analyzer import EntityRecognizer
 from presidio_analyzer import RecognizerRegistry
 from presidio_analyzer import RecognizerResult
 from presidio_analyzer.context_aware_enhancers import ContextAwareEnhancer
+from presidio_analyzer.nlp_engine import NerModelConfiguration
 from presidio_analyzer.nlp_engine import NlpArtifacts
 from presidio_analyzer.nlp_engine import SpacyNlpEngine
 from presidio_analyzer.predefined_recognizers import DateRecognizer
@@ -56,11 +58,20 @@ from tide2.utils.span_metrics import resolve_recognizer_results
 
 
 class _BlankSpacyNlpEngine(SpacyNlpEngine):
-    """SpacyNlpEngine using a pre-loaded spacy.blank model (tokenization only)."""
+    """SpacyNlpEngine backed by a pre-loaded ``spacy.blank`` model (tokenization only).
+
+    Sets the required attributes directly instead of calling ``super().__init__()``.
+    Newer presidio versions eagerly call ``spacy.load("en_core_web_lg")`` inside
+    ``SpacyNlpEngine.__init__``; that model is neither needed (we only tokenize) nor
+    shipped in our images, so calling the parent constructor raises
+    ``OSError: [E050] Can't find model 'en_core_web_lg'`` and kills the actor. Bypassing
+    it keeps this engine correct on both lazy- and eager-loading presidio builds.
+    """
 
     def __init__(self, loaded_spacy_model):
-        super().__init__()
         self.nlp = {"en": loaded_spacy_model}
+        self.models = [{"lang_code": "en", "model_name": "blank"}]
+        self.ner_model_configuration = NerModelConfiguration()
 
 
 # Threshold constants for logging
@@ -203,6 +214,8 @@ class RecognizerWorker:
         # The blank model has the same tokenizer, stop words, and punctuation
         # detection but skips NER/POS/DEP pipelines we don't use (~16x faster).
         # See: https://microsoft.github.io/presidio/analyzer/nlp_engines/spacy_stanza/
+        # NOTE: _BlankSpacyNlpEngine must NOT call super().__init__() — newer presidio
+        # builds eagerly load en_core_web_lg there; see its docstring for the rationale.
         import spacy
 
         blank_nlp = spacy.blank("en")
