@@ -7,6 +7,7 @@ the Ray actor.
 """
 
 import logging
+import socket
 import threading
 from pathlib import Path
 from typing import Any
@@ -122,6 +123,20 @@ class TransformerCore:
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
         """
+        # Treat local_files_only=True as an offline / no-network mode. It already
+        # stops transformers.from_pretrained from reaching the Hub, but the
+        # name-only branch below calls resolve_model_path, which would still attempt
+        # a HuggingFace snapshot_download when allow_huggingface_download is set.
+        # Disable that here so both code paths honor the offline contract and every
+        # caller gets coherent behavior.
+        if local_files_only and allow_huggingface_download:
+            logger.warning(
+                "local_files_only=True implies offline mode; disabling "
+                "allow_huggingface_download=True so no HuggingFace Hub download is "
+                "attempted. Set local_files_only=False to permit downloads."
+            )
+            allow_huggingface_download = False
+
         self.model_name = model_name
         self.device = device
         self.dtype = dtype
@@ -134,6 +149,20 @@ class TransformerCore:
 
         # Resolve model path
         if model_path is not None:
+            # An absolute path is unambiguously a local model dir (HF repo ids are
+            # never absolute). If it's missing on this node, fail fast with an
+            # actionable message instead of transformers' misleading "Repo id must be
+            # in the form..." error. Bare repo ids (e.g.
+            # "StanfordAIMI/stanford-deidentifier-v2") are left alone so name-only
+            # loading from the HF cache keeps working.
+            if Path(model_path).is_absolute() and not Path(model_path).is_dir():
+                raise ValueError(
+                    f"model_path {model_path!r} is an absolute path but does not exist or "
+                    f"is not a directory on this node ({socket.gethostname()}). Under Ray, "
+                    f"ensure the model volume is mounted on all worker nodes, or pass a "
+                    f"HuggingFace repo id (e.g. 'StanfordAIMI/stanford-deidentifier-v2') "
+                    f"to load from the local HF cache instead."
+                )
             self.model_path = model_path
         else:
             self.model_path = resolve_model_path(
