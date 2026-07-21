@@ -260,6 +260,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the GitHub Release
+      pull-requests: write # flip the merged release PR's autorelease label
     steps:
       - name: Checkout at tag
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -304,6 +305,41 @@ jobs:
             args+=(--generate-notes)
           fi
           gh release create "$tag" "${args[@]}" dist/*.whl dist/*.tar.gz
+
+      - name: Mark release PR as tagged
+        # Because release-please runs with skip-github-release (Phase 2 owns the
+        # tag + Release), it never transitions the merged release PR's label from
+        # "autorelease: pending" to "autorelease: tagged". If left pending, the
+        # NEXT release-please run sees an "untagged, merged release PR outstanding"
+        # and silently aborts without opening the next release PR. Close that loop
+        # here, now that the tag and Release exist. Best-effort: a labeling hiccup
+        # must not fail an already-published, immutable release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.resolve.outputs.tag }}"
+          # The merged release PR is the one whose merge commit carries this tag.
+          # Fall back to the newest merged PR still labeled pending.
+          pr="$(gh pr list --state merged --label 'autorelease: pending' \
+            --json number,mergeCommit \
+            --jq "[.[] | select(.mergeCommit.oid | startswith(\"$(git rev-parse "$tag^{commit}")\"))][0].number" \
+            2>/dev/null || true)"
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            pr="$(gh pr list --state merged --label 'autorelease: pending' \
+              --json number --jq '.[0].number' 2>/dev/null || true)"
+          fi
+          if [ -z "$pr" ] || [ "$pr" = "null" ]; then
+            echo "::warning title=No pending release PR::No merged PR labeled 'autorelease: pending' found to mark tagged. If the next release-please run does not open a PR, relabel the last release PR manually."
+            exit 0
+          fi
+          # Ensure the target label exists (idempotent), then flip pending -> tagged.
+          gh label create 'autorelease: tagged' --color ededed >/dev/null 2>&1 || true
+          gh pr edit "$pr" \
+            --add-label 'autorelease: tagged' \
+            --remove-label 'autorelease: pending' \
+            || echo "::warning title=Label transition failed::Could not relabel PR #$pr; relabel it manually so release-please can open the next release PR."
+          echo "Marked release PR #$pr as autorelease: tagged."
 
   # ---------------------------------------------------------------------------
   # Job 6: verify-published — post-publish smoke test (closes the loop).
