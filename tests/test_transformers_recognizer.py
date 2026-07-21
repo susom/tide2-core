@@ -77,8 +77,47 @@ class TestTransformersRecognizer:
             assert recognizer.model_name == "TEST_MODEL"
             assert recognizer.model_path == "/fake/model/path"
             assert recognizer.supported_entities == ["PERSON", "LOCATION", "PHONE_NUMBER"]
-            assert recognizer.name == "Transformers model TEST_MODEL"
+            assert recognizer.name == "TransformersRecognizer[TEST_MODEL]"
             assert not recognizer.is_loaded  # Pipeline not loaded yet
+        finally:
+            Path(config_path).unlink()
+
+    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.config.get_resource_path")
+    def test_live_and_cached_recognizer_name_agree(self, mock_get_path, mock_resolve_model):
+        """Both producers must emit an identical recognizer_name for the same model_name.
+
+        This is the property the homogenization change exists to guarantee: a note
+        analyzed through the live ``TransformersRecognizer`` carries the same
+        ``recognizer_name`` as the same note reassembled from cached chunk
+        predictions via ``reassemble_chunks_for_document``.
+        """
+        import json
+
+        from tide2.runner.transformer import reassemble_chunks_for_document
+
+        mock_resolve_model.return_value = "/fake/model/path"
+        config_path = create_temp_config(self.mock_config)
+        mock_get_path.return_value = config_path
+
+        try:
+            # Live path: the recognizer's own name.
+            live_name = TransformersRecognizer(model_name="TEST_MODEL").name
+
+            # Cached/batch path: the name baked into reassembled results.
+            note_text = "John lives in Seattle"
+            chunk_rows = [
+                {
+                    "chunk_id": 0,
+                    "char_offset_start": 0,
+                    "predictions_json": json.dumps([{"entity_group": "PERSON", "score": 0.9, "start": 0, "end": 4}]),
+                }
+            ]
+            results_json, entity_count = reassemble_chunks_for_document(chunk_rows, note_text, "TEST_MODEL")
+            assert entity_count == 1
+            cached_name = json.loads(results_json)[0]["recognition_metadata"]["recognizer_name"]
+
+            assert live_name == cached_name == "TransformersRecognizer[TEST_MODEL]"
         finally:
             Path(config_path).unlink()
 
