@@ -151,6 +151,10 @@ def enable_whitespace_merging() -> None:
     Restores the original whitespace-merge method against whichever name it was
     resolved under when the patch was applied.
 
+    Raises:
+        RuntimeError: If the patch is marked applied but the captured original
+            method or its resolved name is missing (inconsistent patch state).
+
     Example:
         >>> from tide2.anonymizers import presidio_patches
         >>> presidio_patches.disable_whitespace_merging()
@@ -163,6 +167,15 @@ def enable_whitespace_merging() -> None:
     # state; instance-level patching would not propagate across the actor pool.
     global _patch_applied, _original_merge_method, _resolved_merge_method_name  # noqa: PLW0603
     if _patch_applied:
+        # disable_whitespace_merging() sets both of these before flipping
+        # _patch_applied, so this invariant should always hold; guard defensively
+        # so a corrupted state fails with an actionable error instead of an opaque
+        # setattr(TypeError) that would leave the patch state inconsistent.
+        if _resolved_merge_method_name is None or _original_merge_method is None:
+            raise RuntimeError(
+                "Inconsistent whitespace-merge patch state: _patch_applied is True but the "
+                "captured original method or its resolved name is missing. Cannot restore."
+            )
         setattr(AnonymizerEngine, _resolved_merge_method_name, _original_merge_method)
         _original_merge_method = None
         _resolved_merge_method_name = None

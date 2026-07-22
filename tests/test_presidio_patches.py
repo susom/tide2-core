@@ -115,6 +115,23 @@ class TestWhitespaceMergingRoundTrip:
         presidio_patches.enable_whitespace_merging()
         assert not presidio_patches.is_whitespace_merging_disabled()
 
+    def test_enable_with_corrupted_state_raises(self):
+        """Inconsistent patch state fails with an actionable RuntimeError, not TypeError."""
+        presidio_patches.disable_whitespace_merging()
+        resolved = presidio_patches._resolved_merge_method_name
+        original = presidio_patches._original_merge_method
+        # Simulate a corrupted state: patch flagged applied but captured original lost.
+        presidio_patches._original_merge_method = None
+        presidio_patches._resolved_merge_method_name = None
+        try:
+            with pytest.raises(RuntimeError, match="Inconsistent whitespace-merge patch state"):
+                presidio_patches.enable_whitespace_merging()
+        finally:
+            # Restore captured state and cleanly undo the patch on AnonymizerEngine.
+            presidio_patches._original_merge_method = original
+            presidio_patches._resolved_merge_method_name = resolved
+            presidio_patches.enable_whitespace_merging()
+
 
 class TestRemoveDuplicatesRoundTrip:
     """patch/unpatch remove_duplicates restores the original method."""
