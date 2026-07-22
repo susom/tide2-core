@@ -61,21 +61,48 @@ jobs:
           fi
           # Every merged PR still labeled pending whose merge commit is tagged has
           # already been released -> relabel it so release-please won't abort.
-          gh pr list --state merged --label 'autorelease: pending' \
+          # Capture the list first (not `gh pr list | while`): under pipefail a
+          # transient list-API blip would otherwise fail the whole pipeline and
+          # kill the workflow. This is best-effort self-heal, so a list failure
+          # should warn and let release-please proceed, not abort the release.
+          if ! pending="$(gh pr list --state merged --label 'autorelease: pending' \
             --limit 100 --json number,mergeCommit \
-            --jq '.[] | "\(.number) \(.mergeCommit.oid)"' \
-          | while read -r pr sha; do
+            --jq '.[] | "\(.number) \(.mergeCommit.oid)"')"; then
+            echo "::warning title=PR list failed::Could not list pending release PRs; skipping reconcile."
+            pending=""
+          fi
+          # Feed via a here-string so the loop runs in THIS shell, not a pipe
+          # subshell. Skip the read entirely when empty (a here-string of "" would
+          # still iterate once on a blank line).
+          if [ -n "$pending" ]; then
+            while read -r pr sha; do
               [ -n "$pr" ] || continue
-              if [ -n "$(git tag --points-at "$sha")" ]; then
-                echo "PR #$pr merge commit $sha is tagged — flipping to tagged."
-                gh pr edit "$pr" \
-                  --add-label 'autorelease: tagged' \
-                  --remove-label 'autorelease: pending' \
-                  || echo "::warning title=Relabel failed::Could not relabel PR #$pr; do it manually."
-              else
-                echo "PR #$pr ($sha) has no tag yet — leaving pending (not released)."
+              # jq emits "null" for a missing mergeCommit.oid; skip those explicitly
+              # so a null/empty SHA never reaches `git tag --points-at`.
+              if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+                echo "PR #$pr has no merge commit SHA — skipping."
+                continue
               fi
-            done
+              # `git tag --points-at` errors on an unknown/malformed object (e.g. a
+              # commit not present locally); tolerate that so it can't kill the step
+              # under `set -e`. Empty output = no tag = not yet released.
+              if [ -z "$(git tag --points-at "$sha" 2>/dev/null || true)" ]; then
+                echo "PR #$pr ($sha) has no tag yet — leaving pending (not released)."
+                continue
+              fi
+              # Tag exists -> the release happened; flip pending -> tagged. Only
+              # claim success after `gh pr edit` actually succeeds.
+              if gh pr edit "$pr" \
+                --add-label 'autorelease: tagged' \
+                --remove-label 'autorelease: pending'; then
+                echo "PR #$pr merge commit $sha is tagged — flipped to tagged."
+              else
+                echo "::warning title=Relabel failed::Could not relabel PR #$pr; do it manually."
+              fi
+            done <<< "$pending"
+          else
+            echo "No merged PRs labeled 'autorelease: pending' to reconcile."
+          fi
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           target-branch: main
