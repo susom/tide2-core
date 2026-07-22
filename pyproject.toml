@@ -41,57 +41,57 @@ classifiers = [
 ]
 dependencies = [
     # Google Cloud services
-    "db-dtypes", # implicit: required by bigquery.to_dataframe() for pandas dtype mapping
-    "google-cloud-bigquery",
-    "google-cloud-storage",
+    "db-dtypes>=1.6,<2", # implicit: required by bigquery.to_dataframe() for pandas dtype mapping
+    "google-cloud-bigquery>=3.41,<4",
+    "google-cloud-storage>=3.10,<4",
     # NLP and ML-based entity recognition (required: no model runs without these)
-    "accelerate", # required by transformers for device_map="auto" (device="auto")
+    "accelerate>=1.14,<2", # required by transformers for device_map="auto" (device="auto")
     "presidio-analyzer>=2.2.362,<2.3",
     "presidio-anonymizer>=2.2.362,<2.3",
-    "spacy>=3.8.0",
-    "torch",
-    "transformers>=5.0.0",
+    "spacy>=3.8,<4",
+    "torch>=2.12,<3",
+    "transformers>=5.0,<6",
     # Data processing
-    "numpy",
-    "intervaltree>=3.1.0",
-    "orjson>=3.10.0",
-    "pandas",
-    "pyarrow>=14.0",
+    "numpy>=2,<3", # ABI-coupled to torch/spacy/pyarrow
+    "intervaltree>=3.1,<4",
+    "orjson>=3.10,<4",
+    "pandas>=2.3,<3",
+    "pyarrow>=14,<25",
     # Cryptography and anonymization
-    "faker",
-    "ff3",
-    "pyahocorasick",
-    "usaddress",
+    "faker>=40.19,<41",
+    "ff3>=1.0,<2",
+    "pyahocorasick>=2.3,<3",
+    "usaddress>=0.5,<0.6",
     # Orchestration
-    "ray[default,data]>=2.54.0",
-    "aiohttp>=3.14.0", # transitive via ray[default]; pinned for security/compat
+    "ray[default,data]>=2.54,<3",
+    "aiohttp>=3.14,<4", # transitive via ray[default]; pinned for security/compat
     # Web and CLI
-    "httpx>=0.25.0",
-    "streamlit",
-    "starlette>=1.0.1", # transitive via streamlit; pinned for security/compat
+    "httpx>=0.25,<1",
+    "streamlit>=1.58,<2",
+    "starlette>=1.0,<2", # transitive via streamlit; pinned for security/compat
     # Utilities
-    "psutil",
-    "pyyaml>=6.0",
-    "tenacity",
+    "psutil>=7.2,<8",
+    "pyyaml>=6.0,<7",
+    "tenacity>=9.1,<10",
 ]
 
 [project.optional-dependencies]
 
 llm = [
-    "anthropic",
-    "google-cloud-aiplatform",
-    "google-genai",
-    "openai"
+    "anthropic>=0.105,<1",
+    "google-cloud-aiplatform>=1.154,<2",
+    "google-genai>=2.7,<3",
+    "openai>=2.38,<3"
 ]
 
 evaluation = [
-    "scikit-learn>=1.8.0",
-    "scipy>=1.12.0",
-    "tqdm>=4.67.1",
+    "scikit-learn>=1.8,<2",
+    "scipy>=1.12,<2",
+    "tqdm>=4.67,<5",
 ]
 dev = [
-    "pytest>=7.4.0",
-    "pytest-cov>=4.1.0",
+    "pytest>=7.4,<10",
+    "pytest-cov>=4.1,<8",
     "ty>=0.0.28",
     "pre-commit>=3.5.0",
     "ruff>=0.1.0",
@@ -100,14 +100,14 @@ dev = [
     "cython",
     "ipykernel",
     "jupyter",
-    "scikit-learn>=1.8.0",
-    "scipy>=1.12.0",
-    "tqdm>=4.67.1",
+    "scikit-learn>=1.8,<2",
+    "scipy>=1.12,<2",
+    "tqdm>=4.67,<5",
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
 ]
-test = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
-docs = ["pdoc>=14.0"]
+test = ["pytest>=7.4,<10", "pytest-cov>=4.1,<8"]
+docs = ["pdoc>=14,<17"]
 
 [project.scripts]
 tide2-visualizer = "tide2.cli.main_visualizer:main"
@@ -297,19 +297,19 @@ exclude_lines = [
 
 [dependency-groups]
 llm = [
-    "anthropic",
-    "google-cloud-aiplatform",
-    "google-genai",
-    "openai",
+    "anthropic>=0.105,<1",
+    "google-cloud-aiplatform>=1.154,<2",
+    "google-genai>=2.7,<3",
+    "openai>=2.38,<3",
 ]
 evaluation = [
-    "scikit-learn>=1.8.0",
-    "scipy>=1.12.0",
-    "tqdm>=4.67.1",
+    "scikit-learn>=1.8,<2",
+    "scipy>=1.12,<2",
+    "tqdm>=4.67,<5",
 ]
 dev = [
-    "pytest>=7.4.0",
-    "pytest-cov>=4.1.0",
+    "pytest>=7.4,<10",
+    "pytest-cov>=4.1,<8",
     "ty>=0.0.28",
     "pre-commit>=3.5.0",
     "ruff>=0.1.0",
@@ -322,5 +322,5 @@ dev = [
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
 ]
-test = ["pytest>=7.4.0", "pytest-cov>=4.1.0"]
-docs = ["pdoc>=14.0"]
+test = ["pytest>=7.4,<10", "pytest-cov>=4.1,<8"]
+docs = ["pdoc>=14,<17"]
