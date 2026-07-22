@@ -42,6 +42,15 @@ def load_model_config(model_name: str) -> dict[str, Any]:
     return all_configs[model_name]
 
 
+def format_transformer_recognizer_name(model_name: str) -> str:
+    """Canonical Presidio recognizer_name for transformer NER results.
+
+    Shared by the live TransformersRecognizer and the batch/cached reassembly
+    path so a note gets an identical recognizer_name however it is processed.
+    """
+    return f"TransformersRecognizer[{model_name}]"
+
+
 def get_available_models() -> list[str]:
     """Get list of available model configurations.
 

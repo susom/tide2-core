@@ -10,23 +10,27 @@ Classes:
 Functions:
     load_model_config: Load model configuration from config file
     get_available_models: List available model configurations
+    format_transformer_recognizer_name: Canonical Presidio recognizer_name
+        for transformer NER results
 
 Example:
     from tide2.transformers import TransformerCore
 
     # Create core with auto device placement
-    core = TransformerCore(model_name="StanfordAIMI_stanford_deidentifier_v2")
+    core = TransformerCore(model_name="StanfordAIMI/stanford-deidentifier-v2")
 
     # Run inference with BIO aggregation
     entities = core.infer_aggregated("John Smith is a patient.")
 """
 
+from .config import format_transformer_recognizer_name
 from .config import get_available_models
 from .config import load_model_config
 from .core import TransformerCore
 
 __all__ = [
     "TransformerCore",
+    "format_transformer_recognizer_name",
     "get_available_models",
     "load_model_config",
 ]

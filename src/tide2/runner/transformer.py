@@ -15,6 +15,7 @@ from typing import Any
 
 import pandas as pd
 
+from tide2.transformers.config import format_transformer_recognizer_name
 from tide2.utils.text_processing import compute_text_hash
 from tide2.utils.text_processing import deduplicate_overlapping_entities
 from tide2.utils.text_processing import reconstruct_document_spans
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 40
 DEFAULT_BATCH_SIZE = 512
+
+# Below this document count, reassembly runs serially instead of in a process pool
+# (pool setup overhead is not worth it for small inputs).
+MIN_DOCS_FOR_PROCESS_POOL = 100
 
 
 def chunk_document_row(row: dict[str, Any], chunk_size: int, chunk_overlap: int) -> list[dict[str, Any]]:
@@ -102,7 +107,7 @@ def reassemble_chunks_for_document(
     Returns:
         Tuple of (recognizer_results_json, entity_count).
     """
-    recognizer_name = f"TransformersRecognizer[{model_name}]"
+    recognizer_name = format_transformer_recognizer_name(model_name)
 
     # Check for failed chunks — skip reassembly if any chunk failed
     failed_chunks = [r for r in chunk_rows if r.get("chunk_status") == "failed"]
@@ -222,7 +227,7 @@ def reassemble_document_predictions(
     if max_workers is None:
         max_workers = os.cpu_count() or 1
 
-    if max_workers <= 1 or len(work_items) < 100:
+    if max_workers <= 1 or len(work_items) < MIN_DOCS_FOR_PROCESS_POOL:
         rows = [_reassemble_one_document(item) for item in work_items]
     else:
         with ProcessPoolExecutor(max_workers=max_workers) as pool:

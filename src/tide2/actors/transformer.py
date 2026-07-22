@@ -20,7 +20,7 @@ Usage with Ray Data:
         batch_size=512,
         num_gpus=1,
         compute=ray.data.ActorPoolStrategy(size=num_gpus),
-        fn_constructor_kwargs={"model_name": "StanfordAIMI_stanford_deidentifier_v2"},
+        fn_constructor_kwargs={"model_name": "StanfordAIMI/stanford-deidentifier-v2"},
     )
     ds.map_batches(
         BIOAggregationActor,
@@ -520,7 +520,7 @@ def create_transformer_actor(
 
     Examples:
         # Basic usage
-        Actor = create_transformer_actor("StanfordAIMI_stanford_deidentifier_v2")
+        Actor = create_transformer_actor("StanfordAIMI/stanford-deidentifier-v2")
 
         # With explicit model path
         Actor = create_transformer_actor("my_model", model_path="/models/ner")

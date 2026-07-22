@@ -16,6 +16,7 @@ from presidio_analyzer import RecognizerResult
 from presidio_analyzer.nlp_engine import NlpArtifacts
 
 from tide2.transformers import TransformerCore
+from tide2.transformers import format_transformer_recognizer_name
 from tide2.transformers import get_available_models
 from tide2.transformers import load_model_config
 from tide2.utils.text_processing import split_text_to_word_chunks
@@ -103,7 +104,7 @@ class TransformersRecognizer(EntityRecognizer):
 
         super().__init__(
             supported_entities=supported_entities,
-            name=f"Transformers model {model_name}",
+            name=format_transformer_recognizer_name(model_name),
         )
 
         self.model_name = model_name
