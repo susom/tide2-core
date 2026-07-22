@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## [1.2.2](https://github.com/susom/tide2-core/compare/v1.2.1...v1.2.2) (2026-07-22)
+
+
+### Bug Fixes
+
+* **recognizers:** use identical recognizer_name for live and reused transformer results ([#33](https://github.com/susom/tide2-core/issues/33)) ([f5da675](https://github.com/susom/tide2-core/commit/f5da675d9e18d60bad2382cdd7b95bc833616408))
+* **transformers:** fail fast on missing absolute model_path and reconcile local_files_only ([#30](https://github.com/susom/tide2-core/issues/30)) ([281ff54](https://github.com/susom/tide2-core/commit/281ff543b094c182fb2a5682e65f23969c2c4418))
+
+
+### Documentation
+
+* add CLAUDE.md for agent onboarding ([#29](https://github.com/susom/tide2-core/issues/29)) ([bb360db](https://github.com/susom/tide2-core/commit/bb360db49b583fba5a97a1d002685e6bba6659f5))
+
+
+### Build System
+
+* **deps:** add upper-bound version constraints to pyproject.toml ([#34](https://github.com/susom/tide2-core/issues/34)) ([353ceed](https://github.com/susom/tide2-core/commit/353ceed46fc257543ff819428a37dbd5d46b32ef))
+
 ## [1.2.1](https://github.com/susom/tide2-core/compare/v1.2.0...v1.2.1) (2026-07-21)
 
 
