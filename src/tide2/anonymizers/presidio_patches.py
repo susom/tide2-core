@@ -40,7 +40,7 @@ from presidio_analyzer import EntityRecognizer
 from presidio_anonymizer import AnonymizerEngine
 
 # Presidio renamed this private method in 2.2.363. Try the new name first, then
-# the old one. Resolution is deferred to call time (see _resolve_merge_method);
+# the old one. Resolution is deferred to call time (see _resolve_merge_method_name);
 # we do NOT touch these attributes at import, since a missing attribute would
 # crash the import of this module (and thus the whole docs build via pdoc).
 _MERGE_METHOD_NAMES = (
