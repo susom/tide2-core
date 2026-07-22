@@ -6,7 +6,20 @@ This module provides patches to modify Presidio's default behavior:
 1. Whitespace merging (AnonymizerEngine):
     Presidio merges adjacent entities of the same type separated by whitespace.
     This causes inconsistent encryption for identical values in different formats.
-    Patch: disable _merge_entities_with_whitespace_between.
+    Patch: disable the private whitespace-merge method.
+
+    Presidio renamed this private method between releases:
+    ``_merge_entities_with_whitespace_between`` (<= 2.2.362) became
+    ``_merge_entities_with_spaces_between`` (>= 2.2.363). The patch resolves the
+    method by either name, lazily, at call time -- never at import -- so a future
+    rename cannot crash the import of this module (pdoc imports every module for
+    the docs build, so import-time safety is a hard constraint).
+
+    The presidio-blessed, rename-proof way to disable merging is the public
+    parameter ``AnonymizerEngine.anonymize(..., merge_entities_with_spaces=False)``
+    (added in 2.2.363); call sites use it directly. This monkeypatch remains as
+    back-compat defense-in-depth for any code path that constructs an
+    AnonymizerEngine without going through those call sites.
 
 2. Remove duplicates (AnalyzerEngine):
     Presidio's EntityRecognizer.remove_duplicates() uses an O(n²) algorithm that
@@ -26,14 +39,60 @@ from contextlib import contextmanager
 from presidio_analyzer import EntityRecognizer
 from presidio_anonymizer import AnonymizerEngine
 
-# Store original method for restoration
-_original_merge_entities_with_whitespace_between = AnonymizerEngine._merge_entities_with_whitespace_between
+# Presidio renamed this private method in 2.2.363. Try the new name first, then
+# the old one. Resolution is deferred to call time (see _resolve_merge_method);
+# we do NOT touch these attributes at import, since a missing attribute would
+# crash the import of this module (and thus the whole docs build via pdoc).
+_MERGE_METHOD_NAMES = (
+    "_merge_entities_with_spaces_between",  # presidio >= 2.2.363
+    "_merge_entities_with_whitespace_between",  # presidio <= 2.2.362
+)
+
+# Original method + the name it was resolved under, captured lazily on first
+# disable_whitespace_merging() call so enable_whitespace_merging() can restore it.
+_original_merge_method = None
+_resolved_merge_method_name: str | None = None
 
 # Flag to track if patch is applied
 _patch_applied = False
 
 
-def _no_merge(self, text: str, analyzer_results: list) -> list:
+def _resolve_merge_method_name() -> str:
+    """
+    Resolve the name of Presidio's private whitespace-merge method, lazily.
+
+    Presidio renamed this method between releases (see _MERGE_METHOD_NAMES). This
+    resolver is only ever called at patch-apply time, never at import, so a rename
+    that removes both known names fails with an actionable error at call time
+    instead of crashing the import of this module.
+
+    Returns:
+        The attribute name present on AnonymizerEngine.
+
+    Raises:
+        RuntimeError: If none of the known method names exist on the installed
+            presidio version (names it in the message).
+    """
+    for name in _MERGE_METHOD_NAMES:
+        if hasattr(AnonymizerEngine, name):
+            return name
+
+    try:
+        import importlib.metadata as _md
+
+        version = _md.version("presidio-anonymizer")
+    except Exception:  # pragma: no cover - version lookup is best-effort
+        version = "unknown"
+    raise RuntimeError(
+        f"Cannot disable whitespace merging: none of {_MERGE_METHOD_NAMES} exist on "
+        f"AnonymizerEngine (installed presidio-anonymizer=={version}). Presidio may have "
+        "renamed the private merge method again; update _MERGE_METHOD_NAMES in "
+        "presidio_patches.py. Note that call sites should prefer the public "
+        "anonymize(merge_entities_with_spaces=False) parameter."
+    )
+
+
+def _no_merge(self, text: str, analyzer_results: list) -> list:  # noqa: ARG001  # signature must match presidio's method it replaces
     """
     Replacement method that performs no merging.
 
@@ -60,14 +119,28 @@ def disable_whitespace_merging() -> None:
 
     This is a global patch that affects all AnonymizerEngine instances.
 
+    The method name is resolved lazily here (never at import), tolerating the
+    presidio 2.2.363 rename. Prefer the public
+    ``anonymize(merge_entities_with_spaces=False)`` parameter at call sites; this
+    patch is back-compat defense-in-depth.
+
+    Raises:
+        RuntimeError: If no known whitespace-merge method exists on the installed
+            presidio version (see _resolve_merge_method_name).
+
     Example:
         >>> from tide2.anonymizers import presidio_patches
         >>> presidio_patches.disable_whitespace_merging()
         >>> # Now all anonymizations will process entities individually
     """
-    global _patch_applied
+    # Module-level globals (not object state): these patches must apply on every
+    # Ray worker process, where re-imported module globals are the reliable shared
+    # state; instance-level patching would not propagate across the actor pool.
+    global _patch_applied, _original_merge_method, _resolved_merge_method_name  # noqa: PLW0603
     if not _patch_applied:
-        AnonymizerEngine._merge_entities_with_whitespace_between = _no_merge
+        _resolved_merge_method_name = _resolve_merge_method_name()
+        _original_merge_method = getattr(AnonymizerEngine, _resolved_merge_method_name)
+        setattr(AnonymizerEngine, _resolved_merge_method_name, _no_merge)
         _patch_applied = True
 
 
@@ -75,7 +148,8 @@ def enable_whitespace_merging() -> None:
     """
     Re-enable Presidio's default whitespace-based entity merging.
 
-    Restores the original `_merge_entities_with_whitespace_between` method.
+    Restores the original whitespace-merge method against whichever name it was
+    resolved under when the patch was applied.
 
     Example:
         >>> from tide2.anonymizers import presidio_patches
@@ -84,9 +158,14 @@ def enable_whitespace_merging() -> None:
         >>> presidio_patches.enable_whitespace_merging()
         >>> # Back to default Presidio behavior
     """
-    global _patch_applied
+    # Module-level globals (not object state): these patches must apply on every
+    # Ray worker process, where re-imported module globals are the reliable shared
+    # state; instance-level patching would not propagate across the actor pool.
+    global _patch_applied, _original_merge_method, _resolved_merge_method_name  # noqa: PLW0603
     if _patch_applied:
-        AnonymizerEngine._merge_entities_with_whitespace_between = _original_merge_entities_with_whitespace_between
+        setattr(AnonymizerEngine, _resolved_merge_method_name, _original_merge_method)
+        _original_merge_method = None
+        _resolved_merge_method_name = None
         _patch_applied = False
 
 
@@ -146,7 +225,7 @@ def patch_remove_duplicates() -> None:
 
     This is a global patch that affects all AnalyzerEngine instances.
     """
-    global _remove_duplicates_patched
+    global _remove_duplicates_patched  # noqa: PLW0603  # shared across Ray workers via module globals
     if not _remove_duplicates_patched:
         EntityRecognizer.remove_duplicates = staticmethod(lambda results: results)
         _remove_duplicates_patched = True
@@ -154,7 +233,7 @@ def patch_remove_duplicates() -> None:
 
 def unpatch_remove_duplicates() -> None:
     """Restore Presidio's original remove_duplicates method."""
-    global _remove_duplicates_patched
+    global _remove_duplicates_patched  # noqa: PLW0603  # shared across Ray workers via module globals
     if _remove_duplicates_patched:
         EntityRecognizer.remove_duplicates = _original_remove_duplicates
         _remove_duplicates_patched = False
@@ -188,9 +267,9 @@ def patch_conflict_resolution() -> None:
 
     This is a global patch that affects all AnonymizerEngine instances.
     """
-    global _conflict_resolution_patched
+    global _conflict_resolution_patched  # noqa: PLW0603  # shared across Ray workers via module globals
     if not _conflict_resolution_patched:
-        AnonymizerEngine._remove_conflicts_and_get_text_manipulation_data = lambda self, results, conflict_resolution: (
+        AnonymizerEngine._remove_conflicts_and_get_text_manipulation_data = lambda self, results, conflict_resolution: (  # noqa: ARG005  # lambda must match presidio's method signature positionally
             results
         )
         _conflict_resolution_patched = True
@@ -198,7 +277,7 @@ def patch_conflict_resolution() -> None:
 
 def unpatch_conflict_resolution() -> None:
     """Restore Presidio's original conflict resolution method."""
-    global _conflict_resolution_patched
+    global _conflict_resolution_patched  # noqa: PLW0603  # shared across Ray workers via module globals
     if _conflict_resolution_patched:
         AnonymizerEngine._remove_conflicts_and_get_text_manipulation_data = _original_remove_conflicts
         _conflict_resolution_patched = False
