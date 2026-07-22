@@ -4,9 +4,9 @@ tool:
   name: "TIDE 2.0"
   repo_url: "https://github.com/susom/tide2-core"
   tool_homepage: "https://github.com/susom/tide2-core"
-  documentation_url: "https://github.com/susom/tide2-core#readme"
+  documentation_url: "https://susom.github.io/tide2-core/"
   tool_type: "Library"
-  tool_notes: "Data de-identification and anonymization toolkit combining multiple strategies with cryptographic techniques and ML-based entity recognition"
+  tool_notes: "Data de-identification and anonymization toolkit combining multiple strategies with cryptographic techniques and ML-based entity recognition; runs distributed via Ray (ray.data.map_batches over CPU/GPU actors)"
 
 domains:
   - "healthcare"
@@ -16,14 +16,8 @@ domains:
 llm:
   usesLlm: true
   modelsSupported:
-    - "gpt4o"
-    - "gpt4o-mini"
-    - "claude3-5sonnet"
-    - "claude3-7"
-    - "gemini"
-    - "gemini-flash"
-    - "google-vertex-ai"
-  bringOwnKey: true
+    - "google-vertex-ai"   # all provider branches authenticate + run through Vertex AI
+  bringOwnKey: true        # user supplies own GCP project / Vertex credentials
 
 input:
   - name: "Clinical Notes"
@@ -33,8 +27,9 @@ input:
     dataStandard:
       - "None"
     format:
-      - "txt"
+      - "dataframe"   # Parquet via Ray Data (FileFormat enum lacks "parquet")
       - "json"
+      - "txt"
     proprietary: false
 
 output:
@@ -45,11 +40,15 @@ output:
     dataStandard:
       - "None"
     format:
-      - "txt"
+      - "dataframe"   # Parquet via Ray Data (FileFormat enum lacks "parquet")
       - "json"
+      - "txt"
     proprietary: false
 
 collaborations: []
+
+container:
+  container_type: "Docker"   # multi-stage Dockerfile: production-cpu/gpu, development, test
 
 maturity:
   beginning_maturity: 3
