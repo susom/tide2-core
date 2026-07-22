@@ -26,7 +26,83 @@ jobs:
     permissions:
       contents: write # push the single, stable release-PR branch
       pull-requests: write # open/update the release PR
+      issues: write # relabel merged release PRs (labels live in the Issues API)
     steps:
+      # Self-heal BEFORE running release-please. Because Phase 2 (publish.yml) owns
+      # the tag + GitHub Release under skip-github-release, the merged release PR is
+      # left at "autorelease: pending" and must be flipped to "tagged" once the tag
+      # exists. publish.yml does that, but only during a publish — if that step is
+      # ever missing (old workflow), fails, or the API blips, the PR stays pending
+      # and EVERY later release-please run silently aborts with "untagged, merged
+      # release PRs outstanding", so no new release PR is opened on push to main.
+      #
+      # Reconcile against ground truth here: for any merged PR still labeled
+      # pending, if a tag points at its merge commit the release genuinely happened,
+      # so flip pending -> tagged. This makes push-to-main recover on its own no
+      # matter why publish.yml didn't relabel it.
+      - name: Checkout main with tags
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          fetch-depth: 0 # brings tags, needed for `git tag --points-at`
+          persist-credentials: false
+      - name: Reconcile stuck release PR labels (pending -> tagged when tag exists)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Ensure the target label exists (idempotent; expected to fail after the
+          # first ever run because the label already exists — swallow only that).
+          if ! err="$(gh label create 'autorelease: tagged' --color ededed 2>&1)"; then
+            case "$err" in
+              *"already exists"*) : ;;
+              *) echo "::warning title=Label create failed::$err" ;;
+            esac
+          fi
+          # Every merged PR still labeled pending whose merge commit is tagged has
+          # already been released -> relabel it so release-please won't abort.
+          # Capture the list first (not `gh pr list | while`): under pipefail a
+          # transient list-API blip would otherwise fail the whole pipeline and
+          # kill the workflow. This is best-effort self-heal, so a list failure
+          # should warn and let release-please proceed, not abort the release.
+          if ! pending="$(gh pr list --state merged --label 'autorelease: pending' \
+            --limit 100 --json number,mergeCommit \
+            --jq '.[] | "\(.number) \(.mergeCommit.oid)"')"; then
+            echo "::warning title=PR list failed::Could not list pending release PRs; skipping reconcile."
+            pending=""
+          fi
+          # Feed via a here-string so the loop runs in THIS shell, not a pipe
+          # subshell. Skip the read entirely when empty (a here-string of "" would
+          # still iterate once on a blank line).
+          if [ -n "$pending" ]; then
+            while read -r pr sha; do
+              [ -n "$pr" ] || continue
+              # jq emits "null" for a missing mergeCommit.oid; skip those explicitly
+              # so a null/empty SHA never reaches `git tag --points-at`.
+              if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+                echo "PR #$pr has no merge commit SHA — skipping."
+                continue
+              fi
+              # `git tag --points-at` errors on an unknown/malformed object (e.g. a
+              # commit not present locally); tolerate that so it can't kill the step
+              # under `set -e`. Empty output = no tag = not yet released.
+              if [ -z "$(git tag --points-at "$sha" 2>/dev/null || true)" ]; then
+                echo "PR #$pr ($sha) has no tag yet — leaving pending (not released)."
+                continue
+              fi
+              # Tag exists -> the release happened; flip pending -> tagged. Only
+              # claim success after `gh pr edit` actually succeeds.
+              if gh pr edit "$pr" \
+                --add-label 'autorelease: tagged' \
+                --remove-label 'autorelease: pending'; then
+                echo "PR #$pr merge commit $sha is tagged — flipped to tagged."
+              else
+                echo "::warning title=Relabel failed::Could not relabel PR #$pr; do it manually."
+              fi
+            done <<< "$pending"
+          else
+            echo "No merged PRs labeled 'autorelease: pending' to reconcile."
+          fi
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           target-branch: main
