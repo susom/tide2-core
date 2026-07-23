@@ -2,6 +2,13 @@
 
 <!-- version list -->
 
+## [1.2.3](https://github.com/susom/tide2-core/compare/v1.2.2...v1.2.3) (2026-07-23)
+
+
+### Bug Fixes
+
+* **anonymizer:** pin presidio 2.2.364 and harden patches against merge-method rename ([#39](https://github.com/susom/tide2-core/issues/39)) ([a3c1812](https://github.com/susom/tide2-core/commit/a3c181280bcd581b266fa0e80f31de2f041764f3))
+
 ## [1.2.2](https://github.com/susom/tide2-core/compare/v1.2.1...v1.2.2) (2026-07-22)
 
 
