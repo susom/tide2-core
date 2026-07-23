@@ -383,35 +383,33 @@ jobs:
         run: |
           set -euo pipefail
           ver="${{ needs.resolve.outputs.version }}"
-          # Step 1: poll the JSON API until the version is LISTED. This is a yes/no
-          # availability question, so answer it with a cheap HTTP GET — not a full
-          # dependency resolve. PyPI upload is instant but the index resolvers read
-          # can lag well past 10 min, so this is the only thing we wait on.
-          # cache-bust with a query string so any CDN edge re-fetches.
-          listed=false
+          # Poll the ACTUAL resolve+install from the public index — that is the
+          # only signal that matters and the only one immune to the endpoint-lag
+          # trap. Do NOT gate on the JSON API (pypi.org/pypi/.../json): it and the
+          # Simple index (pypi.org/simple/, what uv resolves against) propagate
+          # INDEPENDENTLY, so a 200 from the JSON API does not mean uv can resolve
+          # the version yet — that mismatch fails the install ("no solution found")
+          # against an already-published, immutable release. PyPI upload is instant
+          # but the index read path can lag well past 10 min, so retry the install
+          # itself. --refresh on every attempt stops uv from caching a negative
+          # resolve from an earlier, still-lagging attempt.
+          uv venv /tmp/v --python 3.12
+          installed=false
           for i in $(seq 1 30); do
-            # A curl transport failure (DNS/TLS/timeout) exits non-zero; under
-            # `set -e` that would kill the step — the very hard-failure this job
-            # avoids. Bound each request and fall back to a synthetic "000" so a
-            # transient network blip just retries instead of failing the release.
-            code="$(curl -s -o /dev/null -w '%{http_code}' \
-              --connect-timeout 10 --max-time 30 \
-              "https://pypi.org/pypi/tide2/${ver}/json?cb=${i}" || echo 000)"
-            if [ "$code" = "200" ]; then
-              listed=true
+            # The install runs as an `if` condition, so a non-zero exit does not
+            # trip `set -e` — a lagging index just retries instead of failing the
+            # step, the very hard-failure this job avoids.
+            if uv pip install --python /tmp/v/bin/python --refresh "tide2==${ver}"; then
+              installed=true
               break
             fi
-            echo "PyPI index not propagated yet (HTTP ${code}); retry ${i}/30"
+            echo "tide2==${ver} not resolvable from the PyPI index yet; retry ${i}/30"
             sleep 30
           done
-          if [ "$listed" != "true" ]; then
+          if [ "$installed" != "true" ]; then
             # Alarm, not a gate: PyPI is immutable and publish-pypi already
             # confirmed the upload. A slow index must not fail an immutable release.
-            echo "::warning title=PyPI propagation lag::tide2==${ver} not visible on the PyPI index after ~15 min. The release is published and immutable; verify manually with 'uv pip install tide2==${ver}' shortly."
+            echo "::warning title=PyPI propagation lag::tide2==${ver} not installable from the PyPI index after ~15 min. The release is published and immutable; verify manually with 'uv pip install tide2==${ver}' shortly."
             exit 0
           fi
-          # Step 2: the version is listed — now a real failure IS a real defect
-          # (e.g. a dependency unresolvable from the public index). Install once.
-          uv venv /tmp/v --python 3.12
-          uv pip install --python /tmp/v/bin/python --refresh "tide2==${ver}"
           /tmp/v/bin/python -c "import tide2; print(tide2.__version__)"
