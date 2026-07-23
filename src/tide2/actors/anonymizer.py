@@ -401,6 +401,7 @@ class AnonymizerWorker:
                 text=chunk_text,
                 analyzer_results=chunk_results,
                 operators=operators,
+                merge_entities_with_spaces=False,  # rename-proof public equiv. of disable_whitespace_merging()
             )
 
             anonymized_chunks.append(chunk_result.text)
@@ -490,6 +491,7 @@ class AnonymizerWorker:
                 text=note_text,
                 analyzer_results=recognizer_results,
                 operators=operators,
+                merge_entities_with_spaces=False,  # rename-proof public equiv. of disable_whitespace_merging()
             )
 
             anonymized_text = anonymized_result.text
