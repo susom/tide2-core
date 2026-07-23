@@ -404,7 +404,9 @@ jobs:
               break
             fi
             echo "tide2==${ver} not resolvable from the PyPI index yet; retry ${i}/30"
-            sleep 30
+            # Don't sleep after the final attempt — no further retry follows, so
+            # that wait would only pad the publish workflow for nothing.
+            [ "$i" -lt 30 ] && sleep 30
           done
           if [ "$installed" != "true" ]; then
             # Alarm, not a gate: PyPI is immutable and publish-pypi already
