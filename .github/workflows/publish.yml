@@ -403,7 +403,10 @@ jobs:
               installed=true
               break
             fi
-            echo "tide2==${ver} not resolvable from the PyPI index yet; retry ${i}/30"
+            # Neutral message: propagation lag is the expected cause, but the
+            # install can also fail transiently (network/TLS/rate limiting) — don't
+            # assert a cause the exit code doesn't prove.
+            echo "install of tide2==${ver} failed (index lag or transient error); retry ${i}/30"
             # Don't sleep after the final attempt — no further retry follows, so
             # that wait would only pad the publish workflow for nothing.
             [ "$i" -lt 30 ] && sleep 30
