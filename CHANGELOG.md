@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## [1.2.4](https://github.com/susom/tide2-core/compare/v1.2.3...v1.2.4) (2026-07-24)
+
+
+### Documentation
+
+* **bdf:** align bdf.yaml with actual repo capabilities ([#37](https://github.com/susom/tide2-core/issues/37)) ([4702772](https://github.com/susom/tide2-core/commit/47027722189accdfdca976e0296051ede22e0b6c))
+* **notebook:** clean torch stack and bump tide2 to 1.2.3 for Colab ([#38](https://github.com/susom/tide2-core/issues/38)) ([5b81e92](https://github.com/susom/tide2-core/commit/5b81e92007dce0cc0a284a86b55f47ec0d62babc))
+
 ## [1.2.3](https://github.com/susom/tide2-core/compare/v1.2.2...v1.2.3) (2026-07-23)
 
 
