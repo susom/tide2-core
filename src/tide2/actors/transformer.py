@@ -48,11 +48,15 @@ logger = logging.getLogger(__name__)
 _VRAM_TIER_HIGH_GB = 80
 _VRAM_TIER_MID_GB = 24
 
-# Ceiling for the auto-computed first-attempt GPU batch size. On very large GPUs
-# the free-memory estimate can suggest thousands of texts per forward; capping it
-# keeps the initial forward modest so OOM recovery grows into headroom by splitting
-# down, rather than starting oversized and cascading. Recovery still splits below
-# this when needed.
+# Ceiling for the *worst-case* (max-seq-length) auto-computed GPU batch size. On
+# very large GPUs the free-memory estimate can suggest thousands of texts per
+# forward; capping the worst-case base keeps the initial forward modest so OOM
+# recovery grows into headroom by splitting down, rather than starting oversized
+# and cascading. Recovery still splits below this when needed.
+#
+# Note this bounds the max-seq base only, not the final per-forward text count:
+# ``_effective_batch_size`` scales this base *up* for short texts, so short-text
+# batches can exceed 512 (see that method for why that stays memory-safe).
 _MAX_INITIAL_GPU_BATCH = 512
 
 
@@ -237,8 +241,10 @@ class TransformerInferenceActor:
         ``total - memory_allocated`` (which only sees PyTorch's own live
         allocations and so overestimates on a busy or fragmented GPU). Uses 90% of
         free memory to leave allocator headroom, then caps the result at
-        ``_MAX_INITIAL_GPU_BATCH`` so the first forward stays modest; OOM recovery
-        splits below this as needed.
+        ``_MAX_INITIAL_GPU_BATCH`` so the worst-case (max-seq) first forward stays
+        modest; OOM recovery splits below this as needed. The cap bounds this
+        max-seq base only — ``_effective_batch_size`` scales it up for shorter
+        texts, so the actual per-forward text count can exceed the cap.
 
         Falls back to 64 on CPU or if model config is unavailable.
         """
@@ -387,6 +393,15 @@ class TransformerInferenceActor:
 
         Uses chars/4 as a cheap token count estimate, then scales using
         _per_sample_bytes ratio between worst-case and actual seq length.
+
+        Note the returned batch may exceed ``_MAX_INITIAL_GPU_BATCH`` for short
+        texts: that cap bounds the *worst-case* (max-seq) base, which this method
+        scales *up* by ``per_sample_worst / per_sample_actual``. This stays within
+        the free-memory budget by construction — the un-capped base already equals
+        the free-memory limit at max seq length, so the capped base (<= the cap)
+        times the scale is strictly below the free-memory limit at the actual (much
+        shorter) seq length. If that approximate memory model is ever optimistic,
+        OOM recovery in ``_run_inference_raw_with_oom_recovery`` is the backstop.
         """
         max_chars = max(len(t) for t in texts)
         effective_seq = min(max(max_chars // 4, 1), self._seq_len)
@@ -426,10 +441,17 @@ class TransformerInferenceActor:
         stacked another live ``RuntimeError`` whose traceback pinned that level's
         failed-forward GPU tensors — making ``torch.cuda.empty_cache()`` a no-op
         and the split cascade unable to recover. The work-list guarantees at most
-        one OOM exception is live at a time: the failed slice's exception is
-        dropped before the halves are retried, and combined with the source-level
-        tensor release in ``TransformerCore._forward_batch_direct`` (Fix A1),
-        ``empty_cache()`` can now actually reclaim between attempts.
+        one OOM exception is live at a time.
+
+        Crucially, ``empty_cache()`` runs at the loop-body *tail*, i.e. only after
+        the ``except`` suite has exited. Inside an ``except ... as e`` suite CPython
+        keeps the exception (and its traceback) alive via ``sys.exc_info()`` until
+        the suite is left — a bare ``del e`` does not clear it — so clearing the
+        cache while still in the handler cannot reclaim the failed forward's frames
+        (they stay pinned by ``e.__traceback__``). Deferring the clear past the
+        handler, combined with the source-level tensor release in
+        ``TransformerCore._forward_batch_direct`` (Fix A1), lets ``empty_cache()``
+        actually reclaim between attempts.
 
         Each slice carries its original offset so results reassemble in input
         order regardless of split shape.
@@ -464,25 +486,29 @@ class TransformerInferenceActor:
                 if "out of memory" not in str(e).lower():
                     raise  # non-OOM error: propagate unchanged
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
                 if end - start <= 1:
                     raise RuntimeError("CUDA OOM on a single text chunk") from e
 
                 mid = start + (end - start) // 2
                 logger.warning(f"CUDA OOM on {end - start} texts, splitting into {mid - start} + {end - mid}")
-                # Drop the failed slice's exception before retrying so its
-                # traceback cannot keep any GPU tensors alive across the retry.
-                # Leaving the ``except`` block via ``continue`` then clears the
-                # active exception, so at most one OOM exception is ever live.
-                del e
                 work.append((mid, end))
                 work.append((start, mid))
+                # Fall through to the cache clear below (no ``continue``): it must
+                # run *after* this ``except`` suite exits so the exception and its
+                # traceback are gone and can no longer pin the failed forward's
+                # GPU frames.
+            else:
+                for offset, preds in enumerate(slice_results):
+                    results[start + offset] = preds
                 continue
 
-            for offset, preds in enumerate(slice_results):
-                results[start + offset] = preds
+            # Reached only after a handled, non-terminal OOM. The ``except`` suite
+            # has exited (so ``sys.exc_info()`` is cleared and no live traceback
+            # pins the failed forward's tensors), letting ``empty_cache()`` reclaim
+            # before the queued halves are retried. Terminal and non-OOM ``raise``
+            # propagate out of the function and never reach here.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Every index was filled by a successful (possibly single-text) slice.
         return cast(list[list[dict]], results)

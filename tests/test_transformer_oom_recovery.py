@@ -150,6 +150,42 @@ class TestA2Mechanism:
         assert not any(core.exc_active_at_call)
 
 
+class TestEmptyCacheOutsideHandler:
+    """Mechanism check: empty_cache() runs outside any active exception handler.
+
+    On the previous ordering ``torch.cuda.empty_cache()`` was called *inside* the
+    ``except`` suite, where CPython keeps the OOM exception (and its traceback,
+    which pins the failed forward's GPU frames) alive via ``sys.exc_info()``. The
+    fix moves the clear to the loop-body tail, past the handler, so it can never
+    run while an exception is live. This test records ``sys.exc_info()[0]`` at each
+    ``empty_cache()`` call and asserts it is always ``None`` — it fails on the old
+    ordering and passes after the fix.
+    """
+
+    @patch("tide2.actors.transformer.torch.cuda.is_available", return_value=True)
+    def test_empty_cache_never_called_with_live_exception(self, mock_is_available):
+        exc_at_clear: list = []
+
+        def spy_empty_cache():
+            exc_at_clear.append(sys.exc_info()[0])
+
+        # threshold=1 forces a multi-level split cascade, so empty_cache() is
+        # exercised at several handled OOMs.
+        core = _FakeCore(oom_threshold=1)
+        actor = _make_actor(core)
+        texts = [f"t{i}" for i in range(8)]
+
+        with patch("tide2.actors.transformer.torch.cuda.empty_cache", spy_empty_cache):
+            results = actor._run_inference_raw_with_oom_recovery(texts)
+
+        # Results still correct and complete.
+        assert [r[0]["marker"] for r in results] == texts
+        # The cache was cleared at least once (splits happened)...
+        assert exc_at_clear, "expected empty_cache() to be called during recovery"
+        # ...and never while an exception was still being handled.
+        assert all(exc is None for exc in exc_at_clear)
+
+
 class _MovedTensor:
     """Weakref-able stand-in for a device-resident tensor."""
 
