@@ -121,8 +121,8 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor`, `ReassemblyActor` for `ray.data.map_batches`
 - **Two-stage GPU/CPU pipeline**: GPU inference returns raw BIO tokens; CPU actors aggregate them concurrently via Ray Data streaming
 - **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with batch tokenize → single GPU forward pass → offset-based extraction
-- **Adaptive GPU batching**: Auto-computes batch size from model config and free GPU memory; adjusts based on text lengths with VRAM-aware budgets (override via `--short-seq-budget`)
-- **OOM recovery**: Automatic batch splitting on CUDA out-of-memory errors
+- **Adaptive GPU batching**: Auto-computes batch size from actual free GPU memory (`torch.cuda.mem_get_info`), capped to a modest first-attempt ceiling; adjusts based on text lengths with VRAM-aware budgets (override via `--short-seq-budget`)
+- **OOM recovery**: Automatic batch splitting on CUDA out-of-memory errors. Recovery releases the failed forward's GPU tensors at the source and retries iteratively (at most one live OOM exception at a time), so `empty_cache()` can actually reclaim between attempts and the split cascade converges instead of exhausting VRAM. The GPU allocator is also configured with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (via Ray `runtime_env`) as fragmentation headroom.
 - **Fault tolerance**: Actor restarts, task retries, graceful shutdown
 - **YAML config**: All CLI arguments can be specified in a YAML config file (`--config`)
 

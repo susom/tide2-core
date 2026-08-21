@@ -44,6 +44,7 @@ from .fault_tolerance import get_ray_remote_args_cpu
 from .fault_tolerance import get_ray_remote_args_gpu
 from .utils import DEFAULT_DASHBOARD_HOST
 from .utils import detect_columns
+from .utils import gpu_worker_runtime_env
 from .utils import log_ray_cluster_info
 from .utils import resolve_input_files
 
@@ -137,6 +138,10 @@ class LocalJobRunner:
             "ignore_reinit_error": True,
             "include_dashboard": self.include_dashboard,
             "dashboard_host": dashboard_host,
+            # Configure the CUDA allocator (expandable_segments) for GPU actors
+            # before CUDA initializes in the worker. Fragmentation mitigation, not
+            # a leak fix. See runner.utils.gpu_worker_runtime_env.
+            "runtime_env": gpu_worker_runtime_env(),
         }
 
         if self.num_cpus:
