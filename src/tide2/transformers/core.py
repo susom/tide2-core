@@ -147,6 +147,15 @@ class TransformerCore:
         # Load configuration
         self._config = load_model_config(model_name)
 
+        # Per-model dtype override from the config, e.g. {"DTYPE": "float32"}. Some
+        # architectures are not half-precision-safe: DeBERTa-v1's disentangled
+        # attention raises "expected scalar type Float but found Half/BFloat16" under
+        # fp16/bf16, so its config pins float32. Absent key => keep the constructor
+        # dtype (float16 default).
+        _cfg_dtype = self._config.get("DTYPE")
+        if _cfg_dtype:
+            self.dtype = getattr(torch, _cfg_dtype)
+
         # Resolve model path
         if model_path is not None:
             # An absolute path is unambiguously a local model dir (HF repo ids are
@@ -296,6 +305,17 @@ class TransformerCore:
             logger.info(f"[{thread_name}] Model compiled with fullgraph=True, mode=reduce-overhead")
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
+
+        # Per-model max sequence length from the config, e.g. {"MODEL_MAX_LENGTH": 512}.
+        # Some tokenizers ship a sentinel model_max_length (e.g. XLM-R/SentencePiece's
+        # 1e30) that exceeds the model's real position-embedding limit, so tide2's
+        # chunking/truncation never bounds sequences and the model raises
+        # "expanded size of the tensor (N) must match the existing size (512)".
+        # Pinning it here makes truncation (below) and the model_max_length property
+        # honor the model's true limit. Absent key => keep the tokenizer's value.
+        _cfg_mml = self._config.get("MODEL_MAX_LENGTH")
+        if _cfg_mml:
+            tokenizer.model_max_length = int(_cfg_mml)
 
         # Build pipeline kwargs
         # Note: transformers 5.x removed the `framework` argument from pipeline()
