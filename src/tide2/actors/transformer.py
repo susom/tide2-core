@@ -31,7 +31,9 @@ Usage with Ray Data:
 
 import json
 import logging
+import os
 from typing import Any
+from typing import cast
 
 import numpy as np
 import torch
@@ -45,6 +47,13 @@ logger = logging.getLogger(__name__)
 # Maps to NVIDIA product lines: L4/RTX (<=24), A6000/A100-40 (24-80), H100/A100-80 (>=80).
 _VRAM_TIER_HIGH_GB = 80
 _VRAM_TIER_MID_GB = 24
+
+# Ceiling for the auto-computed first-attempt GPU batch size. On very large GPUs
+# the free-memory estimate can suggest thousands of texts per forward; capping it
+# keeps the initial forward modest so OOM recovery grows into headroom by splitting
+# down, rather than starting oversized and cascading. Recovery still splits below
+# this when needed.
+_MAX_INITIAL_GPU_BATCH = 512
 
 
 def _numpy_default(obj: Any) -> Any:
@@ -222,8 +231,14 @@ class TransformerInferenceActor:
     def _estimate_gpu_batch_size(self) -> int:
         """Estimate max GPU batch size from model config and free GPU memory.
 
-        Uses 80% of free memory to leave room for CUDA allocator fragmentation;
-        OOM recovery handles the rest.
+        Budgets from the driver's *actual* free memory via
+        ``torch.cuda.mem_get_info`` (which accounts for the loaded model, other
+        processes, reserved-but-unallocated blocks and fragmentation) rather than
+        ``total - memory_allocated`` (which only sees PyTorch's own live
+        allocations and so overestimates on a busy or fragmented GPU). Uses 90% of
+        free memory to leave allocator headroom, then caps the result at
+        ``_MAX_INITIAL_GPU_BATCH`` so the first forward stays modest; OOM recovery
+        splits below this as needed.
 
         Falls back to 64 on CPU or if model config is unavailable.
         """
@@ -240,18 +255,19 @@ class TransformerInferenceActor:
 
         per_sample = self._per_sample_bytes(num_heads, self._seq_len, hidden_size, intermediate_size, dtype_bytes)
 
-        total = torch.cuda.get_device_properties(device).total_memory
-        allocated = torch.cuda.memory_allocated(device)
-        free = total - allocated
+        # Actual free memory on the device (bytes), not total - allocated.
+        free, _total = torch.cuda.mem_get_info(device)
 
         max_batch = max(1, int(free * 0.9 / per_sample))
+        capped = min(max_batch, _MAX_INITIAL_GPU_BATCH)
 
         logger.info(
-            f"GPU batch size auto-computed: {max_batch} "
-            f"(free={free / 1024**3:.1f}GB, per_sample={per_sample / 1024**2:.1f}MB, "
-            f"seq_len={self._seq_len}, heads={num_heads}, hidden={hidden_size})"
+            f"GPU batch size auto-computed: {capped} "
+            f"(estimate={max_batch}, cap={_MAX_INITIAL_GPU_BATCH}, free={free / 1024**3:.1f}GB, "
+            f"per_sample={per_sample / 1024**2:.1f}MB, seq_len={self._seq_len}, "
+            f"heads={num_heads}, hidden={hidden_size})"
         )
-        return max_batch
+        return capped
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
@@ -318,7 +334,9 @@ class TransformerInferenceActor:
         valid_texts = [chunk_texts[i] for i in valid_indices]
 
         # Run raw inference with OOM recovery (no BIO aggregation)
+        self._log_gpu_mem(f"before __call__ (n={len(valid_texts)})")
         raw_results = self._run_inference_raw_with_oom_recovery(valid_texts)
+        self._log_gpu_mem(f"after __call__ (n={len(valid_texts)})")
 
         # Map predictions back to original indices and serialize to JSON
         predictions_raw_json_list = ["[]"] * batch_size
@@ -337,6 +355,29 @@ class TransformerInferenceActor:
             "chunk_text": chunk_texts,
             "predictions_raw_json": predictions_raw_json_list,
         }
+
+    def _log_gpu_mem(self, stage: str) -> None:
+        """Log per-``__call__`` GPU memory when ``TIDE2_LOG_GPU_MEM`` is set.
+
+        Diagnostics-only hook for the OOM scripts (``scripts/diagnose_oom.py``,
+        ``scripts/verify_oom_fix.py``): the driver cannot see an actor's VRAM, so
+        the actor logs its own ``memory_allocated``/``max_memory_allocated``. A
+        no-op unless the env var is truthy, so it adds no overhead in production.
+        """
+        if not os.environ.get("TIDE2_LOG_GPU_MEM"):
+            return
+        if not torch.cuda.is_available():
+            return
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        peak = torch.cuda.max_memory_allocated() / 1024**2
+        logger.info(
+            "GPU mem [%s]: allocated=%.1fMB reserved=%.1fMB peak=%.1fMB",
+            stage,
+            allocated,
+            reserved,
+            peak,
+        )
 
     def _effective_batch_size(self, texts: list[str]) -> int:
         """Compute batch size adapted to actual text lengths.
@@ -376,8 +417,22 @@ class TransformerInferenceActor:
         """
         Run raw inference with OOM recovery.
 
-        Passes all texts to TransformerCore.infer_raw(). If CUDA OOM
-        occurs, splits the batch in half and retries each half separately.
+        Passes all texts to ``TransformerCore.infer_raw_direct``. On CUDA OOM the
+        offending slice is split in half and each half retried, iteratively via a
+        work-list of ``(start, end)`` slices rather than recursion.
+
+        Why iterative and not recursive: the previous recursive implementation
+        made its retry calls *inside* the ``except`` block, so every split level
+        stacked another live ``RuntimeError`` whose traceback pinned that level's
+        failed-forward GPU tensors — making ``torch.cuda.empty_cache()`` a no-op
+        and the split cascade unable to recover. The work-list guarantees at most
+        one OOM exception is live at a time: the failed slice's exception is
+        dropped before the halves are retried, and combined with the source-level
+        tensor release in ``TransformerCore._forward_batch_direct`` (Fix A1),
+        ``empty_cache()`` can now actually reclaim between attempts.
+
+        Each slice carries its original offset so results reassemble in input
+        order regardless of split shape.
 
         Returns raw BIO tokens (not aggregated).
 
@@ -385,28 +440,52 @@ class TransformerInferenceActor:
             texts: List of text strings to process.
 
         Returns:
-            List of raw token lists (one per input text).
+            List of raw token lists (one per input text), aligned to ``texts``.
 
         Raises:
-            RuntimeError: If OOM persists even with single-item batches.
+            RuntimeError: If OOM persists even for a single text, or for any
+                non-OOM error (re-raised unchanged).
         """
-        try:
-            return self._core.infer_raw_direct(texts, batch_size=self._effective_batch_size(texts))
-        except RuntimeError as e:
-            if "out of memory" not in str(e).lower():
-                raise
+        n = len(texts)
+        results: list[list[dict] | None] = [None] * n
+        # LIFO work-list of half-open [start, end) slices into ``texts``. Pushing
+        # right-then-left makes left halves pop first, so splits process in input
+        # order (purely cosmetic; reassembly uses the carried offset regardless).
+        work: list[tuple[int, int]] = [(0, n)]
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        while work:
+            start, end = work.pop()
+            slice_texts = texts[start:end]
+            try:
+                slice_results = self._core.infer_raw_direct(
+                    slice_texts, batch_size=self._effective_batch_size(slice_texts)
+                )
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise  # non-OOM error: propagate unchanged
 
-            if len(texts) <= 1:
-                raise RuntimeError("CUDA OOM on a single text chunk") from e
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            mid = len(texts) // 2
-            logger.warning(f"CUDA OOM on {len(texts)} texts, splitting into {mid} + {len(texts) - mid}")
-            left = self._run_inference_raw_with_oom_recovery(texts[:mid])
-            right = self._run_inference_raw_with_oom_recovery(texts[mid:])
-            return left + right
+                if end - start <= 1:
+                    raise RuntimeError("CUDA OOM on a single text chunk") from e
+
+                mid = start + (end - start) // 2
+                logger.warning(f"CUDA OOM on {end - start} texts, splitting into {mid - start} + {end - mid}")
+                # Drop the failed slice's exception before retrying so its
+                # traceback cannot keep any GPU tensors alive across the retry.
+                # Leaving the ``except`` block via ``continue`` then clears the
+                # active exception, so at most one OOM exception is ever live.
+                del e
+                work.append((mid, end))
+                work.append((start, mid))
+                continue
+
+            for offset, preds in enumerate(slice_results):
+                results[start + offset] = preds
+
+        # Every index was filled by a successful (possibly single-text) slice.
+        return cast(list[list[dict]], results)
 
 
 class BIOAggregationActor:

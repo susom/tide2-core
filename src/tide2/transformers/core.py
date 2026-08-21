@@ -455,12 +455,23 @@ class TransformerCore:
         return all_results
 
     def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
-        """Single batch: tokenize → GPU forward → extract predictions."""
+        """Single batch: tokenize → GPU forward → extract predictions.
+
+        GPU-tensor lifetime is bounded by a ``try``/``finally``: the device
+        transfer (which itself can raise ``torch.OutOfMemoryError``), the forward
+        pass, and every derived CUDA tensor are released on **any** exit — normal
+        return or exception. This is deliberate: on OOM the exception's traceback
+        would otherwise keep the failed forward's GPU tensors referenced, so
+        ``torch.cuda.empty_cache()`` in the caller's recovery path could reclaim
+        nothing and batch-splitting would never recover. Freeing at the source
+        guarantees no traceback anywhere can pin these tensors. See
+        :meth:`tide2.actors.transformer.TransformerInferenceActor._run_inference_raw_with_oom_recovery`.
+        """
         model = self._model
         tokenizer = self._tokenizer
         device = next(model.parameters()).device
 
-        # Batch tokenize
+        # Batch tokenize (CPU tensors)
         encoded = tokenizer(
             texts,
             padding=True,
@@ -473,19 +484,33 @@ class TransformerCore:
         offset_mapping = encoded.pop("offset_mapping")  # (batch, seq_len, 2) — keep on CPU
         special_tokens_mask = encoded.pop("special_tokens_mask")  # (batch, seq_len) — keep on CPU
 
-        # Move input tensors to GPU
-        encoded = {k: v.to(device) for k, v in encoded.items()}
+        # Everything CUDA-resident is tracked so ``finally`` can free it all, even
+        # if ``.to(device)`` or the forward pass raises CUDA OOM. Move tensors one
+        # at a time into ``encoded_gpu`` so each already-moved tensor is referenced
+        # (and thus freeable) if a later move OOMs mid-way.
+        encoded_gpu: dict[str, Any] = {}
+        logits = probs = scores_max = label_ids = None
+        try:
+            for k, v in encoded.items():
+                encoded_gpu[k] = v.to(device)
 
-        # Single forward pass
-        with torch.no_grad():
-            logits = model(**encoded).logits  # (batch, seq_len, num_labels)
+            # Single forward pass
+            with torch.no_grad():
+                logits = model(**encoded_gpu).logits  # (batch, seq_len, num_labels)
 
-        # Softmax + argmax on GPU, then transfer to CPU
-        probs = torch.softmax(logits, dim=-1)
-        scores_max, label_ids = probs.max(dim=-1)  # (batch, seq_len)
+            # Softmax + argmax on GPU, then transfer to CPU
+            probs = torch.softmax(logits, dim=-1)
+            scores_max, label_ids = probs.max(dim=-1)  # (batch, seq_len)
 
-        scores_np = scores_max.cpu().numpy()
-        label_ids_np = label_ids.cpu().numpy()
+            scores_np = scores_max.cpu().numpy()
+            label_ids_np = label_ids.cpu().numpy()
+        finally:
+            # Drop this frame's references to every GPU tensor. Without this an
+            # exception traceback would keep them alive and empty_cache() could not
+            # reclaim; the CPU numpy copies above are already detached from CUDA.
+            encoded_gpu.clear()
+            del encoded_gpu, logits, probs, scores_max, label_ids
+
         offset_np = offset_mapping.numpy()
         special_np = special_tokens_mask.numpy()
 
