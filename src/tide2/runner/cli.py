@@ -120,7 +120,12 @@ def cmd_run(args: argparse.Namespace) -> None:
                 val = getattr(args, attr, None)
                 if val is not None:
                     transformer_kwargs[key] = val
-            if getattr(args, "compile_model", False):
+            # Compile is strictly opt-in. --no-compile wins over --compile-model
+            # and forces False (ignoring any compiled_cache.bin); omitting both
+            # leaves the runner default (None = eager).
+            if getattr(args, "no_compile", False):
+                transformer_kwargs["compile_model"] = False
+            elif getattr(args, "compile_model", False):
                 transformer_kwargs["compile_model"] = True
             if getattr(args, "pre_chunked", False):
                 transformer_kwargs["pre_chunked"] = True
@@ -219,7 +224,10 @@ def cmd_run(args: argparse.Namespace) -> None:
                 val = getattr(args, attr, None)
                 if val is not None:
                     t_kw[key] = val
-            if getattr(args, "compile_model", False):
+            # Compile is strictly opt-in (see transformer branch above).
+            if getattr(args, "no_compile", False):
+                t_kw["compile_model"] = False
+            elif getattr(args, "compile_model", False):
                 t_kw["compile_model"] = True
 
             r_kw: dict = {}
@@ -430,7 +438,18 @@ Examples:
         "--chunk-overlap", type=int, help="Overlap between chunks in tokens (transformer jobs, default: 40)"
     )
     run_p.add_argument(
-        "--compile-model", action="store_true", help="Apply torch.compile with mega-cache (transformer jobs)"
+        "--compile-model",
+        action="store_true",
+        help="Opt in to torch.compile with a prebuilt mega-cache (transformer/pipeline jobs). "
+        "Requires the cache file. WARNING: the reduce-overhead mode grows reserved VRAM per "
+        "input shape and can leak toward OOM under shape churn — leave off unless measured to help.",
+    )
+    run_p.add_argument(
+        "--no-compile",
+        action="store_true",
+        help="Force torch.compile OFF (transformer/pipeline jobs), overriding any compiled_cache.bin "
+        "beside the weights. This is the default; the flag makes the intent explicit and wins over "
+        "--compile-model if both are given.",
     )
     run_p.add_argument("--compile-cache-path", help="Path to compiled cache .bin file (transformer jobs)")
     run_p.add_argument(

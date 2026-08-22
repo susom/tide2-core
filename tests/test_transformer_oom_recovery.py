@@ -4,21 +4,25 @@ These tests guard the *control flow and result reassembly* of the OOM-recovery
 path and the *cleanup mechanism* of the direct forward pass. They deliberately do
 **not** measure GPU memory — they run on CPU with no CUDA and use fakes/mocks, so
 they are safe in PR CI. Real GPU-memory reclamation is validated separately by the
-GPU scripts/tests (``scripts/verify_oom_fix.py`` / ``tests/test_transformer_oom_recovery_gpu.py``).
+GPU test (``tests/test_transformer_oom_recovery_gpu.py``, backed by
+``tests/oom_verification.py``).
 
 Covered:
-    1. Order + completeness across several split levels.
-    2. Terminal single-text OOM raises without unbounded recursion.
+    1. Order + completeness across several batch-shrink levels.
+    2. Terminal single-text OOM raises without unbounded recursion/looping.
     3. Non-OOM RuntimeErrors propagate unchanged.
     4. CPU guard: works with torch.cuda.is_available() mocked False.
-    5. A2 mechanism: at most one live OOM exception at a time (would fail on the
-       old recursive implementation).
-    6. A1 mechanism: an exception inside _forward_batch_direct releases the GPU
+    5. A1 mechanism: an exception inside _forward_batch_direct releases the GPU
        tensor locals (verified via weakref to a stand-in tensor).
+
+Note: recovery now shrinks the effective batch size (single owner of
+sub-batching) instead of recursively splitting text slices, so the previous
+"at most one live exception" / "empty_cache outside the handler" mechanism
+tests are gone — Fix A1 (source-level tensor release) makes those properties
+irrelevant.
 """
 
 import gc
-import sys
 import weakref
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -36,20 +40,17 @@ _OOM_MESSAGE = "CUDA out of memory. Tried to allocate 2.00 MiB."
 class _FakeCore:
     """Stand-in for TransformerCore.
 
-    ``infer_raw_direct`` raises a CUDA-OOM ``RuntimeError`` when the slice is
+    ``infer_raw_direct`` raises a CUDA-OOM ``RuntimeError`` when the chunk is
     larger than ``oom_threshold`` and otherwise returns a deterministic per-text
-    marker. It also records, per call, the slice size and whether a Python
-    exception was live at call time (for the A2 mechanism check).
+    marker. It records the size of each call for control-flow assertions.
     """
 
     def __init__(self, oom_threshold: int, non_oom_error: bool = False) -> None:
         self.oom_threshold = oom_threshold
         self.non_oom_error = non_oom_error
         self.call_sizes: list[int] = []
-        self.exc_active_at_call: list[bool] = []
 
     def infer_raw_direct(self, texts, batch_size=None):
-        self.exc_active_at_call.append(sys.exc_info()[0] is not None)
         self.call_sizes.append(len(texts))
         if self.non_oom_error:
             raise RuntimeError("some other non-memory error")
@@ -127,63 +128,39 @@ class TestOomRecoveryControlFlow:
         assert [r[0]["marker"] for r in results] == texts
 
 
-class TestA2Mechanism:
-    """Mechanism check: at most one live OOM exception at a time.
+class TestBatchShrinkRecovery:
+    """OOM recovery halves the GPU batch size and reclaims cache between tries."""
 
-    This is not a memory assertion; it verifies the *structure* the fix relies on.
-    On the previous recursive implementation the retry calls happened inside the
-    ``except`` block, so ``infer_raw_direct`` would be re-entered while an OOM
-    exception was still live (``sys.exc_info()`` set). The iterative work-list
-    drops the exception before retrying, so every call sees a cleared exception.
-    """
-
-    def test_no_live_exception_during_retries(self):
+    def test_batch_size_shrinks_on_oom(self):
+        # threshold=1 forces shrinking down to single-text chunks.
         core = _FakeCore(oom_threshold=1)
         actor = _make_actor(core)
         texts = [f"t{i}" for i in range(8)]
 
-        actor._run_inference_raw_with_oom_recovery(texts)
+        results = actor._run_inference_raw_with_oom_recovery(texts)
 
-        # Many calls happened (splits), and none was entered with a live exception.
-        assert len(core.call_sizes) > 1
-        assert core.exc_active_at_call, "expected at least one recorded call"
-        assert not any(core.exc_active_at_call)
-
-
-class TestEmptyCacheOutsideHandler:
-    """Mechanism check: empty_cache() runs outside any active exception handler.
-
-    On the previous ordering ``torch.cuda.empty_cache()`` was called *inside* the
-    ``except`` suite, where CPython keeps the OOM exception (and its traceback,
-    which pins the failed forward's GPU frames) alive via ``sys.exc_info()``. The
-    fix moves the clear to the loop-body tail, past the handler, so it can never
-    run while an exception is live. This test records ``sys.exc_info()[0]`` at each
-    ``empty_cache()`` call and asserts it is always ``None`` — it fails on the old
-    ordering and passes after the fix.
-    """
-
-    @patch("tide2.actors.transformer.torch.cuda.is_available", return_value=True)
-    def test_empty_cache_never_called_with_live_exception(self, mock_is_available):
-        exc_at_clear: list = []
-
-        def spy_empty_cache():
-            exc_at_clear.append(sys.exc_info()[0])
-
-        # threshold=1 forces a multi-level split cascade, so empty_cache() is
-        # exercised at several handled OOMs.
-        core = _FakeCore(oom_threshold=1)
-        actor = _make_actor(core)
-        texts = [f"t{i}" for i in range(8)]
-
-        with patch("tide2.actors.transformer.torch.cuda.empty_cache", spy_empty_cache):
-            results = actor._run_inference_raw_with_oom_recovery(texts)
-
-        # Results still correct and complete.
+        # Completeness/order preserved, and more than one forward happened
+        # (the initial oversized chunk plus shrink retries).
         assert [r[0]["marker"] for r in results] == texts
-        # The cache was cleared at least once (splits happened)...
-        assert exc_at_clear, "expected empty_cache() to be called during recovery"
-        # ...and never while an exception was still being handled.
-        assert all(exc is None for exc in exc_at_clear)
+        assert len(core.call_sizes) > 1
+        # The final successful chunks are size 1 (shrunk from the full batch).
+        assert core.call_sizes[-1] == 1
+
+    @patch("tide2.actors.transformer.torch.cuda.empty_cache")
+    @patch("tide2.actors.transformer.torch.cuda.is_available", return_value=True)
+    def test_empty_cache_called_only_after_handled_oom(self, mock_is_available, mock_empty_cache):
+        # No OOM (threshold high) => empty_cache never called (off the success path).
+        core = _FakeCore(oom_threshold=100)
+        actor = _make_actor(core)
+        actor._run_inference_raw_with_oom_recovery([f"t{i}" for i in range(4)])
+        assert mock_empty_cache.call_count == 0
+
+        # With OOMs, it is called once per handled OOM (before each retry).
+        mock_empty_cache.reset_mock()
+        core = _FakeCore(oom_threshold=1)
+        actor = _make_actor(core)
+        actor._run_inference_raw_with_oom_recovery([f"t{i}" for i in range(4)])
+        assert mock_empty_cache.call_count >= 1
 
 
 class _MovedTensor:
