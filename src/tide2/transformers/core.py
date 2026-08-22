@@ -396,21 +396,19 @@ class TransformerCore:
 
         return all_results
 
-    def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
-        """Single batch: tokenize → GPU forward → extract predictions.
+    def tokenize_batch(self, texts: list[str]) -> Any:
+        """Tokenize a batch on CPU, returning the raw ``BatchEncoding``.
 
-        Releases every CUDA-resident tensor in a ``finally`` (Fix A1) so that on
-        OOM no exception traceback can pin the failed forward's VRAM — this is
-        what lets the caller's ``empty_cache()`` reclaim before retrying at a
-        smaller batch size. See
-        :meth:`tide2.actors.transformer.TransformerInferenceActor._run_inference_raw_with_oom_recovery`.
+        This is the CPU-only part of a forward, split out so callers can overlap
+        it with a previous batch's GPU forward (in-actor double-buffering). The
+        returned encoding still carries ``offset_mapping`` and
+        ``special_tokens_mask``; pass it straight to :meth:`forward_tokenized`.
+
+        Assumes the pipeline is already loaded (``infer_raw_direct`` and the Ray
+        actor both ensure this); it does not lazily load, so the CPU tokenize can
+        run on a worker thread without racing model initialization.
         """
-        model = self._model
-        tokenizer = self._tokenizer
-        device = next(model.parameters()).device
-
-        # Batch tokenize (CPU tensors)
-        encoded = tokenizer(
+        return self._tokenizer(
             texts,
             padding=True,
             truncation=True,
@@ -418,6 +416,27 @@ class TransformerCore:
             return_offsets_mapping=True,
             return_special_tokens_mask=True,
         )
+
+    def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
+        """Single batch: tokenize → GPU forward → extract predictions.
+
+        Thin composition of :meth:`tokenize_batch` and :meth:`forward_tokenized`;
+        the GPU-tensor release lives in the latter (Fix A1).
+        """
+        return self.forward_tokenized(self.tokenize_batch(texts), texts)
+
+    def forward_tokenized(self, encoded: Any, texts: list[str]) -> list[list[dict]]:
+        """GPU forward + prediction extraction from a pre-tokenized batch.
+
+        ``encoded`` is the output of :meth:`tokenize_batch` for ``texts`` (same
+        order). Releases every CUDA-resident tensor in a ``finally`` (Fix A1) so
+        that on OOM no exception traceback can pin the failed forward's VRAM —
+        this is what lets the caller's ``empty_cache()`` reclaim before retrying
+        at a smaller batch size. See
+        :meth:`tide2.actors.transformer.TransformerInferenceActor._run_inference_raw_with_oom_recovery`.
+        """
+        model = self._model
+        device = next(model.parameters()).device
 
         offset_mapping = encoded.pop("offset_mapping")  # (batch, seq_len, 2) — keep on CPU
         special_tokens_mask = encoded.pop("special_tokens_mask")  # (batch, seq_len) — keep on CPU

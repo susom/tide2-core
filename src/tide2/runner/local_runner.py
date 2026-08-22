@@ -783,6 +783,7 @@ class LocalJobRunner:
         agg_num_cpus: float = 1.0,
         transformer_cpus: float | None = None,
         tokenizer_workers: int | None = None,
+        tokenize_overlap: bool = False,
         transformer_max_tasks_in_flight: int | None = None,
         enable_checkpoint: bool = True,
     ) -> dict[str, Any]:
@@ -881,6 +882,11 @@ class LocalJobRunner:
                 without changing the actor's Ray CPU reservation. Feeding the GPU
                 faster is one of the cheapest throughput levers (review §4); tune
                 it with ``dev/transformer_throughput_harness.py``.
+            tokenize_overlap: If True, the GPU actor tokenizes the next
+                length-bucket group on a background thread while the current
+                group's forward runs (in-actor double-buffering). Experimental and
+                off by default — enable only if measurement shows the GPU starved
+                on tokenization for your workload.
             transformer_max_tasks_in_flight: Batches staged ahead per transformer
                 actor (``ActorPoolStrategy.max_tasks_in_flight_per_actor``). None
                 uses Ray's default (2). Raising it prefetches more batches so the
@@ -948,6 +954,7 @@ class LocalJobRunner:
             gpu_batch_size=gpu_batch_size,
             short_seq_budget=short_seq_budget,
             tokenizer_workers=tokenizer_workers,
+            tokenize_overlap=tokenize_overlap,
         )
 
         input_pattern = self._resolve_input_pattern(input_path)

@@ -99,6 +99,7 @@ class TransformerInferenceActor:
         gpu_batch_size: int | None = None,
         short_seq_budget: float | None = None,
         tokenizer_workers: int | None = None,
+        tokenize_overlap: bool = False,
         allow_huggingface_download: bool = True,
     ) -> None:
         """
@@ -123,10 +124,17 @@ class TransformerInferenceActor:
                 floor (``transformer_cpus``), in which case it is pinned to that
                 floor so concurrent GPU actors do not oversubscribe the CPUs.
                 Set explicitly to give tokenization a fixed number of cores.
+            tokenize_overlap: If True, tokenize the next length-bucket group on a
+                background thread while the current group's GPU forward runs
+                (in-actor double-buffering). Off by default — an experimental
+                throughput lever whose win depends on the tokenize:forward ratio
+                for your workload; enable only if measurement shows GPU
+                starvation (see ``dev/transformer_throughput_harness.py``).
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
         """
         self.model_name = model_name
+        self._tokenize_overlap = tokenize_overlap
 
         # CPUs Ray reserved for this actor (0 when GPU-pinned without a floor).
         # get_assigned_resources() is only valid inside a Ray worker; this actor is
@@ -210,7 +218,8 @@ class TransformerInferenceActor:
         logger.info(
             f"TransformerInferenceActor initialized: model={model_name}, "
             f"device={self._core.get_device_info()}, gpu_batch_size={self._gpu_batch_size}, "
-            f"short_seq_budget={self._short_seq_budget():.2f}"
+            f"short_seq_budget={self._short_seq_budget():.2f}, "
+            f"tokenize_overlap={self._tokenize_overlap}"
         )
 
     @staticmethod
@@ -516,29 +525,80 @@ class TransformerInferenceActor:
         if n == 0:
             return cast(list[list[dict]], results)
 
-        # Length-sorted view of the input indices (ascending). Reassembly uses the
-        # carried original index, so output order is unaffected by this reordering.
-        order = sorted(range(n), key=lambda i: len(texts[i]))
+        groups = self._bucket_groups(texts)
 
-        pos = 0
-        while pos < n:
-            # Grow a length-homogeneous group from the sorted order, stopping once
-            # adding the next (longer) text would exceed the memory-safe batch cap
-            # at that longer length. Since ``order`` is ascending, the candidate is
-            # always the group's new longest member.
-            end = pos + 1
-            while end < n and (end - pos + 1) <= self._batch_cap_for_seq(len(texts[order[end]])):
-                end += 1
-
-            group_idx = order[pos:end]
-            group_texts = [texts[i] for i in group_idx]
-            group_results = self._infer_group_with_batch_shrink(group_texts)
-            for gi, preds in zip(group_idx, group_results, strict=True):
-                results[gi] = preds
-            pos = end
+        if self._tokenize_overlap and len(groups) > 1:
+            self._run_groups_overlapped(texts, groups, results)
+        else:
+            for group_idx in groups:
+                group_texts = [texts[i] for i in group_idx]
+                group_results = self._infer_group_with_batch_shrink(group_texts)
+                for gi, preds in zip(group_idx, group_results, strict=True):
+                    results[gi] = preds
 
         # Every index was filled by exactly one successful group member.
         return cast(list[list[dict]], results)
+
+    def _bucket_groups(self, texts: list[str]) -> list[list[int]]:
+        """Partition text indices into length-homogeneous groups (ascending).
+
+        Orders indices by length, then greedily grows each group until adding the
+        next (longer) text would exceed the memory-safe batch cap at that longer
+        length (:meth:`_batch_cap_for_seq`). Reassembly uses the carried original
+        index, so output order is unaffected by this reordering.
+        """
+        n = len(texts)
+        order = sorted(range(n), key=lambda i: len(texts[i]))
+
+        groups: list[list[int]] = []
+        pos = 0
+        while pos < n:
+            end = pos + 1
+            while end < n and (end - pos + 1) <= self._batch_cap_for_seq(len(texts[order[end]])):
+                end += 1
+            groups.append(order[pos:end])
+            pos = end
+        return groups
+
+    def _run_groups_overlapped(
+        self, texts: list[str], groups: list[list[int]], results: list[list[dict] | None]
+    ) -> None:
+        """Forward each group while tokenizing the next on a background thread.
+
+        In-actor double-buffering (Workstream G, option a): a single-worker thread
+        tokenizes group N+1 (CPU work, releases the GIL) while group N's GPU
+        forward runs, so the GPU is less likely to idle waiting on tokenization.
+        On CUDA OOM for a group it falls back to
+        :meth:`_infer_group_with_batch_shrink` (which re-tokenizes at a smaller
+        batch); the prefetched next-group encoding stays valid. Writes into
+        ``results`` in place, aligned to the original indices.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def group_texts(group_idx: list[int]) -> list[str]:
+            return [texts[i] for i in group_idx]
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            next_encoded = pool.submit(self._core.tokenize_batch, group_texts(groups[0]))
+            for gi, group_idx in enumerate(groups):
+                encoded = next_encoded.result()
+                # Kick off the next group's tokenization before we occupy the GPU.
+                if gi + 1 < len(groups):
+                    next_encoded = pool.submit(self._core.tokenize_batch, group_texts(groups[gi + 1]))
+
+                g_texts = group_texts(group_idx)
+                try:
+                    group_results = self._core.forward_tokenized(encoded, g_texts)
+                except RuntimeError as e:
+                    if "out of memory" not in str(e).lower():
+                        raise  # non-OOM error: propagate unchanged
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    # Re-run this group via the batch-shrink path (re-tokenizes).
+                    group_results = self._infer_group_with_batch_shrink(g_texts)
+
+                for original_i, preds in zip(group_idx, group_results, strict=True):
+                    results[original_i] = preds
 
     def _infer_group_with_batch_shrink(self, texts: list[str]) -> list[list[dict]]:
         """Run one length-homogeneous group, halving the batch on CUDA OOM.
@@ -676,6 +736,7 @@ def create_transformer_actor(
     gpu_batch_size: int | None = None,
     short_seq_budget: float | None = None,
     tokenizer_workers: int | None = None,
+    tokenize_overlap: bool = False,
     allow_huggingface_download: bool = True,
 ) -> type[TransformerInferenceActor]:
     """
@@ -694,6 +755,8 @@ def create_transformer_actor(
         short_seq_budget: Memory budget fraction for short sequences (None = auto).
         tokenizer_workers: Rayon thread-pool size for CPU tokenization
             (None = library default unless a CPU floor is assigned).
+        tokenize_overlap: If True, double-buffer tokenization against the GPU
+            forward (experimental; off by default).
         allow_huggingface_download: If True, fall back to HuggingFace Hub
             when local cache and GCS both miss.
 
@@ -720,6 +783,7 @@ def create_transformer_actor(
                 gpu_batch_size=gpu_batch_size,
                 short_seq_budget=short_seq_budget,
                 tokenizer_workers=tokenizer_workers,
+                tokenize_overlap=tokenize_overlap,
                 allow_huggingface_download=allow_huggingface_download,
             )
 

@@ -32,6 +32,7 @@ def _make_actor(core: _RecordingCore, cap) -> TransformerInferenceActor:
     actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
     actor._core = core
     actor._batch_cap_for_seq = cap
+    actor._tokenize_overlap = False
     return actor
 
 

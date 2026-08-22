@@ -121,6 +121,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 val = getattr(args, attr, None)
                 if val is not None:
                     transformer_kwargs[key] = val
+            if getattr(args, "tokenize_overlap", False):
+                transformer_kwargs["tokenize_overlap"] = True
             if getattr(args, "pre_chunked", False):
                 transformer_kwargs["pre_chunked"] = True
             result = runner.run_transformer(
@@ -219,6 +221,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 val = getattr(args, attr, None)
                 if val is not None:
                     t_kw[key] = val
+            if getattr(args, "tokenize_overlap", False):
+                t_kw["tokenize_overlap"] = True
 
             r_kw: dict = {}
             for attr, key in [
@@ -453,6 +457,13 @@ Examples:
         help="Batches staged ahead per transformer GPU actor "
         "(transformer/pipeline jobs). Default: Ray's default (2). Raise to "
         "prefetch more and reduce GPU starvation (uses more object-store memory).",
+    )
+    run_p.add_argument(
+        "--tokenize-overlap",
+        action="store_true",
+        help="Double-buffer tokenization against the GPU forward in the transformer "
+        "actor (transformer/pipeline jobs). Experimental; enable only if measurement "
+        "shows the GPU starved on tokenization.",
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")

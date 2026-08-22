@@ -69,6 +69,7 @@ def _make_actor(core: _FakeCore) -> TransformerInferenceActor:
     actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
     actor._core = core
     actor._batch_cap_for_seq = lambda _max_chars: 10**9
+    actor._tokenize_overlap = False
     return actor
 
 
