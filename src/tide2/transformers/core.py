@@ -70,13 +70,23 @@ class TransformerCore:
         dtype: Model dtype (default: torch.float16 for memory efficiency)
         load_immediately: If True, load pipeline in __init__. If False, lazy load.
         local_files_only: If True, don't download from HuggingFace (for cached models)
-        compile_model: Controls torch.compile behavior:
-            - None (default): Auto-detect. If compiled_cache.bin exists alongside
-              model weights, compile automatically.
-            - True: Require compilation. Raises FileNotFoundError if cache missing.
-            - False: Skip compilation even if cache file exists.
+        compile_model: Controls torch.compile behavior. Compilation is
+            **strictly opt-in** — it is entered only when this is explicitly
+            True, never from the mere presence of a cache file:
+            - None (default) / False: Do NOT compile. Run eager. A
+              ``compiled_cache.bin`` sitting next to the weights is ignored.
+            - True: Opt in to compilation. Requires the cache file; raises
+              FileNotFoundError if it is missing.
+
+            Rationale: the only compile mode wired here is
+            ``reduce-overhead`` (CUDA graphs), which grows ``reserved`` VRAM
+            per unique input shape and, under this pipeline's shape churn,
+            leaks toward OOM. Auto-enabling it from a stray cache file was a
+            silent footgun, so it now requires a deliberate opt-in. See
+            ``review-transformer-oom-findings.md`` Finding #0.
         compile_cache_path: Override path to mega-cache .bin file. If None, looks
-            for compiled_cache.bin in the resolved model directory.
+            for compiled_cache.bin in the resolved model directory. Only
+            consulted when ``compile_model`` is True.
         allow_huggingface_download: If True (default), fall back to downloading
             from HuggingFace Hub when local cache and GCS both miss.
 
@@ -296,13 +306,20 @@ class TransformerCore:
             model.eval()
             device_for_pipeline = -1
 
-        # Apply torch.compile with mega-cache
+        # Apply torch.compile with mega-cache — strictly opt-in (compile_model=True).
         cache_path = self._resolve_compile_cache_path()
         if cache_path is not None:
             logger.info(f"[{thread_name}] Loading compile cache from {cache_path}")
             torch.compiler.load_cache_artifacts(cache_path.read_bytes())
             model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
-            logger.info(f"[{thread_name}] Model compiled with fullgraph=True, mode=reduce-overhead")
+            logger.warning(
+                "[%s] torch.compile ENABLED (mode=reduce-overhead, fullgraph=True). "
+                "This mode grows reserved VRAM per input shape and can leak toward OOM "
+                "under shape churn; monitor torch.cuda.memory_reserved.",
+                thread_name,
+            )
+        else:
+            logger.info("[%s] torch.compile DISABLED (running eager)", thread_name)
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
 
@@ -347,10 +364,15 @@ class TransformerCore:
     def _resolve_compile_cache_path(self) -> Path | None:
         """Resolve the path to the compiled cache .bin file.
 
+        Compilation is **strictly opt-in**: only ``compile_model is True``
+        enters it. A cache file next to the weights is never auto-detected —
+        its presence alone does not turn compilation on.
+
         Behavior depends on self.compile_model:
-            - None: Auto-detect. Return path if compiled_cache.bin exists, else None.
-            - True: Require cache. Raise FileNotFoundError if missing.
-            - False: Skip compilation. Return None immediately.
+            - None (default) / False: Do NOT compile. Return None immediately,
+              regardless of whether a cache file exists.
+            - True: Opt in. Return the cache path, or raise FileNotFoundError
+              if the cache file is missing.
 
         The cache file is expected alongside the model weights at
         <model_path>/compiled_cache.bin, or at compile_cache_path if overridden.
@@ -361,7 +383,10 @@ class TransformerCore:
         Raises:
             FileNotFoundError: If compile_model is True and the cache file is missing.
         """
-        if self.compile_model is False:
+        # None (default) and False both mean "do not compile". Only an explicit
+        # True opts in — a stray compiled_cache.bin can no longer silently enable
+        # the leak-prone reduce-overhead path (see review Finding #0).
+        if self.compile_model is not True:
             return None
 
         if self.compile_cache_path is not None:
@@ -372,14 +397,11 @@ class TransformerCore:
         if path.is_file():
             return path
 
-        if self.compile_model is True:
-            raise FileNotFoundError(
-                f"Compiled cache file not found at {path}. "
-                f"Generate it with: python scripts/compile_model.py save --output {path}"
-            )
-
-        # compile_model is None (auto-detect) and file not found — skip
-        return None
+        raise FileNotFoundError(
+            f"compile_model=True but the compiled cache file was not found at {path}. "
+            f"Generate one with torch.compiler.save_cache_artifacts() after a warmup "
+            f"compile, or omit --compile-model / pass --no-compile to run eager."
+        )
 
     def infer_raw(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
         """Run raw inference on texts, returning BIO tokens.
@@ -457,14 +479,10 @@ class TransformerCore:
     def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
         """Single batch: tokenize → GPU forward → extract predictions.
 
-        GPU-tensor lifetime is bounded by a ``try``/``finally``: the device
-        transfer (which itself can raise ``torch.OutOfMemoryError``), the forward
-        pass, and every derived CUDA tensor are released on **any** exit — normal
-        return or exception. This is deliberate: on OOM the exception's traceback
-        would otherwise keep the failed forward's GPU tensors referenced, so
-        ``torch.cuda.empty_cache()`` in the caller's recovery path could reclaim
-        nothing and batch-splitting would never recover. Freeing at the source
-        guarantees no traceback anywhere can pin these tensors. See
+        Releases every CUDA-resident tensor in a ``finally`` (Fix A1) so that on
+        OOM no exception traceback can pin the failed forward's VRAM — this is
+        what lets the caller's ``empty_cache()`` reclaim before retrying at a
+        smaller batch size. See
         :meth:`tide2.actors.transformer.TransformerInferenceActor._run_inference_raw_with_oom_recovery`.
         """
         model = self._model
@@ -495,7 +513,7 @@ class TransformerCore:
                 encoded_gpu[k] = v.to(device)
 
             # Single forward pass
-            with torch.no_grad():
+            with torch.inference_mode():
                 logits = model(**encoded_gpu).logits  # (batch, seq_len, num_labels)
 
             # Softmax + argmax on GPU, then transfer to CPU
