@@ -43,7 +43,6 @@ Optional pass-through columns:
 from __future__ import annotations
 
 import argparse
-import glob
 import hashlib
 import json
 import sys
@@ -70,8 +69,14 @@ def _resolve_parquet_files(path: str | Path) -> list[Path]:
         return [p]
     if p.is_dir():
         return sorted(p.rglob("*.parquet"))
-    matches = sorted(glob.glob(str(path), recursive=True))
-    return [Path(m) for m in matches if Path(m).is_file()]
+    # Treat *path* as a glob pattern. Path.glob needs a base directory plus a
+    # relative pattern, so anchor absolute patterns at the filesystem root; the
+    # "**" segment keeps the previous recursive=True behavior.
+    pattern = Path(str(path))
+    base = Path(pattern.anchor) if pattern.is_absolute() else Path()
+    rel = pattern.relative_to(pattern.anchor) if pattern.is_absolute() else pattern
+    matches = sorted(base.glob(str(rel)))
+    return [m for m in matches if m.is_file()]
 
 
 # ---------------------------------------------------------------------------
@@ -113,10 +118,7 @@ def create_pipeline_parquet(
         patient_id: str = note.get("patient_id") or text_hash
 
         raw_pi = note.get("patient_identifiers", "{}")
-        if isinstance(raw_pi, dict):
-            patient_identifiers = json.dumps(raw_pi)
-        else:
-            patient_identifiers = str(raw_pi) if raw_pi else "{}"
+        patient_identifiers = json.dumps(raw_pi) if isinstance(raw_pi, dict) else str(raw_pi) if raw_pi else "{}"
 
         row: dict = {
             "note_text": note_text,
@@ -183,10 +185,7 @@ def read_pipeline_parquet(
         if columns is not None:
             missing = [c for c in columns if c.lower() not in lower_to_actual]
             if missing:
-                raise ValueError(
-                    f"Requested columns {missing} not found in {file_path}. "
-                    f"Available: {schema_names}"
-                )
+                raise ValueError(f"Requested columns {missing} not found in {file_path}. Available: {schema_names}")
             actual_cols = [lower_to_actual[c.lower()] for c in columns]
             table = pf.read(columns=actual_cols)
         else:
@@ -229,11 +228,7 @@ def cmd_read(args: argparse.Namespace) -> None:
     """Handle the ``read`` sub-command."""
     columns = args.columns.split(",") if args.columns else None
     df = read_pipeline_parquet(args.path, columns=columns)
-    output = {
-        "shape": df.shape,
-        "columns": list(df.columns),
-        "data": df.to_dict(orient="records")
-    }
+    output = {"shape": df.shape, "columns": list(df.columns), "data": df.to_dict(orient="records")}
     print(json.dumps(output, indent=2))
 
 
@@ -266,9 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
         "read",
         help="Read and print a pipeline parquet file.",
     )
-    p_read.add_argument(
-        "path", help="Path to parquet file, directory, or glob pattern."
-    )
+    p_read.add_argument("path", help="Path to parquet file, directory, or glob pattern.")
     p_read.add_argument(
         "--columns",
         default=None,
