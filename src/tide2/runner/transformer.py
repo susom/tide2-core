@@ -12,6 +12,7 @@ import logging
 from datetime import UTC
 from datetime import datetime
 from typing import Any
+from typing import cast
 
 import pandas as pd
 
@@ -218,10 +219,15 @@ def reassemble_document_predictions(
 
     # Pre-group chunks into per-document work items
     work_items = []
-    for text_hash, group in df_chunks.groupby("text_hash"):
+    for group_key, group in df_chunks.groupby("text_hash"):
+        # groupby keys are typed as a broad Hashable union; the text_hash column is
+        # always a str hash, so narrow it for the downstream lookup and work tuple.
+        text_hash = str(group_key)
         note_text = note_lookup.get(text_hash, "")
         patient_id = group["patient_id"].iloc[0] if "patient_id" in group.columns else ""
-        chunk_rows = group.to_dict("records")
+        # pandas' to_dict("records") is typed list[dict[Hashable, Any]]; the columns
+        # here are all str, so narrow it for the tuple's declared element type.
+        chunk_rows = cast("list[dict[str, Any]]", group.to_dict("records"))
         work_items.append((text_hash, patient_id, chunk_rows, note_text, model_name))
 
     if max_workers is None:
