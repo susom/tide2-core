@@ -122,7 +122,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Two-stage GPU/CPU pipeline**: GPU inference returns raw BIO tokens; CPU actors aggregate them concurrently via Ray Data streaming
 - **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with batch tokenize → single GPU forward pass → offset-based extraction
 - **Adaptive GPU batching**: Auto-computes batch size from actual free GPU memory (`torch.cuda.mem_get_info`), capped to a modest first-attempt ceiling; adjusts based on text lengths with VRAM-aware budgets (override via `--short-seq-budget`)
-- **OOM recovery**: Automatic batch splitting on CUDA out-of-memory errors. Recovery releases the failed forward's GPU tensors at the source and retries iteratively (at most one live OOM exception at a time), so `empty_cache()` can actually reclaim between attempts and the split cascade converges instead of exhausting VRAM. The GPU allocator is also configured with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (via Ray `runtime_env`) as fragmentation headroom.
+- **OOM recovery**: On CUDA out-of-memory the GPU actor halves its effective batch size and retries the failed chunk — a single owner of sub-batching (the core no longer splits arbitrary slices, so no already-computed sub-results are discarded). Recovery releases the failed forward's GPU tensors at the source so `empty_cache()` can actually reclaim between attempts and the retry converges instead of exhausting VRAM. The GPU allocator is also configured with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (via Ray `runtime_env`) as fragmentation headroom.
 - **Fault tolerance**: Actor restarts, task retries, graceful shutdown
 - **YAML config**: All CLI arguments can be specified in a YAML config file (`--config`)
 
@@ -131,7 +131,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **String parsers**: Name parsing/classification, address parsing, format detection
 - **Span metrics**: Gold vs ML evaluation, O(n log n) conflict resolution
 - **GCS cache**: Auto-download models from GCS to `~/.cache/tide2/`
-- **Model compilation**: `torch.compile` with mega-cache support for faster inference startup
+- **Model compilation**: `torch.compile` with mega-cache support is available but **strictly opt-in** (`--compile-model`, requires a prebuilt cache file). It is **off by default** — a `compiled_cache.bin` beside the model weights is no longer auto-detected, and `--no-compile` forces it off explicitly. The only wired mode is `reduce-overhead` (CUDA graphs), which grows *reserved* VRAM per input shape and can leak toward OOM under this pipeline's shape churn, so leave it off unless you have measured a win for your workload.
 
 ### Command Line Tools
 - **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
@@ -155,9 +155,14 @@ tide2-runner run recognizer -i ./data/input -o ./data/output
 tide2-runner run recognizer -i gs://bucket/input -o gs://bucket/output \
     --num-cpus 224 --num-actors 200
 
-# Run transformer NER on GPU
+# Run transformer NER on GPU (compile is off by default; run eager)
 tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
     --model StanfordAIMI/stanford-deidentifier-v2 --batch-size 2048
+
+# Opt in to torch.compile (requires a prebuilt cache; see the compile caveat below).
+# Use --no-compile to force it off explicitly regardless of any compiled_cache.bin.
+tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
+    --model StanfordAIMI/stanford-deidentifier-v2 --compile-model
 
 # Run transformer with YAML config
 tide2-runner run transformer --config config.yaml
