@@ -96,8 +96,6 @@ class TransformerInferenceActor:
         model_path: str | None = None,
         bucket_name: str | None = None,
         project_id: str | None = None,
-        compile_model: bool | None = None,
-        compile_cache_path: str | None = None,
         gpu_batch_size: int | None = None,
         short_seq_budget: float | None = None,
         allow_huggingface_download: bool = True,
@@ -110,8 +108,6 @@ class TransformerInferenceActor:
             model_path: Optional explicit model path (overrides GCS resolution).
             bucket_name: Optional GCS bucket name for model loading.
             project_id: Optional GCP project ID for model loading.
-            compile_model: If True, apply torch.compile with mega-cache.
-            compile_cache_path: Path to compiled cache .bin file.
             gpu_batch_size: Batch size for HuggingFace pipeline inference.
                 Controls how many texts are fed to the GPU at once, independent
                 of the Ray Data batch size. If None, auto-computed from model
@@ -153,8 +149,6 @@ class TransformerInferenceActor:
             device=device,
             load_immediately=True,  # Load model immediately on actor init
             local_files_only=True,  # Use cached models only
-            compile_model=compile_model,
-            compile_cache_path=compile_cache_path,
             allow_huggingface_download=allow_huggingface_download,
         )
 
@@ -184,12 +178,10 @@ class TransformerInferenceActor:
         else:
             self._gpu_batch_size = estimated
 
-        # Compile is strictly opt-in: only compile_model is True enables it.
-        compile_state = "on" if compile_model is True else "off"
         logger.info(
             f"TransformerInferenceActor initialized: model={model_name}, "
             f"device={self._core.get_device_info()}, gpu_batch_size={self._gpu_batch_size}, "
-            f"short_seq_budget={self._short_seq_budget():.2f}, compile={compile_state}"
+            f"short_seq_budget={self._short_seq_budget():.2f}"
         )
 
     @property
@@ -572,8 +564,6 @@ def create_transformer_actor(
     model_path: str | None = None,
     bucket_name: str | None = None,
     project_id: str | None = None,
-    compile_model: bool | None = None,
-    compile_cache_path: str | None = None,
     gpu_batch_size: int | None = None,
     short_seq_budget: float | None = None,
     allow_huggingface_download: bool = True,
@@ -590,8 +580,6 @@ def create_transformer_actor(
         model_path: Optional explicit model path (overrides GCS resolution).
         bucket_name: Optional GCS bucket name for model loading.
         project_id: Optional GCP project ID for model loading.
-        compile_model: If True, apply torch.compile with mega-cache.
-        compile_cache_path: Path to compiled cache .bin file.
         gpu_batch_size: Batch size for HF pipeline inference (None = auto-compute).
         short_seq_budget: Memory budget fraction for short sequences (None = auto).
         allow_huggingface_download: If True, fall back to HuggingFace Hub
@@ -617,8 +605,6 @@ def create_transformer_actor(
                 model_path=model_path,
                 bucket_name=bucket_name,
                 project_id=project_id,
-                compile_model=compile_model,
-                compile_cache_path=compile_cache_path,
                 gpu_batch_size=gpu_batch_size,
                 short_seq_budget=short_seq_budget,
                 allow_huggingface_download=allow_huggingface_download,
