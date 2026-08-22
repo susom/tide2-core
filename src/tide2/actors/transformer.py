@@ -423,29 +423,30 @@ class TransformerInferenceActor:
             peak,
         )
 
-    def _effective_batch_size(self, texts: list[str]) -> int:
-        """Compute batch size adapted to actual text lengths.
+    def _batch_cap_for_seq(self, max_chars: int) -> int:
+        """Max texts per forward at a given text length, ignoring how many exist.
 
-        HF pipeline pads all texts to the longest in the batch. When texts are
-        shorter than seq_len, per-sample memory drops and we can fit more.
+        HF pads all texts to the longest in the batch, so per-forward memory is
+        set by the batch's *longest* member. When that is shorter than seq_len,
+        per-sample memory drops and more texts fit. Uses chars/4 as a cheap token
+        estimate, then scales the base batch by the ``_per_sample_bytes`` ratio
+        between worst-case and actual seq length.
 
-        Uses chars/4 as a cheap token count estimate, then scales using
-        _per_sample_bytes ratio between worst-case and actual seq length.
+        The result may exceed ``_MAX_INITIAL_GPU_BATCH`` for short texts: that cap
+        bounds the *worst-case* (max-seq) base, which this scales *up* by
+        ``per_sample_worst / per_sample_actual``. This stays within the free-memory
+        budget by construction — the un-capped base already equals the free-memory
+        limit at max seq length, so the capped base (<= the cap) times the scale is
+        strictly below the limit at the (shorter) actual length. If that model is
+        ever optimistic, the batch-shrink recovery is the backstop.
 
-        Note the returned batch may exceed ``_MAX_INITIAL_GPU_BATCH`` for short
-        texts: that cap bounds the *worst-case* (max-seq) base, which this method
-        scales *up* by ``per_sample_worst / per_sample_actual``. This stays within
-        the free-memory budget by construction — the un-capped base already equals
-        the free-memory limit at max seq length, so the capped base (<= the cap)
-        times the scale is strictly below the free-memory limit at the actual (much
-        shorter) seq length. If that approximate memory model is ever optimistic,
-        OOM recovery in ``_run_inference_raw_with_oom_recovery`` is the backstop.
+        This is the length-only cap used by length bucketing; ``_effective_batch_size``
+        clamps it to the number of texts actually in hand.
         """
-        max_chars = max(len(t) for t in texts)
         effective_seq = min(max(max_chars // 4, 1), self._seq_len)
 
         if effective_seq >= self._seq_len:
-            return min(len(texts), self._gpu_batch_size)
+            return self._gpu_batch_size
 
         config = self._core.pipeline.model.config
         num_heads = getattr(config, "num_attention_heads", 12)
@@ -464,25 +465,44 @@ class TransformerInferenceActor:
         # (logits, embeddings) dominate, so use a tighter budget.
         budget = 0.9 if effective_seq > self._seq_len // 2 else self._short_seq_budget()
         adjusted = int(self._gpu_batch_size * scale * budget / 0.9)
-        return max(1, min(len(texts), adjusted))
+        return max(1, adjusted)
+
+    def _effective_batch_size(self, texts: list[str]) -> int:
+        """Batch size adapted to the batch's longest text, clamped to ``len(texts)``.
+
+        Thin wrapper over :meth:`_batch_cap_for_seq` for callers that hand over a
+        concrete list of texts.
+        """
+        max_chars = max(len(t) for t in texts)
+        return min(len(texts), self._batch_cap_for_seq(max_chars))
 
     def _run_inference_raw_with_oom_recovery(self, texts: list[str]) -> list[list[dict]]:
-        """Run raw inference, recovering from CUDA OOM by shrinking the batch.
+        """Run raw inference with in-actor length bucketing and OOM recovery.
 
-        Texts are processed left-to-right in chunks of an adaptive GPU batch
-        size (seeded by :meth:`_effective_batch_size`); each chunk is a single
-        forward via ``TransformerCore.infer_raw_direct``. On CUDA OOM the batch
-        size is halved and the failed chunk retried at the smaller size. This
-        actor is the **single owner of sub-batching** — the core no longer needs
-        to split arbitrary slices, and no already-computed sub-results are ever
-        discarded (each chunk is one forward, so a partial chunk cannot exist).
+        HF pads every text in a forward to the batch's longest member, so a
+        single long text in an otherwise-short batch inflates padding for the
+        whole batch (measured 2.3-5.8x throughput loss, review §4/§6f). To remove
+        that waste, this:
 
-        A1's source-level tensor release in ``_forward_batch_direct`` guarantees
-        the failed forward pins no VRAM, so ``empty_cache()`` after a handled OOM
-        actually reclaims before the retry. It stays off the success path.
+        1. orders the texts by length (a cheap ``len`` proxy);
+        2. partitions the length-sorted order into groups whose size is set from
+           the group's own longest member via :meth:`_batch_cap_for_seq`, so each
+           forward pads to a near-uniform length and per-forward memory is
+           predictable (an OOM-safety bonus);
+        3. runs each group as its own forward(s), halving the batch on CUDA OOM;
+        4. reassembles outputs into the original input order via a carried index
+           map.
+
+        Bucketing is entirely in-actor — no global Ray Data sort/shuffle (which
+        would risk the small-box deadlock). It is also the **single owner of
+        sub-batching**: each group runs one forward at its sized batch, so no
+        already-computed sub-results are discarded, and the batch-shrink on OOM
+        composes with A1's source-level tensor release (the failed forward pins no
+        VRAM, so ``empty_cache()`` after a handled OOM actually reclaims).
 
         Args:
-            texts: List of text strings to process.
+            texts: List of text strings to process (assumed all non-empty; the
+                caller filters empties).
 
         Returns:
             List of raw token lists (one per input text), aligned to ``texts``.
@@ -493,14 +513,60 @@ class TransformerInferenceActor:
         """
         n = len(texts)
         results: list[list[dict] | None] = [None] * n
-        batch_size = max(1, self._effective_batch_size(texts)) if n else 1
+        if n == 0:
+            return cast(list[list[dict]], results)
+
+        # Length-sorted view of the input indices (ascending). Reassembly uses the
+        # carried original index, so output order is unaffected by this reordering.
+        order = sorted(range(n), key=lambda i: len(texts[i]))
+
+        pos = 0
+        while pos < n:
+            # Grow a length-homogeneous group from the sorted order, stopping once
+            # adding the next (longer) text would exceed the memory-safe batch cap
+            # at that longer length. Since ``order`` is ascending, the candidate is
+            # always the group's new longest member.
+            end = pos + 1
+            while end < n and (end - pos + 1) <= self._batch_cap_for_seq(len(texts[order[end]])):
+                end += 1
+
+            group_idx = order[pos:end]
+            group_texts = [texts[i] for i in group_idx]
+            group_results = self._infer_group_with_batch_shrink(group_texts)
+            for gi, preds in zip(group_idx, group_results, strict=True):
+                results[gi] = preds
+            pos = end
+
+        # Every index was filled by exactly one successful group member.
+        return cast(list[list[dict]], results)
+
+    def _infer_group_with_batch_shrink(self, texts: list[str]) -> list[list[dict]]:
+        """Run one length-homogeneous group, halving the batch on CUDA OOM.
+
+        The group is already sized to fit at its longest member's length, so the
+        first forward should succeed; the shrink is the backstop if the memory
+        model was optimistic. Each chunk is a single forward (``infer_raw_direct``
+        with ``batch_size == len(chunk)``), so no already-computed results are
+        discarded on a mid-group OOM.
+
+        Args:
+            texts: A length-homogeneous group of non-empty texts.
+
+        Returns:
+            Raw token lists aligned to ``texts``.
+
+        Raises:
+            RuntimeError: If OOM persists at a single text, or for any non-OOM
+                error (re-raised unchanged).
+        """
+        n = len(texts)
+        out: list[list[dict] | None] = [None] * n
+        batch_size = n
 
         start = 0
         while start < n:
             chunk = texts[start : start + batch_size]
             try:
-                # batch_size == len(chunk): infer_raw_direct runs exactly one
-                # forward, so this actor owns all sub-batching decisions.
                 chunk_results = self._core.infer_raw_direct(chunk, batch_size=len(chunk))
             except RuntimeError as e:
                 if "out of memory" not in str(e).lower():
@@ -520,11 +586,10 @@ class TransformerInferenceActor:
                 continue
 
             for offset, preds in enumerate(chunk_results):
-                results[start + offset] = preds
+                out[start + offset] = preds
             start += len(chunk)
 
-        # Every index was filled by a successful (possibly single-text) chunk.
-        return cast(list[list[dict]], results)
+        return cast(list[list[dict]], out)
 
 
 class BIOAggregationActor:

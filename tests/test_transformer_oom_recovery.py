@@ -62,14 +62,13 @@ class _FakeCore:
 def _make_actor(core: _FakeCore) -> TransformerInferenceActor:
     """Build an actor without loading a model, wired to a fake core.
 
-    ``_effective_batch_size`` is stubbed so recovery does not touch the real
-    (model-config-dependent) sizing logic — the fake core alone decides OOM.
+    ``_batch_cap_for_seq`` is stubbed huge so length bucketing puts every text in
+    a single group and does not touch the real (model-config-dependent) sizing
+    logic — the fake core alone decides OOM, exercising the batch-shrink path.
     """
     actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
     actor._core = core
-    # Recovery only needs a per-slice batch size; feed the whole slice each time so
-    # the fake core alone decides OOM. (len(slice) == effective batch here.)
-    actor._effective_batch_size = len
+    actor._batch_cap_for_seq = lambda _max_chars: 10**9
     return actor
 
 
