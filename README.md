@@ -131,7 +131,12 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **String parsers**: Name parsing/classification, address parsing, format detection
 - **Span metrics**: Gold vs ML evaluation, O(n log n) conflict resolution
 - **GCS cache**: Auto-download models from GCS to `~/.cache/tide2/`
-- **Model compilation**: `torch.compile` with mega-cache support is available but **strictly opt-in** (`--compile-model`, requires a prebuilt cache file). It is **off by default** — a `compiled_cache.bin` beside the model weights is no longer auto-detected, and `--no-compile` forces it off explicitly. The only wired mode is `reduce-overhead` (CUDA graphs), which grows *reserved* VRAM per input shape and can leak toward OOM under this pipeline's shape churn, so leave it off unless you have measured a win for your workload.
+
+> **Note:** the batch inference pipeline runs **eager** (no `torch.compile`).
+> Compilation was measured to add nothing at the batch sizes this pipeline runs,
+> and its only wired mode (`reduce-overhead` / CUDA graphs) grew *reserved* VRAM
+> per input shape and leaked toward OOM under shape churn, so it was removed. A
+> stray `compiled_cache.bin` beside the model weights is ignored.
 
 ### Command Line Tools
 - **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
@@ -155,14 +160,9 @@ tide2-runner run recognizer -i ./data/input -o ./data/output
 tide2-runner run recognizer -i gs://bucket/input -o gs://bucket/output \
     --num-cpus 224 --num-actors 200
 
-# Run transformer NER on GPU (compile is off by default; run eager)
+# Run transformer NER on GPU (runs eager; the batch pipeline does not use torch.compile)
 tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
     --model StanfordAIMI/stanford-deidentifier-v2 --batch-size 2048
-
-# Opt in to torch.compile (requires a prebuilt cache; see the compile caveat below).
-# Use --no-compile to force it off explicitly regardless of any compiled_cache.bin.
-tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
-    --model StanfordAIMI/stanford-deidentifier-v2 --compile-model
 
 # Run transformer with YAML config
 tide2-runner run transformer --config config.yaml

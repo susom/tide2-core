@@ -775,8 +775,6 @@ class LocalJobRunner:
         short_seq_budget: float | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
-        compile_model: bool | None = None,
-        compile_cache_path: str | None = None,
         num_agg_actors: int | None = None,
         pre_chunked: bool = False,
         read_cpus: float = 1.0,
@@ -853,8 +851,6 @@ class LocalJobRunner:
                 config and available GPU memory.
             chunk_size: Maximum chunk size in tokens (default: from model config)
             chunk_overlap: Overlap between chunks in tokens (default: from model config)
-            compile_model: If True, apply torch.compile with mega-cache
-            compile_cache_path: Path to compiled cache .bin file
             num_agg_actors: Number of CPU actors for BIO aggregation.
                 If None, auto-computed as ~30% of available CPUs.
             pre_chunked: If True, input is already chunked (skip flat_map).
@@ -931,8 +927,6 @@ class LocalJobRunner:
             model_path=model_path,
             bucket_name=bucket_name,
             project_id=project_id,
-            compile_model=compile_model,
-            compile_cache_path=compile_cache_path,
             gpu_batch_size=gpu_batch_size,
             short_seq_budget=short_seq_budget,
         )
@@ -1718,8 +1712,6 @@ def run_transformer_simple(
     chunk_overlap: int | None = None,
     num_cpus: int | None = None,
     object_store_gb: int | None = None,
-    compile_model: bool | None = None,
-    compile_cache_path: str | None = None,
     num_agg_actors: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1737,8 +1729,6 @@ def run_transformer_simple(
         chunk_overlap: Overlap between chunks in tokens (default: from model config)
         num_cpus: CPUs
         object_store_gb: Object store size GB
-        compile_model: If True, apply torch.compile with mega-cache
-        compile_cache_path: Path to compiled cache .bin file
         num_agg_actors: Number of CPU actors for BIO aggregation (auto if None)
 
     Returns:
@@ -1761,8 +1751,6 @@ def run_transformer_simple(
             batch_size=batch_size,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            compile_model=compile_model,
-            compile_cache_path=compile_cache_path,
             num_agg_actors=num_agg_actors,
         )
     finally:
