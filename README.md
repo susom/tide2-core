@@ -213,6 +213,12 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
   `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
   transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
   caps the actor's torch threads).
+- **Transformer throughput (GPU)**: `--tokenizer-workers` sizes the fast tokenizer's
+  rayon thread pool so CPU tokenization keeps the GPU fed (defaults to the CPU floor
+  when `--transformer-cpus` is set, else all cores); `--transformer-max-tasks-in-flight`
+  prefetches more batches per GPU actor (default 2) to reduce GPU starvation at the cost
+  of object-store memory. Both are throughput levers — tune them with
+  `dev/transformer_throughput_harness.py`.
 - **Recognizer / anonymizer stages**: `--cpus-per-actor` (supervisor), `--worker-num-cpus`
   (worker actor), `--read-cpus`, `--write-cpus`. Each pool slot needs supervisor +
   worker CPUs, so budget both.

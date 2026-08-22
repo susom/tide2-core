@@ -98,6 +98,7 @@ class TransformerInferenceActor:
         project_id: str | None = None,
         gpu_batch_size: int | None = None,
         short_seq_budget: float | None = None,
+        tokenizer_workers: int | None = None,
         allow_huggingface_download: bool = True,
     ) -> None:
         """
@@ -116,10 +117,28 @@ class TransformerInferenceActor:
                 (shorter than half the model sequence length). If None,
                 auto-computed from total GPU VRAM. Higher values use more
                 GPU memory for short-text batches.
+            tokenizer_workers: Size of the fast tokenizer's Rust (rayon) thread
+                pool for CPU-side tokenization. If None, it is left at the
+                library default (all cores) unless Ray assigned this actor a CPU
+                floor (``transformer_cpus``), in which case it is pinned to that
+                floor so concurrent GPU actors do not oversubscribe the CPUs.
+                Set explicitly to give tokenization a fixed number of cores.
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
         """
         self.model_name = model_name
+
+        # CPUs Ray reserved for this actor (0 when GPU-pinned without a floor).
+        # get_assigned_resources() is only valid inside a Ray worker; this actor is
+        # also constructed in-process (direct inference / the recognizer path / GPU
+        # verification), where it raises — treat that as "no reservation info".
+        import ray
+
+        try:
+            assigned = ray.get_runtime_context().get_assigned_resources()
+            assigned_cpus = int(assigned.get("CPU", 0) or 0)
+        except Exception:
+            assigned_cpus = 0
 
         # Determine device for explicit GPU placement
         if torch.cuda.is_available():
@@ -129,16 +148,26 @@ class TransformerInferenceActor:
             device = "cpu"
             logger.warning("No GPU detected, using CPU (performance will be degraded)")
 
-        # CPU branch only: cap torch threads to the CPUs Ray reserved for this
-        # actor so that actors x threads <= total CPUs (no oversubscription).
-        # GPU branch keeps torch's default thread behavior untouched.
+        # CPU branch: cap torch threads to the CPUs Ray reserved for this actor
+        # so that actors x threads <= total CPUs (no oversubscription).
         if device == "cpu":
-            import ray
-
-            assigned = ray.get_runtime_context().get_assigned_resources()
-            n = int(assigned.get("CPU", 1)) or 1
+            n = assigned_cpus or 1
             torch.set_num_threads(n)
             logger.info("CPU inference: capping torch to %d thread(s) per Ray allocation", n)
+
+        # Tokenization is CPU work on this (often GPU-pinned) actor. Give the fast
+        # tokenizer's rayon pool a bounded, configurable core count so several GPU
+        # actors on one node don't each grab every core. Only pins when asked
+        # explicitly or when a CPU floor was assigned — otherwise the library
+        # default (all cores) is left intact so single-actor boxes don't regress.
+        if tokenizer_workers is not None:
+            workers = tokenizer_workers
+        elif assigned_cpus >= 1:
+            workers = assigned_cpus
+        else:
+            workers = None
+        if workers is not None:
+            self._configure_tokenizer_parallelism(workers)
 
         # Create core inference engine with explicit device and immediate loading
         self._core = TransformerCore(
@@ -183,6 +212,21 @@ class TransformerInferenceActor:
             f"device={self._core.get_device_info()}, gpu_batch_size={self._gpu_batch_size}, "
             f"short_seq_budget={self._short_seq_budget():.2f}"
         )
+
+    @staticmethod
+    def _configure_tokenizer_parallelism(workers: int) -> None:
+        """Pin the fast tokenizer's rayon pool and enable HF parallelism.
+
+        The HuggingFace fast tokenizer parallelizes over a Rust ``rayon`` thread
+        pool sized from ``RAYON_NUM_THREADS`` (read once, at first tokenize) and
+        gated by ``TOKENIZERS_PARALLELISM``. Uses ``setdefault`` so an
+        operator-set value always wins. A no-op for ``workers < 1``.
+        """
+        if workers < 1:
+            return
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "true")
+        os.environ.setdefault("RAYON_NUM_THREADS", str(workers))
+        logger.info("Tokenizer parallelism pinned to %d rayon thread(s)", workers)
 
     @property
     def model_pipeline(self) -> Any:
@@ -566,6 +610,7 @@ def create_transformer_actor(
     project_id: str | None = None,
     gpu_batch_size: int | None = None,
     short_seq_budget: float | None = None,
+    tokenizer_workers: int | None = None,
     allow_huggingface_download: bool = True,
 ) -> type[TransformerInferenceActor]:
     """
@@ -582,6 +627,8 @@ def create_transformer_actor(
         project_id: Optional GCP project ID for model loading.
         gpu_batch_size: Batch size for HF pipeline inference (None = auto-compute).
         short_seq_budget: Memory budget fraction for short sequences (None = auto).
+        tokenizer_workers: Rayon thread-pool size for CPU tokenization
+            (None = library default unless a CPU floor is assigned).
         allow_huggingface_download: If True, fall back to HuggingFace Hub
             when local cache and GCS both miss.
 
@@ -607,6 +654,7 @@ def create_transformer_actor(
                 project_id=project_id,
                 gpu_batch_size=gpu_batch_size,
                 short_seq_budget=short_seq_budget,
+                tokenizer_workers=tokenizer_workers,
                 allow_huggingface_download=allow_huggingface_download,
             )
 

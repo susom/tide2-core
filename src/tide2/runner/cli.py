@@ -114,6 +114,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("write_cpus", "write_cpus"),
                 ("agg_num_cpus", "agg_num_cpus"),
                 ("transformer_cpus", "transformer_cpus"),
+                ("tokenizer_workers", "tokenizer_workers"),
+                ("transformer_max_tasks_in_flight", "transformer_max_tasks_in_flight"),
                 ("enable_checkpoint", "enable_checkpoint"),
             ]:
                 val = getattr(args, attr, None)
@@ -210,6 +212,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("write_cpus", "write_cpus"),
                 ("agg_num_cpus", "agg_num_cpus"),
                 ("transformer_cpus", "transformer_cpus"),
+                ("tokenizer_workers", "tokenizer_workers"),
+                ("transformer_max_tasks_in_flight", "transformer_max_tasks_in_flight"),
                 ("enable_checkpoint", "enable_checkpoint"),
             ]:
                 val = getattr(args, attr, None)
@@ -435,6 +439,20 @@ Examples:
         "--short-seq-budget",
         type=float,
         help="Memory budget fraction for short sequences (transformer jobs, auto-computed from GPU VRAM if not set)",
+    )
+    run_p.add_argument(
+        "--tokenizer-workers",
+        type=int,
+        help="Rayon thread-pool size for CPU tokenization on the GPU actor "
+        "(transformer/pipeline jobs). Default: library default unless a "
+        "--transformer-cpus floor is set. Feeds the GPU faster.",
+    )
+    run_p.add_argument(
+        "--transformer-max-tasks-in-flight",
+        type=int,
+        help="Batches staged ahead per transformer GPU actor "
+        "(transformer/pipeline jobs). Default: Ray's default (2). Raise to "
+        "prefetch more and reduce GPU starvation (uses more object-store memory).",
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")

@@ -760,7 +760,7 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_transformer(
+    def run_transformer(  # noqa: PLR0915 - one linear Ray Data pipeline reads clearest as a single flow
         self,
         input_path: str | list[str],
         output_path: str,
@@ -782,6 +782,8 @@ class LocalJobRunner:
         write_cpus: float = 1.0,
         agg_num_cpus: float = 1.0,
         transformer_cpus: float | None = None,
+        tokenizer_workers: int | None = None,
+        transformer_max_tasks_in_flight: int | None = None,
         enable_checkpoint: bool = True,
     ) -> dict[str, Any]:
         """
@@ -868,7 +870,23 @@ class LocalJobRunner:
             transformer_cpus: CPU floor for the transformer actor. None leaves
                 the Ray default (0 CPU in GPU mode, since the actor is GPU-pinned;
                 1 CPU in CPU mode). In CPU mode this also caps torch threads, so
-                set it to ~(total CPUs - 1) on small CPU boxes.
+                set it to ~(total CPUs - 1) on small CPU boxes. In GPU mode, a
+                floor > 0 also pins tokenization's rayon thread pool to that count
+                (see ``tokenizer_workers``), so several GPU actors on one node do
+                not each grab every core.
+            tokenizer_workers: Rayon thread-pool size for CPU-side tokenization on
+                the GPU actor. None leaves the library default (all cores) unless a
+                ``transformer_cpus`` floor is set, in which case it follows that
+                floor. Set explicitly to give tokenization a fixed number of cores
+                without changing the actor's Ray CPU reservation. Feeding the GPU
+                faster is one of the cheapest throughput levers (review §4); tune
+                it with ``dev/transformer_throughput_harness.py``.
+            transformer_max_tasks_in_flight: Batches staged ahead per transformer
+                actor (``ActorPoolStrategy.max_tasks_in_flight_per_actor``). None
+                uses Ray's default (2). Raising it prefetches more batches so the
+                GPU is less likely to starve between calls, at the cost of more
+                object-store memory for staged batches — keep it modest on small
+                boxes.
             enable_checkpoint: If True (default), enable Ray Data row-level
                 checkpointing for resume. MUST be set to False on tiny clusters
                 (≲4 CPUs): the checkpoint sort+repartition shuffle deadlocks the
@@ -929,6 +947,7 @@ class LocalJobRunner:
             project_id=project_id,
             gpu_batch_size=gpu_batch_size,
             short_seq_budget=short_seq_budget,
+            tokenizer_workers=tokenizer_workers,
         )
 
         input_pattern = self._resolve_input_pattern(input_path)
@@ -976,11 +995,17 @@ class LocalJobRunner:
             # in CPU mode; GPU pinning (num_gpus=1) is preserved in GPU mode.
             ray_remote_args_transformer["num_cpus"] = transformer_cpus
 
+        # Prefetch: stage extra batches ahead of each GPU actor so it does not
+        # starve between calls. None => Ray default (2).
+        actor_pool_kwargs: dict[str, Any] = {"size": num_transformer_actors}
+        if transformer_max_tasks_in_flight is not None:
+            actor_pool_kwargs["max_tasks_in_flight_per_actor"] = transformer_max_tasks_in_flight
+
         ds_raw = ds_chunks.map_batches(
             transformer_actor,
             batch_size=batch_size,
             batch_format="numpy",
-            compute=ray.data.ActorPoolStrategy(size=num_transformer_actors),
+            compute=ray.data.ActorPoolStrategy(**actor_pool_kwargs),
             **ray_remote_args_transformer,
         )
 
