@@ -156,7 +156,8 @@ python-version = "3.12"
 root = ["src/tide2"]
 
 [tool.ty.analysis]
-# Suppress unresolved-import errors for GPU/distributed packages that lack stubs.
+# Suppress unresolved-import errors for GPU/distributed/ML packages that ship
+# incomplete or no type information (ty cannot resolve their public members).
 # Mirrors the behavior of mypy's ignore_missing_imports = true for these libs.
 allowed-unresolved-imports = [
     "cudf.**",
@@ -164,6 +165,7 @@ allowed-unresolved-imports = [
     "cugraph.**",
     "ray.**",
     "google.cloud.**",
+    "transformers.**",
 ]
 
 [tool.ruff]
