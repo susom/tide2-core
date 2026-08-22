@@ -60,8 +60,6 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # chunk_overlap: 40
 # gpu_batch_size: auto-computed from model config and free GPU memory
 # short_seq_budget: auto-computed from total GPU VRAM (0.6 for L4, 0.7 for A6000, 0.8 for H100)
-# compile_model: false
-# compile_cache_path: /path/to/compiled_cache.bin
 # num_agg_actors: auto-computed as ~30% of available CPUs
 
 # =========================================================================

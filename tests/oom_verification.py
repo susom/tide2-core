@@ -24,6 +24,9 @@ What it proves on a real GPU:
   Passing ``--compile-churn`` force-applies ``reduce-overhead`` compile to
   reproduce the blocker (unbounded ``reserved`` growth under shape churn) as a
   manual diagnostic — this is the case the honest verification exists to catch.
+  The product batch pipeline no longer supports ``torch.compile`` (it runs
+  eager); this flag force-compiles the model directly, only to keep the
+  historical blocker reproducible.
 
 Requires CUDA; the CLI exits non-zero if no GPU is present.
 """
