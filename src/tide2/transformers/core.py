@@ -70,23 +70,6 @@ class TransformerCore:
         dtype: Model dtype (default: torch.float16 for memory efficiency)
         load_immediately: If True, load pipeline in __init__. If False, lazy load.
         local_files_only: If True, don't download from HuggingFace (for cached models)
-        compile_model: Controls torch.compile behavior. Compilation is
-            **strictly opt-in** — it is entered only when this is explicitly
-            True, never from the mere presence of a cache file:
-            - None (default) / False: Do NOT compile. Run eager. A
-              ``compiled_cache.bin`` sitting next to the weights is ignored.
-            - True: Opt in to compilation. Requires the cache file; raises
-              FileNotFoundError if it is missing.
-
-            Rationale: the only compile mode wired here is
-            ``reduce-overhead`` (CUDA graphs), which grows ``reserved`` VRAM
-            per unique input shape and, under this pipeline's shape churn,
-            leaks toward OOM. Auto-enabling it from a stray cache file was a
-            silent footgun, so it now requires a deliberate opt-in. See
-            ``review-transformer-oom-findings.md`` Finding #0.
-        compile_cache_path: Override path to mega-cache .bin file. If None, looks
-            for compiled_cache.bin in the resolved model directory. Only
-            consulted when ``compile_model`` is True.
         allow_huggingface_download: If True (default), fall back to downloading
             from HuggingFace Hub when local cache and GCS both miss.
 
@@ -113,8 +96,6 @@ class TransformerCore:
         dtype: torch.dtype = torch.float16,
         load_immediately: bool = False,
         local_files_only: bool = False,
-        compile_model: bool | None = None,
-        compile_cache_path: str | None = None,
         allow_huggingface_download: bool = True,
     ) -> None:
         """Initialize the transformer core.
@@ -128,8 +109,6 @@ class TransformerCore:
             dtype: Torch dtype for model weights.
             load_immediately: If True, load the pipeline during init.
             local_files_only: Restrict HuggingFace to local files only.
-            compile_model: Whether to use a compiled model cache.
-            compile_cache_path: Path to the compiled ``.bin`` cache file.
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
         """
@@ -151,8 +130,6 @@ class TransformerCore:
         self.device = device
         self.dtype = dtype
         self.local_files_only = local_files_only
-        self.compile_model = compile_model
-        self.compile_cache_path = compile_cache_path
 
         # Load configuration
         self._config = load_model_config(model_name)
@@ -306,21 +283,6 @@ class TransformerCore:
             model.eval()
             device_for_pipeline = -1
 
-        # Apply torch.compile with mega-cache — strictly opt-in (compile_model=True).
-        cache_path = self._resolve_compile_cache_path()
-        if cache_path is not None:
-            logger.info(f"[{thread_name}] Loading compile cache from {cache_path}")
-            torch.compiler.load_cache_artifacts(cache_path.read_bytes())
-            model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
-            logger.warning(
-                "[%s] torch.compile ENABLED (mode=reduce-overhead, fullgraph=True). "
-                "This mode grows reserved VRAM per input shape and can leak toward OOM "
-                "under shape churn; monitor torch.cuda.memory_reserved.",
-                thread_name,
-            )
-        else:
-            logger.info("[%s] torch.compile DISABLED (running eager)", thread_name)
-
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
 
         # Per-model max sequence length from the config, e.g. {"MODEL_MAX_LENGTH": 512}.
@@ -360,48 +322,6 @@ class TransformerCore:
         # Log device info
         model_device = next(model.parameters()).device
         logger.info(f"[{thread_name}] Pipeline loaded on device: {model_device}")
-
-    def _resolve_compile_cache_path(self) -> Path | None:
-        """Resolve the path to the compiled cache .bin file.
-
-        Compilation is **strictly opt-in**: only ``compile_model is True``
-        enters it. A cache file next to the weights is never auto-detected —
-        its presence alone does not turn compilation on.
-
-        Behavior depends on self.compile_model:
-            - None (default) / False: Do NOT compile. Return None immediately,
-              regardless of whether a cache file exists.
-            - True: Opt in. Return the cache path, or raise FileNotFoundError
-              if the cache file is missing.
-
-        The cache file is expected alongside the model weights at
-        <model_path>/compiled_cache.bin, or at compile_cache_path if overridden.
-
-        Returns:
-            Path to the cache file, or None to skip compilation.
-
-        Raises:
-            FileNotFoundError: If compile_model is True and the cache file is missing.
-        """
-        # None (default) and False both mean "do not compile". Only an explicit
-        # True opts in — a stray compiled_cache.bin can no longer silently enable
-        # the leak-prone reduce-overhead path (see review Finding #0).
-        if self.compile_model is not True:
-            return None
-
-        if self.compile_cache_path is not None:
-            path = Path(self.compile_cache_path)
-        else:
-            path = Path(self.model_path) / "compiled_cache.bin"
-
-        if path.is_file():
-            return path
-
-        raise FileNotFoundError(
-            f"compile_model=True but the compiled cache file was not found at {path}. "
-            f"Generate one with torch.compiler.save_cache_artifacts() after a warmup "
-            f"compile, or omit --compile-model / pass --no-compile to run eager."
-        )
 
     def infer_raw(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
         """Run raw inference on texts, returning BIO tokens.
