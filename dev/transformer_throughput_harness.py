@@ -20,11 +20,12 @@ It reports, per combination:
 
 Why this lives outside product code:
   * ``TransformerCore._forward_batch_direct`` hardcodes ``padding=True`` (longest)
-    and product code only exposes ``compile_model`` via a prebuilt mega-cache
-    (``mode="reduce-overhead"``). To sweep padding and compile modes anyway, this
-    harness applies two clearly-scoped local hacks (a tokenizer call-proxy and a
-    direct ``torch.compile`` on ``core._model``) that must never leak into
-    product code.
+    and the product batch pipeline no longer supports ``torch.compile`` at all —
+    it runs eager (compile was measured to add nothing at batch scale and its only
+    wired mode leaked reserved VRAM). To sweep padding and compile modes for
+    measurement anyway, this harness applies two clearly-scoped local hacks (a
+    tokenizer call-proxy and a direct ``torch.compile`` on ``core._model``) that
+    must never leak into product code.
 
 Running (must be a GPU box):
     python dev/transformer_throughput_harness.py \
@@ -275,15 +276,16 @@ def build_core(args: argparse.Namespace) -> TransformerCore:
     """Construct and load a TransformerCore for the requested configuration.
 
     Compile modes are applied here:
-        * ``eager``: ``compile_model=False`` (no torch.compile).
+        * ``eager``: load the model as-is (no torch.compile) — this is what the
+          product pipeline runs.
         * ``dynamic``: load uncompiled, then wrap ``core._model`` with
           ``torch.compile(..., mode="default", dynamic=True)``.
         * ``reduce-overhead``: load uncompiled, then wrap ``core._model`` with
           ``torch.compile(..., mode="reduce-overhead", dynamic=False)``.
 
-    The dynamic / reduce-overhead paths patch ``core._model`` directly because
-    product code only exposes ``mode="reduce-overhead"`` via a prebuilt cache
-    file. This is a harness-only shortcut, not a supported API.
+    The dynamic / reduce-overhead paths patch ``core._model`` directly. The
+    product batch pipeline no longer supports ``torch.compile`` at all (it runs
+    eager); these are harness-only shortcuts for measurement, not a supported API.
 
     Args:
         args: Parsed CLI arguments.
@@ -298,7 +300,6 @@ def build_core(args: argparse.Namespace) -> TransformerCore:
         dtype=_dtype_from_name(args.dtype),
         load_immediately=True,
         local_files_only=args.local_files_only,
-        compile_model=False,
         allow_huggingface_download=not args.local_files_only,
     )
 
