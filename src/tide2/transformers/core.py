@@ -602,7 +602,7 @@ class TransformerCore:
             return "not loaded"
 
         try:
-            model = self._pipeline.model
+            model = self.pipeline.model
             device = next(model.parameters()).device
             if device.type == "cuda":
                 device_name = torch.cuda.get_device_name(device.index)
