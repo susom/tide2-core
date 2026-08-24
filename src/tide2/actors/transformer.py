@@ -633,9 +633,14 @@ class TransformerInferenceActor:
                 if len(chunk) <= 1:
                     raise RuntimeError("CUDA OOM on a single text chunk") from e
 
-                batch_size = max(1, batch_size // 2)
+                # Derive the retry size from the chunk that actually OOMed, not
+                # the stored batch_size: when batch_size already exceeds the
+                # failing (e.g. tail) chunk, halving batch_size would retry the
+                # same slice unchanged. Basing it on len(chunk) guarantees every
+                # retry is strictly smaller and makes progress.
+                batch_size = max(1, len(chunk) // 2)
                 logger.warning(
-                    "CUDA OOM on %d texts; halving GPU batch size to %d and retrying", len(chunk), batch_size
+                    "CUDA OOM on %d texts; shrinking GPU batch size to %d and retrying", len(chunk), batch_size
                 )
                 # A1 already released the failed forward's tensors, so this
                 # reclaims real VRAM before the smaller retry.
