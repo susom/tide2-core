@@ -223,7 +223,7 @@ class TransformersRecognizer(EntityRecognizer):
 
         # Estimate token count for BERT-based tokenizers (roughly 4 chars per token).
         # This estimate is used ONLY for the single-pass-vs-chunk decision below.
-        estimated_tokens = int(len(text) / 4)
+        estimated_tokens = len(text) // 4
 
         # Process text in chunks if needed
         if estimated_tokens <= model_max_length:
@@ -247,16 +247,18 @@ class TransformersRecognizer(EntityRecognizer):
         # correct char<->token conversion internally. Passing a token count here
         # (as the buggy prior code did) triggered a second //4 conversion that
         # short-circuited long notes to only their first quarter, leaking tail PHI.
-        # ``return_metadata`` defaults to False, so this returns [start, end] pairs.
+        # ``return_metadata=False`` selects the [start, end] pair form; the cast
+        # narrows the splitter's declared union return to that concrete type.
         chunk_indexes = cast(
-            "list[list[int]]",
-            split_text_to_word_chunks(len(text), self.chunk_length, self.text_overlap_length),
+            list[list[int]],
+            split_text_to_word_chunks(len(text), self.chunk_length, self.text_overlap_length, return_metadata=False),
         )
 
         # Guarantee the chunk offsets span the whole document so no tail is skipped.
-        assert chunk_indexes[-1][1] == len(text), (
-            f"chunk coverage gap: last chunk ends at {chunk_indexes[-1][1]} but text is {len(text)} chars"
-        )
+        # Raise (not assert) so this PHI-coverage guard survives ``python -O``.
+        if not chunk_indexes or chunk_indexes[-1][1] != len(text):
+            last_end = chunk_indexes[-1][1] if chunk_indexes else 0
+            raise RuntimeError(f"chunk coverage gap: last chunk ends at {last_end} but text is {len(text)} chars")
 
         # Iterate over text chunks and run inference
         total_inference_time = 0.0
