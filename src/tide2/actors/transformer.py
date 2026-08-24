@@ -99,8 +99,9 @@ class TransformerInferenceActor:
         gpu_batch_size: int | None = None,
         short_seq_budget: float | None = None,
         tokenizer_workers: int | None = None,
-        tokenize_overlap: bool = False,
         allow_huggingface_download: bool = True,
+        *,
+        tokenize_overlap: bool = False,
     ) -> None:
         """
         Initialize the actor with a transformer model on GPU.
@@ -124,14 +125,15 @@ class TransformerInferenceActor:
                 floor (``transformer_cpus``), in which case it is pinned to that
                 floor so concurrent GPU actors do not oversubscribe the CPUs.
                 Set explicitly to give tokenization a fixed number of cores.
-            tokenize_overlap: If True, tokenize the next length-bucket group on a
-                background thread while the current group's GPU forward runs
-                (in-actor double-buffering). Off by default — an experimental
-                throughput lever whose win depends on the tokenize:forward ratio
-                for your workload; enable only if measurement shows GPU
-                starvation (see ``dev/transformer_throughput_harness.py``).
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
+            tokenize_overlap: Keyword-only. If True, tokenize the next
+                length-bucket group on a background thread while the current
+                group's GPU forward runs (in-actor double-buffering). Off by
+                default — an experimental throughput lever whose win depends on
+                the tokenize:forward ratio for your workload; enable only if
+                measurement shows GPU starvation (see
+                ``dev/transformer_throughput_harness.py``).
         """
         self.model_name = model_name
         self._tokenize_overlap = tokenize_overlap
@@ -595,12 +597,18 @@ class TransformerInferenceActor:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
                     # Re-run this group via the batch-shrink path (re-tokenizes).
-                    group_results = self._infer_group_with_batch_shrink(g_texts)
+                    # The whole-group forward just OOMed, so start the shrink at
+                    # half the group size and skip the redundant oversized retry.
+                    group_results = self._infer_group_with_batch_shrink(
+                        g_texts, initial_batch_size=max(1, len(g_texts) // 2)
+                    )
 
                 for original_i, preds in zip(group_idx, group_results, strict=True):
                     results[original_i] = preds
 
-    def _infer_group_with_batch_shrink(self, texts: list[str]) -> list[list[dict]]:
+    def _infer_group_with_batch_shrink(
+        self, texts: list[str], initial_batch_size: int | None = None
+    ) -> list[list[dict]]:
         """Run one length-homogeneous group, halving the batch on CUDA OOM.
 
         The group is already sized to fit at its longest member's length, so the
@@ -611,6 +619,10 @@ class TransformerInferenceActor:
 
         Args:
             texts: A length-homogeneous group of non-empty texts.
+            initial_batch_size: First per-forward batch size to try. Defaults to
+                the whole group (``len(texts)``). The overlap fallback passes
+                half the failed group size here so it skips the redundant retry
+                at the size that just OOMed. Clamped to ``[1, len(texts)]``.
 
         Returns:
             Raw token lists aligned to ``texts``.
@@ -621,7 +633,7 @@ class TransformerInferenceActor:
         """
         n = len(texts)
         out: list[list[dict] | None] = [None] * n
-        batch_size = n
+        batch_size = n if initial_batch_size is None else max(1, min(initial_batch_size, n))
 
         start = 0
         while start < n:
@@ -736,8 +748,9 @@ def create_transformer_actor(
     gpu_batch_size: int | None = None,
     short_seq_budget: float | None = None,
     tokenizer_workers: int | None = None,
-    tokenize_overlap: bool = False,
     allow_huggingface_download: bool = True,
+    *,
+    tokenize_overlap: bool = False,
 ) -> type[TransformerInferenceActor]:
     """
     Factory function to create a TransformerInferenceActor class with specific config.
@@ -755,10 +768,10 @@ def create_transformer_actor(
         short_seq_budget: Memory budget fraction for short sequences (None = auto).
         tokenizer_workers: Rayon thread-pool size for CPU tokenization
             (None = library default unless a CPU floor is assigned).
-        tokenize_overlap: If True, double-buffer tokenization against the GPU
-            forward (experimental; off by default).
         allow_huggingface_download: If True, fall back to HuggingFace Hub
             when local cache and GCS both miss.
+        tokenize_overlap: Keyword-only. If True, double-buffer tokenization
+            against the GPU forward (experimental; off by default).
 
     Returns:
         A class that can be used with Ray Data's map_batches().

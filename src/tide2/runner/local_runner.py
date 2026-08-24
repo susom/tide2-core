@@ -783,9 +783,10 @@ class LocalJobRunner:
         agg_num_cpus: float = 1.0,
         transformer_cpus: float | None = None,
         tokenizer_workers: int | None = None,
-        tokenize_overlap: bool = False,
         transformer_max_tasks_in_flight: int | None = None,
         enable_checkpoint: bool = True,
+        *,
+        tokenize_overlap: bool = False,
     ) -> dict[str, Any]:
         """
         Run transformer NER job with proper document chunking.
@@ -882,11 +883,6 @@ class LocalJobRunner:
                 without changing the actor's Ray CPU reservation. Feeding the GPU
                 faster is one of the cheapest throughput levers (review §4); tune
                 it with ``dev/transformer_throughput_harness.py``.
-            tokenize_overlap: If True, the GPU actor tokenizes the next
-                length-bucket group on a background thread while the current
-                group's forward runs (in-actor double-buffering). Experimental and
-                off by default — enable only if measurement shows the GPU starved
-                on tokenization for your workload.
             transformer_max_tasks_in_flight: Batches staged ahead per transformer
                 actor (``ActorPoolStrategy.max_tasks_in_flight_per_actor``). None
                 uses Ray's default (2). Raising it prefetches more batches so the
@@ -899,6 +895,11 @@ class LocalJobRunner:
                 stage regardless of the fractional CPU knobs above (see the
                 "Hardware sizing" section). Disabling it loses resume capability,
                 not correctness.
+            tokenize_overlap: Keyword-only. If True, the GPU actor tokenizes the
+                next length-bucket group on a background thread while the current
+                group's forward runs (in-actor double-buffering). Experimental and
+                off by default — enable only if measurement shows the GPU starved
+                on tokenization for your workload.
 
         Returns:
             Processing statistics dictionary

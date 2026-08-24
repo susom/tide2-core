@@ -9,7 +9,11 @@ CUDA — so they run in PR CI.
 
 from __future__ import annotations
 
+import inspect
+
 from tide2.actors.transformer import TransformerInferenceActor
+from tide2.actors.transformer import create_transformer_actor
+from tide2.runner.local_runner import LocalJobRunner
 
 
 class _OverlapFakeCore:
@@ -101,3 +105,57 @@ class TestTokenizeOverlap:
         # overlap forward_tokenized path.
         assert core.forward_calls == []
         assert core.infer_calls == [["x", "y", "z"]]
+
+    def test_overlap_oom_fallback_starts_at_half_group_size(self):
+        # M9: the whole-group forward just OOMed, so the shrink fallback must
+        # start at HALF the failed group size and skip the redundant oversized
+        # retry. Two equal-length groups of 4; force the first to OOM.
+        texts = [f"aa{i}" for i in range(8)]  # all length 3 -> stable order
+        core_probe = _OverlapFakeCore()
+        actor_probe = _make_actor(core_probe, cap=lambda _c: 4)
+        groups = actor_probe._bucket_groups(texts)
+        assert len(groups) == 2 and len(groups[0]) == 4  # precondition
+        first_group_texts = tuple(texts[i] for i in groups[0])
+
+        core = _OverlapFakeCore(oom_on={first_group_texts})
+        actor = _make_actor(core, cap=lambda _c: 4)
+
+        results = actor._run_inference_raw_with_oom_recovery(texts)
+
+        assert _markers(results) == texts  # complete and ordered
+        # First shrink forward is half the group (2), not the full 4 that OOMed.
+        assert core.infer_calls, "expected shrink fallback to run infer_raw_direct"
+        assert len(core.infer_calls[0]) == 2
+        assert core.infer_calls[0] == list(first_group_texts[:2])
+        # No infer call ever runs at the failed (full) group size.
+        assert all(len(call) <= 2 for call in core.infer_calls)
+
+
+class TestTokenizeOverlapSignature:
+    """H6: ``tokenize_overlap`` is keyword-only and last on every public entry."""
+
+    def _tokenize_overlap_param(self, func):
+        params = list(inspect.signature(func).parameters.values())
+        by_name = {p.name: p for p in params}
+        assert "tokenize_overlap" in by_name, f"tokenize_overlap missing from {func.__qualname__}"
+        return by_name["tokenize_overlap"], params
+
+    def test_constructor_keyword_only(self):
+        param, _ = self._tokenize_overlap_param(TransformerInferenceActor.__init__)
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_factory_keyword_only(self):
+        param, _ = self._tokenize_overlap_param(create_transformer_actor)
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_run_transformer_keyword_only(self):
+        param, _ = self._tokenize_overlap_param(LocalJobRunner.run_transformer)
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY
+
+    def test_factory_rejects_extra_positional(self):
+        # 8 positionals are allowed; a 9th (the old tokenize_overlap slot) must
+        # not be accepted positionally now that it is keyword-only.
+        import pytest
+
+        with pytest.raises(TypeError):
+            create_transformer_actor("m", None, None, None, None, None, None, True, True)  # ty: ignore[too-many-positional-arguments]
