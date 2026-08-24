@@ -18,6 +18,16 @@ It reports, per combination:
         that the OOM leak actually grows),
       - ``torch.cuda.mem_get_info``       (free / total device footprint).
 
+Cumulative sweep — memory columns are order-dependent:
+  * All batch sizes in one invocation reuse a single loaded (and, under
+    ``--compile-mode dynamic``/``reduce-overhead``, a single compiled) model in
+    one process. The run is a **cumulative sweep**: earlier combos warm the
+    caching allocator and, under the compile modes, accrete CUDA-graph/reserved
+    pools that later combos inherit. So the memory columns (``reserved_MB`` in
+    particular) are **order-dependent** and are not a clean per-combo baseline
+    under ``dynamic``/``reduce-overhead``. Throughput is unaffected. For an
+    isolated per-combo memory reading, run one ``--batch-size`` per process.
+
 Why this lives outside product code:
   * ``TransformerCore._forward_batch_direct`` hardcodes ``padding=True`` (longest)
     and the product batch pipeline no longer supports ``torch.compile`` at all —
@@ -566,6 +576,11 @@ def _parse_batch_sizes(values: list[str] | None) -> list[int]:
 
     Returns:
         A list of positive integer batch sizes.
+
+    Raises:
+        argparse.ArgumentTypeError: If any parsed value is less than 1 (a batch
+            size of 0 or negative is meaningless and would divide-by-zero or
+            loop forever downstream).
     """
     if not values:
         return [8]
@@ -574,7 +589,10 @@ def _parse_batch_sizes(values: list[str] | None) -> list[int]:
         for part in value.split(","):
             stripped = part.strip()
             if stripped:
-                sizes.append(int(stripped))
+                size = int(stripped)
+                if size < 1:
+                    raise argparse.ArgumentTypeError(f"--batch-size must be >= 1, got {size}")
+                sizes.append(size)
     return sizes
 
 
@@ -657,7 +675,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     index = _device_index(args.device) if is_cuda else -1
-    batch_sizes = _parse_batch_sizes(args.batch_size)
+    try:
+        batch_sizes = _parse_batch_sizes(args.batch_size)
+    except argparse.ArgumentTypeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
     if args.input:
         texts = load_input_texts(args.input, args.num_texts, args.max_chars)
@@ -670,6 +692,12 @@ def main(argv: list[str] | None = None) -> int:
         f"# harness: model={args.model} device={args.device} dtype={args.dtype} "
         f"compile={args.compile_mode} padding={args.padding} source={source} "
         f"num_texts={len(texts)} warmup={args.warmup} iters={args.iters}"
+    )
+    print(
+        "# NOTE: cumulative sweep in one process — all batch sizes reuse one "
+        "loaded/compiled model, so memory columns are order-dependent "
+        "(esp. reserved_MB under --compile-mode dynamic/reduce-overhead). "
+        "Run one --batch-size per process for an isolated per-combo memory baseline."
     )
 
     core = build_core(args)
