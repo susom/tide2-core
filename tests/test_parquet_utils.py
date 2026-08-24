@@ -203,6 +203,60 @@ class TestResolveFiltersDirectories:
         assert all(m.is_file() for m in result)
 
 
+class TestResolveNonStandaloneDoubleStar:
+    """Patterns where ``**`` is not a whole path component still resolve.
+
+    ``pathlib.Path.glob`` raises ``ValueError`` when ``**`` is embedded in a
+    larger component (e.g. ``part-**.parquet``); the resolver must fall back to
+    ``glob.glob(..., recursive=True)`` for those patterns rather than crashing.
+    """
+
+    def test_relative_partial_double_star_glob(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A relative ``part-**.parquet`` pattern matches ``part-*`` files."""
+        a = _touch(tmp_path / "part-0.parquet")
+        b = _touch(tmp_path / "part-1.parquet")
+        _touch(tmp_path / "other.parquet")
+        _touch(tmp_path / "part-2.txt")
+        monkeypatch.chdir(tmp_path)
+
+        result = _resolve_parquet_files("part-**.parquet")
+
+        assert result == sorted([Path("part-0.parquet"), Path("part-1.parquet")])
+        assert Path("part-0.parquet") == a.relative_to(tmp_path)
+        assert Path("part-1.parquet") == b.relative_to(tmp_path)
+
+    def test_absolute_partial_double_star_glob(self, tmp_path: Path) -> None:
+        """An absolute ``part-**.parquet`` pattern resolves via the fallback."""
+        a = _touch(tmp_path / "part-0.parquet")
+        b = _touch(tmp_path / "part-1.parquet")
+        _touch(tmp_path / "other.parquet")
+
+        pattern = str(tmp_path / "part-**.parquet")
+        result = _resolve_parquet_files(pattern)
+
+        assert result == sorted([a, b])
+        assert all(m.is_absolute() for m in result)
+
+    def test_partial_double_star_filters_directories(self, tmp_path: Path) -> None:
+        """The fallback still drops directories that match the pattern."""
+        keep = _touch(tmp_path / "part-0.parquet")
+        (tmp_path / "part-dir.parquet").mkdir()
+
+        pattern = str(tmp_path / "part-**.parquet")
+        result = _resolve_parquet_files(pattern)
+
+        assert result == [keep]
+
+    def test_partial_double_star_no_match_returns_empty(self, tmp_path: Path) -> None:
+        """A non-standalone ``**`` pattern with no matches returns ``[]``."""
+        _touch(tmp_path / "part-0.txt")
+
+        pattern = str(tmp_path / "part-**.parquet")
+        result = _resolve_parquet_files(pattern)
+
+        assert result == []
+
+
 class TestResolveOrdering:
     """Resolution order is deterministic (lexicographically sorted)."""
 
