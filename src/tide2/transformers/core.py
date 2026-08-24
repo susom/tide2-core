@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from transformers import AutoModelForTokenClassification
 from transformers import AutoTokenizer
@@ -313,7 +314,7 @@ class TransformerCore:
 
         self._pipeline = pipeline(**pipeline_kwargs)
 
-        # Store direct references for infer_raw_direct (bypasses HF pipeline dispatch)
+        # Store direct references for windowed inference (bypasses HF pipeline dispatch)
         self._model = model
         self._tokenizer = tokenizer
         self._id2label = model.config.id2label
@@ -361,82 +362,82 @@ class TransformerCore:
 
         return results
 
-    def infer_raw_direct(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run inference bypassing the HF pipeline dispatch loop.
+    def tokenize_ragged(self, texts: list[str]) -> Any:
+        """Tokenize a batch **once**, with no truncation, no padding, and offsets.
 
-        Tokenizes the entire batch in one call, runs a single GPU forward pass
-        (or sub-batched forward passes if batch_size < len(texts)), and extracts
-        raw token predictions using offset_mapping. This avoids the per-text
-        preprocess/postprocess Python loops in HuggingFace's ChunkPipeline.
-
-        Output format matches infer_raw(): list of lists of dicts with keys
-        {entity, score, start, end, word, index}.
+        This is the single tokenization per input batch. It returns the *content*
+        tokens only (``add_special_tokens=False``) so the caller can window in
+        token space against the model's real budget (``model_max_length`` minus
+        :attr:`num_special_tokens`) and add the special tokens per window at
+        forward time (:meth:`forward_windows`). Because tokenization happens here
+        exactly once, windowing and OOM retries reuse this output and never
+        re-tokenize.
 
         Args:
-            texts: List of text strings to process.
-            batch_size: Max texts per GPU forward pass. If None, process all at once.
+            texts: List of text strings to tokenize, in the caller's order.
 
         Returns:
-            List of prediction lists, one per input text.
+            A ``BatchEncoding`` whose ``input_ids`` and ``offset_mapping`` are
+            **ragged** Python lists — one list per input text (no tensors, since
+            padding is off). ``input_ids[i]`` are the content token ids of
+            ``texts[i]`` and ``offset_mapping[i]`` the matching ``(start, end)``
+            character spans into ``texts[i]``. Requires a fast tokenizer (for
+            ``offset_mapping``); tide2's models all ship one.
         """
         self._ensure_pipeline_loaded()
+        return self._tokenizer(
+            texts,
+            add_special_tokens=False,
+            truncation=False,
+            padding=False,
+            return_offsets_mapping=True,
+        )
 
-        if not texts:
-            return []
+    def forward_windows(self, windows: list[tuple[list[int], list[tuple[int, int]], str]]) -> list[list[dict]]:
+        """GPU forward + prediction extraction for pre-tokenized token windows.
 
-        if batch_size is None:
-            batch_size = len(texts)
-
-        all_results: list[list[dict]] = []
-
-        for start in range(0, len(texts), batch_size):
-            sub_texts = texts[start : start + batch_size]
-            sub_results = self._forward_batch_direct(sub_texts)
-            all_results.extend(sub_results)
-
-        return all_results
-
-    def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
-        """Single batch: tokenize → GPU forward → extract predictions.
+        Each window is ``(content_ids, offsets, text)`` where ``content_ids`` are
+        the token ids of one window **without** special tokens and ``offsets`` are
+        the matching ``(start, end)`` character spans into ``text`` — both taken
+        directly from a single :meth:`tokenize_ragged` call, so they are already
+        chunk-relative and never re-based. This method adds the model's special
+        tokens, right-pads every window to the batch's longest member, runs one
+        forward pass, and extracts raw BIO predictions.
 
         Releases every CUDA-resident tensor in a ``finally`` (Fix A1) so that on
         OOM no exception traceback can pin the failed forward's VRAM — this is
         what lets the caller's ``empty_cache()`` reclaim before retrying at a
-        smaller batch size. See
-        :meth:`tide2.actors.transformer.TransformerInferenceActor._run_inference_raw_with_oom_recovery`.
+        smaller window-batch. Because the windows are supplied pre-tokenized, that
+        retry never re-tokenizes. See
+        :meth:`tide2.actors.transformer.TransformerInferenceActor._forward_windows_with_shrink`.
+
+        Args:
+            windows: List of ``(content_ids, offsets, text)`` tuples, one per
+                window, in the order the caller will consume predictions.
+
+        Returns:
+            One prediction list per window, aligned to ``windows``. Each dict has
+            keys ``{entity, score, start, end, word, index}``; ``index`` is the
+            token's position in the padded, special-token-bearing sequence, the
+            same convention as the rest of the pipeline.
         """
+        if not windows:
+            return []
+
         model = self._model
-        tokenizer = self._tokenizer
         device = next(model.parameters()).device
+        input_ids, attention_mask, special_np, offset_np, texts = self._build_window_batch(windows)
 
-        # Batch tokenize (CPU tensors)
-        encoded = tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
-            return_offsets_mapping=True,
-            return_special_tokens_mask=True,
-        )
-
-        offset_mapping = encoded.pop("offset_mapping")  # (batch, seq_len, 2) — keep on CPU
-        special_tokens_mask = encoded.pop("special_tokens_mask")  # (batch, seq_len) — keep on CPU
-
-        # Everything CUDA-resident is tracked so ``finally`` can free it all, even
-        # if ``.to(device)`` or the forward pass raises CUDA OOM. Move tensors one
-        # at a time into ``encoded_gpu`` so each already-moved tensor is referenced
-        # (and thus freeable) if a later move OOMs mid-way.
-        encoded_gpu: dict[str, Any] = {}
-        logits = probs = scores_max = label_ids = None
+        # Track every CUDA-resident tensor so ``finally`` can free it all, even if
+        # ``.to(device)`` or the forward raises CUDA OOM.
+        input_ids_gpu = attention_mask_gpu = logits = probs = scores_max = label_ids = None
         try:
-            for k, v in encoded.items():
-                encoded_gpu[k] = v.to(device)
+            input_ids_gpu = input_ids.to(device)
+            attention_mask_gpu = attention_mask.to(device)
 
-            # Single forward pass
             with torch.inference_mode():
-                logits = model(**encoded_gpu).logits  # (batch, seq_len, num_labels)
+                logits = model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu).logits
 
-            # Softmax + argmax on GPU, then transfer to CPU
             probs = torch.softmax(logits, dim=-1)
             scores_max, label_ids = probs.max(dim=-1)  # (batch, seq_len)
 
@@ -446,17 +447,104 @@ class TransformerCore:
             # Drop this frame's references to every GPU tensor. Without this an
             # exception traceback would keep them alive and empty_cache() could not
             # reclaim; the CPU numpy copies above are already detached from CUDA.
-            encoded_gpu.clear()
-            del encoded_gpu, logits, probs, scores_max, label_ids
+            del input_ids_gpu, attention_mask_gpu, logits, probs, scores_max, label_ids
 
-        offset_np = offset_mapping.numpy()
-        special_np = special_tokens_mask.numpy()
+        return self._extract_window_predictions(scores_np, label_ids_np, special_np, offset_np, texts)
 
-        # Extract per-text predictions
+    def _special_token_affixes(self) -> tuple[list[int], list[int]]:
+        """The special token ids the tokenizer wraps a single sequence with.
+
+        Returns ``(prefix_ids, suffix_ids)`` — e.g. ``([CLS], [SEP])`` for BERT or
+        ``([<s>], [</s>])`` for RoBERTa. Derived once by diffing a probe encoding
+        with and without special tokens, so it is architecture- and version-robust
+        (transformers 5.x dropped ``build_inputs_with_special_tokens`` /
+        ``prepare_for_model`` and only implements ``get_special_tokens_mask`` for
+        already-formatted sequences). Cached on the instance.
+        """
+        cached = getattr(self, "_special_affixes", None)
+        if cached is not None:
+            return cached
+
+        tokenizer = self._tokenizer
+        probe = "hello"
+        with_sp = tokenizer(probe, add_special_tokens=True)["input_ids"]
+        without = tokenizer(probe, add_special_tokens=False)["input_ids"]
+        prefix: list[int] = []
+        suffix: list[int] = []
+        span = len(without)
+        for i in range(len(with_sp) - span + 1):
+            if with_sp[i : i + span] == without:
+                prefix = list(with_sp[:i])
+                suffix = list(with_sp[i + span :])
+                break
+
+        self._special_affixes = (prefix, suffix)
+        return prefix, suffix
+
+    def _build_window_batch(
+        self, windows: list[tuple[list[int], list[tuple[int, int]], str]]
+    ) -> tuple[Any, Any, Any, Any, list[str]]:
+        """Add special tokens and right-pad windows into a single forward batch.
+
+        Returns ``(input_ids, attention_mask, special_np, offset_np, texts)``:
+        two CPU ``torch`` tensors for the model plus numpy ``special``/``offset``
+        arrays aligned to the padded sequence for extraction. Padding positions are
+        marked special (so they are skipped) and carry a ``(0, 0)`` offset.
+        """
+        tokenizer = self._tokenizer
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = 0
+
+        prefix, suffix = self._special_token_affixes()
+        n_pre, n_suf = len(prefix), len(suffix)
+        pre_offsets = [(0, 0)] * n_pre
+        suf_offsets = [(0, 0)] * n_suf
+        pre_special = [1] * n_pre
+        suf_special = [1] * n_suf
+
+        n = len(windows)
+        full_ids_list: list[list[int]] = []
+        special_list: list[list[int]] = []
+        offset_list: list[list[tuple[int, int]]] = []
+        texts: list[str] = []
+        for content_ids, offsets, text in windows:
+            ids = list(content_ids)
+            # Wrap the content tokens with the model's special-token affixes and
+            # align the special mask + offsets: special positions carry a (0, 0)
+            # placeholder and are skipped at extraction; content positions keep the
+            # window's char offsets straight from the single tokenization.
+            full_ids_list.append(prefix + ids + suffix)
+            special_list.append(pre_special + [0] * len(ids) + suf_special)
+            offset_list.append(pre_offsets + [tuple(o) for o in offsets] + suf_offsets)
+            texts.append(text)
+
+        max_len = max(len(ids) for ids in full_ids_list)
+
+        input_ids = torch.full((n, max_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((n, max_len), dtype=torch.long)
+        special_np = np.ones((n, max_len), dtype=bool)  # padding => special => skipped
+        offset_np = np.zeros((n, max_len, 2), dtype=np.int64)
+        for i, ids in enumerate(full_ids_list):
+            length = len(ids)
+            input_ids[i, :length] = torch.tensor(ids, dtype=torch.long)
+            attention_mask[i, :length] = 1
+            special_np[i, :length] = np.asarray(special_list[i], dtype=bool)
+            offset_np[i, :length] = np.asarray(offset_list[i], dtype=np.int64)
+
+        return input_ids, attention_mask, special_np, offset_np, texts
+
+    def _extract_window_predictions(
+        self, scores_np: Any, label_ids_np: Any, special_np: Any, offset_np: Any, texts: list[str]
+    ) -> list[list[dict]]:
+        """Turn per-position scores/labels into raw BIO predictions per window.
+
+        Skips special/padding positions and ignored labels; ``index`` is the
+        token's position in the padded, special-token-bearing sequence.
+        """
         id2label = self._id2label
         ignore = self._ignore_labels_set
         results: list[list[dict]] = []
-
         for i, text in enumerate(texts):
             preds: list[dict] = []
             for j in range(scores_np.shape[1]):
@@ -477,7 +565,6 @@ class TransformerCore:
                     }
                 )
             results.append(preds)
-
         return results
 
     def infer_single_raw(self, text: str) -> list[dict]:
@@ -558,6 +645,18 @@ class TransformerCore:
         """Maximum input length for the tokenizer."""
         pipeline_instance = self._ensure_pipeline_loaded()
         return getattr(pipeline_instance.tokenizer, "model_max_length", 512)
+
+    @property
+    def num_special_tokens(self) -> int:
+        """Special tokens the tokenizer adds around a single sequence.
+
+        For a single sequence this is typically 2 (e.g. BERT's ``[CLS]``/``[SEP]``
+        or RoBERTa's ``<s>``/``</s>``). Callers subtract it from
+        :attr:`model_max_length` to get the per-window content-token budget used
+        for token-space windowing.
+        """
+        self._ensure_pipeline_loaded()
+        return int(self._tokenizer.num_special_tokens_to_add(pair=False))
 
     def get_device_info(self) -> str:
         """Get current device information."""
