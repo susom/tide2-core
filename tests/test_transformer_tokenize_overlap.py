@@ -131,6 +131,43 @@ class TestTokenizeOverlap:
         assert all(len(call) <= 2 for call in core.infer_calls)
 
 
+class _ShrinkFakeCore:
+    """Fake core whose ``infer_raw_direct`` OOMs on chunks of >= 2 texts that
+    contain a poison text, so the shrink loop's retry sizing can be observed.
+    """
+
+    def __init__(self, poison: str) -> None:
+        self.poison = poison
+        self.infer_calls: list[list[str]] = []
+
+    def infer_raw_direct(self, texts, batch_size=None):
+        self.infer_calls.append(list(texts))
+        if self.poison in texts and len(texts) >= 2:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 MiB.")
+        return [[{"marker": t}] for t in texts]
+
+
+class TestBatchShrinkProgress:
+    """The shrink loop derives the retry size from the failed chunk, not the
+    stored batch size, so a tail chunk smaller than batch_size still shrinks."""
+
+    def test_tail_oom_retry_derives_from_chunk_not_batch_size(self):
+        texts = [f"t{i}" for i in range(6)]
+        core = _ShrinkFakeCore(poison="t5")
+        actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
+        actor._core = core
+
+        # initial_batch_size=4 > the 2-text tail (t4,t5): the tail OOMs, and the
+        # retry must drop to len(chunk)//2 == 1 rather than batch_size//2 == 2
+        # (which would re-run the identical failing 2-text slice).
+        results = actor._infer_group_with_batch_shrink(texts, initial_batch_size=4)
+
+        assert [r[0]["marker"] for r in results] == texts  # complete and ordered
+        sizes = [len(c) for c in core.infer_calls]
+        assert sizes == [4, 2, 1, 1]  # the failed 2-text tail is never retried at size 2
+        assert sizes.count(2) == 1
+
+
 class TestTokenizeOverlapSignature:
     """H6: ``tokenize_overlap`` is keyword-only and last on every public entry."""
 
