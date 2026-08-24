@@ -578,9 +578,10 @@ def _parse_batch_sizes(values: list[str] | None) -> list[int]:
         A list of positive integer batch sizes.
 
     Raises:
-        argparse.ArgumentTypeError: If any parsed value is less than 1 (a batch
-            size of 0 or negative is meaningless and would divide-by-zero or
-            loop forever downstream).
+        argparse.ArgumentTypeError: If any parsed value is not an integer, or is
+            less than 1 (a batch size of 0 or negative is meaningless and would
+            divide-by-zero or loop forever downstream). Raised as
+            ArgumentTypeError so main() reports it as a clean parse error/exit 2.
     """
     if not values:
         return [8]
@@ -589,7 +590,10 @@ def _parse_batch_sizes(values: list[str] | None) -> list[int]:
         for part in value.split(","):
             stripped = part.strip()
             if stripped:
-                size = int(stripped)
+                try:
+                    size = int(stripped)
+                except ValueError as e:
+                    raise argparse.ArgumentTypeError(f"--batch-size must be an integer, got {stripped!r}") from e
                 if size < 1:
                     raise argparse.ArgumentTypeError(f"--batch-size must be >= 1, got {size}")
                 sizes.append(size)

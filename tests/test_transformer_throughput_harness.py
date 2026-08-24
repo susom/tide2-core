@@ -38,3 +38,10 @@ class TestParseBatchSizes:
     def test_rejects_non_positive(self, bad: str) -> None:
         with pytest.raises(argparse.ArgumentTypeError):
             harness._parse_batch_sizes([bad])
+
+    @pytest.mark.parametrize("bad", ["abc", "8,abc", "1.5", "4, x ,8"])
+    def test_rejects_non_integer(self, bad: str) -> None:
+        # A non-integer must surface as ArgumentTypeError (which main() catches
+        # for a clean exit 2), not a raw ValueError traceback.
+        with pytest.raises(argparse.ArgumentTypeError):
+            harness._parse_batch_sizes([bad])
