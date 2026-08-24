@@ -43,6 +43,7 @@ Optional pass-through columns:
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import sys
@@ -75,7 +76,14 @@ def _resolve_parquet_files(path: str | Path) -> list[Path]:
     pattern = Path(str(path))
     base = Path(pattern.anchor) if pattern.is_absolute() else Path()
     rel = pattern.relative_to(pattern.anchor) if pattern.is_absolute() else pattern
-    matches = sorted(base.glob(str(rel)))
+    try:
+        matches = sorted(base.glob(str(rel)))
+    except ValueError:
+        # Path.glob rejects patterns where "**" is not a standalone path
+        # component (e.g. "part-**.parquet"). glob.glob accepts "**" as a
+        # substring, so fall back to it for exactly those patterns while keeping
+        # Path.glob (and the PTH207 cleanup) for the well-formed cases above.
+        matches = sorted(Path(m) for m in glob.glob(str(path), recursive=True))  # noqa: PTH207
     return [m for m in matches if m.is_file()]
 
 
