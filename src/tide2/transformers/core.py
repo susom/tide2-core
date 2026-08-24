@@ -407,6 +407,17 @@ class TransformerCore:
         Assumes the pipeline is already loaded (``infer_raw_direct`` and the Ray
         actor both ensure this); it does not lazily load, so the CPU tokenize can
         run on a worker thread without racing model initialization.
+
+        Args:
+            texts: List of text strings to tokenize, in the order the caller will
+                consume predictions.
+
+        Returns:
+            The ``BatchEncoding`` for ``texts``. Rows correspond positionally to
+            ``texts`` (row ``i`` is ``texts[i]``), so it must be paired with the
+            *same* ``texts`` list — in the same order — when handed to
+            :meth:`forward_tokenized`. Carries ``offset_mapping`` and
+            ``special_tokens_mask`` alongside the model inputs.
         """
         return self._tokenizer(
             texts,
@@ -434,6 +445,20 @@ class TransformerCore:
         this is what lets the caller's ``empty_cache()`` reclaim before retrying
         at a smaller batch size. See
         :meth:`tide2.actors.transformer.TransformerInferenceActor._run_inference_raw_with_oom_recovery`.
+
+        Args:
+            encoded: A ``BatchEncoding`` from :meth:`tokenize_batch` for the same
+                ``texts``. Its rows must align positionally with ``texts`` (row
+                ``i`` is the tokenization of ``texts[i]``); the two are consumed
+                together, so passing a mismatched or reordered pair silently
+                misaligns predictions.
+            texts: The exact list, in the same order, that produced ``encoded``.
+                Used to size the output and read the original character spans.
+
+        Returns:
+            One prediction list per input text, aligned to ``texts`` (element
+            ``i`` holds the raw BIO token dicts for ``texts[i]``). Each dict has
+            keys ``{entity, score, start, end, word, index}``.
         """
         model = self._model
         device = next(model.parameters()).device
