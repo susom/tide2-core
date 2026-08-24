@@ -7,8 +7,11 @@ device is present, so it auto-skips in PR CI (no GPU) and runs on a GPU box.
 
 These assert real GPU-memory behavior — no monotonic growth in either
 ``allocated`` **or** ``reserved``, OOM recovery, peak headroom, full block
-coverage, and bounded ``reserved`` across shape churn. The CPU control-flow
-guarantees live in ``tests/test_transformer_oom_recovery.py``.
+coverage, and bounded ``reserved`` across shape churn. Crucially they also assert
+the handled-OOM path *actually fired* (the actor's handled-OOM counter is > 0) so
+the scenario cannot pass vacuously, and that the whole-device footprint returns to
+baseline after recovery. The CPU control-flow guarantees live in
+``tests/test_transformer_oom_recovery.py``.
 """
 
 from pathlib import Path
@@ -42,6 +45,10 @@ def test_oom_fix_holds(mode, tmp_path):
         limit=256 if mode == "direct" else 400,
         batch=128,
         passes=10,
+        # Rows fed to the forced-OOM forward. Direct tiles the longest real texts;
+        # ray synthesizes this many near-max-length notes. The model runs in fp16,
+        # so ~4096 full-length half-precision sequences (~45GB) are needed to
+        # overflow a 24GB L4 and force the handled-OOM path.
         oom_count=4096,
         compile_churn=False,
         workdir=str(tmp_path),
