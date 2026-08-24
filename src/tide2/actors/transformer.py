@@ -87,8 +87,10 @@ class TransformerInferenceActor:
     - Batch inference with automatic OOM recovery
     - JSON serialization of raw token predictions
 
-    Batch size is controlled by Ray Data's map_batches(batch_size=N) — the actor
-    processes whatever batch it receives without internal sub-batching.
+    Ray Data's map_batches(batch_size=N) sets the batch the actor receives, but
+    the actor owns its own adaptive sub-batching: it feeds the GPU in chunks of
+    an adaptive per-forward batch size and, on CUDA OOM, shrinks that chunk and
+    retries so a batch that is too large for VRAM recovers instead of failing.
     """
 
     def __init__(
