@@ -9,6 +9,7 @@ import copy
 import logging
 import time
 from typing import Any
+from typing import cast
 
 from presidio_analyzer import AnalysisExplanation
 from presidio_analyzer import EntityRecognizer
@@ -220,12 +221,12 @@ class TransformersRecognizer(EntityRecognizer):
         # Get model max length for chunking decisions
         model_max_length = self._core.model_max_length
 
-        # Estimate token count for BERT-based tokenizers (roughly 4 chars per token)
+        # Estimate token count for BERT-based tokenizers (roughly 4 chars per token).
+        # This estimate is used ONLY for the single-pass-vs-chunk decision below.
         estimated_tokens = int(len(text) / 4)
-        text_length = estimated_tokens
 
         # Process text in chunks if needed
-        if text_length <= model_max_length:
+        if estimated_tokens <= model_max_length:
             inference_start = time.time()
             # Use core for single text, then aggregate
             raw_preds = self._core.infer_single_raw(text)
@@ -239,9 +240,23 @@ class TransformersRecognizer(EntityRecognizer):
             from tide2.utils.text_processing import aggregate_bio_tokens
 
             return aggregate_bio_tokens(predictions, text)
-        logger.info(f"Splitting text into chunks, length {text_length} > {model_max_length}")
+        logger.info(f"Splitting text into chunks, ~{estimated_tokens} tokens > {model_max_length}")
         predictions = []
-        chunk_indexes = split_text_to_word_chunks(text_length, self.chunk_length, self.text_overlap_length)
+        # Pass the CHARACTER length to the splitter. ``chunk_length`` and
+        # ``text_overlap_length`` are in TOKENS; the splitter performs the single,
+        # correct char<->token conversion internally. Passing a token count here
+        # (as the buggy prior code did) triggered a second //4 conversion that
+        # short-circuited long notes to only their first quarter, leaking tail PHI.
+        # ``return_metadata`` defaults to False, so this returns [start, end] pairs.
+        chunk_indexes = cast(
+            "list[list[int]]",
+            split_text_to_word_chunks(len(text), self.chunk_length, self.text_overlap_length),
+        )
+
+        # Guarantee the chunk offsets span the whole document so no tail is skipped.
+        assert chunk_indexes[-1][1] == len(text), (
+            f"chunk coverage gap: last chunk ends at {chunk_indexes[-1][1]} but text is {len(text)} chars"
+        )
 
         # Iterate over text chunks and run inference
         total_inference_time = 0.0
