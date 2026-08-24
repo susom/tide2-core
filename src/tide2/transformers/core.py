@@ -6,6 +6,7 @@ for transformer-based NER inference, used by both the Presidio recognizer and
 the Ray actor.
 """
 
+import inspect
 import logging
 import socket
 import threading
@@ -248,11 +249,15 @@ class TransformerCore:
             device_for_pipeline = None  # Let pipeline infer from model
 
         elif self.device == "cpu":
-            # Force CPU placement
+            # Force CPU placement.
+            # Honor a per-model DTYPE pin (e.g. DeBERTa-v1's float32) on CPU, but do
+            # NOT force self.dtype blindly: its default is float16, which many CPU
+            # kernels cannot run. When no DTYPE is configured, load as float32.
             model = AutoModelForTokenClassification.from_pretrained(
                 self.model_path,
                 low_cpu_mem_usage=True,
                 trust_remote_code=False,
+                dtype=(self.dtype if self._config.get("DTYPE") else torch.float32),
                 local_files_only=self.local_files_only,
             )
             model.eval()
@@ -287,10 +292,14 @@ class TransformerCore:
             model.eval()
             device_for_pipeline = device_idx
         else:
+            # Auto-detected CPU fallback (no CUDA available). Same DTYPE policy as the
+            # explicit "cpu" branch: honor a configured DTYPE, otherwise float32 so we
+            # never hand a float16 default to CPU kernels that cannot run it.
             model = AutoModelForTokenClassification.from_pretrained(
                 self.model_path,
                 low_cpu_mem_usage=True,
                 trust_remote_code=False,
+                dtype=(self.dtype if self._config.get("DTYPE") else torch.float32),
                 local_files_only=self.local_files_only,
             )
             model.eval()
@@ -517,8 +526,48 @@ class TransformerCore:
 
         return results
 
+    def _single_text_truncation_kwargs(self, pipeline_instance: Any) -> dict[str, Any]:
+        """Resolve truncation kwargs for the single-text pipeline call.
+
+        The batch path (:meth:`_forward_batch_direct`) tokenizes with
+        ``truncation=True`` so ``tokenizer.model_max_length`` bounds every
+        sequence. The single-text path must enforce the same bound, otherwise an
+        over-long chunk overflows the model's position embeddings.
+
+        transformers>=5's ``TokenClassificationPipeline`` already truncates to
+        ``tokenizer.model_max_length`` inside ``preprocess`` and *rejects* a
+        ``truncation`` kwarg (its ``_sanitize_parameters`` raises ``TypeError``),
+        so we only forward ``truncation`` / ``max_length`` to pipelines whose
+        ``_sanitize_parameters`` actually accepts them. When it does not, the
+        pipeline's built-in truncation still applies.
+
+        Args:
+            pipeline_instance: The loaded HuggingFace pipeline.
+
+        Returns:
+            Keyword arguments to pass to the pipeline call (possibly empty).
+        """
+        try:
+            params = inspect.signature(pipeline_instance._sanitize_parameters).parameters
+        except (ValueError, TypeError, AttributeError):
+            # Mock/non-introspectable callables (e.g. in tests) or C-level
+            # signatures: rely on the pipeline's built-in truncation.
+            return {}
+
+        accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        kwargs: dict[str, Any] = {}
+        if "truncation" in params or accepts_var_kw:
+            kwargs["truncation"] = True
+            if "max_length" in params or accepts_var_kw:
+                kwargs["max_length"] = self.model_max_length
+        return kwargs
+
     def infer_single_raw(self, text: str) -> list[dict]:
         """Run raw inference on a single text.
+
+        The tokenizer's (resolved) ``model_max_length`` is enforced so an
+        over-long text/chunk is truncated instead of overflowing the model's
+        position embeddings, matching the batch path.
 
         Args:
             text: Text to process
@@ -531,7 +580,7 @@ class TransformerCore:
         if not text:
             return []
 
-        return pipeline_instance(text)
+        return pipeline_instance(text, **self._single_text_truncation_kwargs(pipeline_instance))
 
     def infer_aggregated(self, text: str) -> list[dict]:
         """Run inference on a single text with BIO aggregation.
