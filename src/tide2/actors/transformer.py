@@ -31,6 +31,7 @@ Usage with Ray Data:
 
 import json
 import logging
+import math
 import os
 from typing import Any
 from typing import cast
@@ -136,7 +137,7 @@ class TransformerInferenceActor:
 
         try:
             assigned = ray.get_runtime_context().get_assigned_resources()
-            assigned_cpus = int(assigned.get("CPU", 0) or 0)
+            assigned_cpus = self._cpu_floor(assigned.get("CPU", 0))
         except Exception:
             assigned_cpus = 0
 
@@ -212,6 +213,27 @@ class TransformerInferenceActor:
             f"device={self._core.get_device_info()}, gpu_batch_size={self._gpu_batch_size}, "
             f"short_seq_budget={self._short_seq_budget():.2f}"
         )
+
+    @staticmethod
+    def _cpu_floor(assigned_cpu: float | None) -> int:
+        """Round a Ray CPU reservation up to a whole tokenizer-worker floor.
+
+        Ray can assign *fractional* CPUs (e.g. ``transformer_cpus=0.25`` to pack
+        several GPU actors onto one node). Truncating with ``int()`` would map any
+        fraction below 1.0 to ``0`` and leave the fast tokenizer's rayon pool at
+        all cores, so co-located GPU actors oversubscribe the CPUs. ``math.ceil``
+        instead counts any positive reservation as at least one worker; ``0`` (a
+        GPU-pinned actor with no CPU floor) stays ``0``.
+
+        Args:
+            assigned_cpu: The ``CPU`` value from Ray's assigned resources (may be
+                fractional, ``0``, or ``None``).
+
+        Returns:
+            The whole-number CPU floor: ``ceil(assigned_cpu)`` for positive
+            values, else ``0``.
+        """
+        return math.ceil(assigned_cpu or 0)
 
     @staticmethod
     def _configure_tokenizer_parallelism(workers: int) -> None:

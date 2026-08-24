@@ -48,3 +48,29 @@ class TestConfigureTokenizerParallelism:
         import os
 
         assert "RAYON_NUM_THREADS" not in os.environ
+
+
+class TestCpuFloor:
+    """_cpu_floor rounds fractional Ray CPU reservations up to a worker floor."""
+
+    @pytest.mark.parametrize(
+        ("assigned", "expected"),
+        [
+            (0, 0),
+            (0.0, 0),
+            (None, 0),
+            (0.25, 1),
+            (0.5, 1),
+            (0.99, 1),
+            (1, 1),
+            (1.0, 1),
+            (1.5, 2),
+            (2, 2),
+            (2.0, 2),
+            (4, 4),
+        ],
+    )
+    def test_ceils_positive_fractions(self, assigned: float | None, expected: int) -> None:
+        # A fractional pin (e.g. transformer_cpus=0.25) must count as >= 1 worker,
+        # never truncate to 0 (which would leave the rayon pool at all cores).
+        assert TransformerInferenceActor._cpu_floor(assigned) == expected
