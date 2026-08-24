@@ -1,5 +1,7 @@
 """Tests for utils/text_processing.py — chunking, BIO aggregation, span reconstruction."""
 
+import itertools
+
 import pytest
 
 from tide2.utils.text_processing import _finalize_span
@@ -66,6 +68,19 @@ class TestSplitTextToWordChunks:
         result = split_text_to_word_chunks(1000, 50, 10)
         # Last chunk should reach end of text
         assert result[-1][1] == 1000
+
+    def test_long_note_chunks_cover_to_final_char(self):
+        # Regression for C2: with production token-space params (CHUNK_SIZE=512,
+        # CHUNK_OVERLAP_SIZE=40), a long note must be fully covered to its last
+        # character, and consecutive chunks must overlap (no gaps in coverage).
+        char_len = 5170  # ~1292 estimated tokens, well past model_max_length
+        result = split_text_to_word_chunks(char_len, 512, 40)
+        assert len(result) > 1
+        assert result[0][0] == 0
+        assert result[-1][1] == char_len
+        # No gaps: each chunk starts before the previous chunk ends.
+        for prev, curr in itertools.pairwise(result):
+            assert curr[0] < prev[1]
 
 
 class TestSortTokensByPosition:
