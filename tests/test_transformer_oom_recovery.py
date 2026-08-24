@@ -145,6 +145,16 @@ class TestBatchShrinkRecovery:
         assert len(core.call_sizes) > 1
         # The final successful chunks are size 1 (shrunk from the full batch).
         assert core.call_sizes[-1] == 1
+        # Every shrink is a handled OOM, so the counter must have advanced.
+        assert actor._handled_oom_count > 0
+
+    def test_handled_oom_counter_stays_zero_without_oom(self):
+        # No OOM (threshold high) => the recovery path never fires, so the
+        # handled-OOM counter must stay at zero.
+        core = _FakeCore(oom_threshold=100)
+        actor = _make_actor(core)
+        actor._run_inference_raw_with_oom_recovery([f"t{i}" for i in range(4)])
+        assert getattr(actor, "_handled_oom_count", 0) == 0
 
     @patch("tide2.actors.transformer.torch.cuda.empty_cache")
     @patch("tide2.actors.transformer.torch.cuda.is_available", return_value=True)

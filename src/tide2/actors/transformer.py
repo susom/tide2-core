@@ -32,6 +32,7 @@ Usage with Ray Data:
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any
 from typing import cast
 
@@ -120,6 +121,11 @@ class TransformerInferenceActor:
                 when local cache and GCS both miss.
         """
         self.model_name = model_name
+
+        # Count of CUDA OOMs this actor caught and recovered from (by shrinking
+        # the forward batch). Read by the GPU OOM-recovery test to prove the
+        # handled-OOM path was actually exercised, not skipped.
+        self._handled_oom_count = 0
 
         # Determine device for explicit GPU placement
         if torch.cuda.is_available():
@@ -379,6 +385,25 @@ class TransformerInferenceActor:
             peak,
         )
 
+    def _record_handled_oom(self) -> None:
+        """Record a handled CUDA OOM to a file when ``TIDE2_OOM_COUNT_FILE`` is set.
+
+        Diagnostics-only hook for the Ray-driven GPU OOM-recovery test: the
+        driver cannot read a Ray actor's in-process ``_handled_oom_count`` (the
+        actor runs in a separate worker process), so the actor appends a marker
+        line to a shared file. With a single GPU actor there is exactly one
+        writer, so no locking is needed. A no-op unless the env var is set, so it
+        adds no overhead in production.
+        """
+        path = os.environ.get("TIDE2_OOM_COUNT_FILE")
+        if not path:
+            return
+        try:
+            with Path(path).open("a") as f:
+                f.write("1\n")
+        except OSError:
+            logger.warning("could not record handled OOM to %s", path, exc_info=True)
+
     def _effective_batch_size(self, texts: list[str]) -> int:
         """Compute batch size adapted to actual text lengths.
 
@@ -464,6 +489,12 @@ class TransformerInferenceActor:
 
                 if len(chunk) <= 1:
                     raise RuntimeError("CUDA OOM on a single text chunk") from e
+
+                # Count the handled OOM so tests can prove the recovery path ran.
+                # Defensive getattr: actors built via __new__ in unit tests skip
+                # __init__ and so never set _handled_oom_count.
+                self._handled_oom_count = getattr(self, "_handled_oom_count", 0) + 1
+                self._record_handled_oom()
 
                 batch_size = max(1, batch_size // 2)
                 logger.warning(
