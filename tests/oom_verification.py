@@ -54,6 +54,12 @@ BASELINE_TOLERANCE_MB = 128.0
 # Reserved (caching allocator / CUDA-graph pools) grows in larger, coarser steps
 # than allocated, so it needs a looser return-to-baseline slack.
 RESERVED_TOLERANCE_MB = 512.0
+# Whole-device footprint (``total - free`` from ``mem_get_info``) must return to
+# within this slack of the pre-OOM footprint once ``empty_cache`` has run. Looser
+# than the per-process tolerances because ``mem_get_info`` also sees other
+# processes sharing the GPU (concurrent jobs), so a little cross-process noise is
+# expected.
+FOOTPRINT_TOLERANCE_MB = 1024.0
 # Peak allocated / reserved must stay this fraction below total VRAM.
 PEAK_HEADROOM_FRACTION = 0.95
 # reserved-bounded scenario: total reserved growth across all distinct shapes
@@ -122,109 +128,146 @@ def run_direct(args) -> bool:
     logger.info("direct: loaded %d texts", len(texts))
 
     ok = True
+    actor = None
+    oom_actor = None
 
-    actor = create_transformer_actor(model_name=args.model, allow_huggingface_download=True)()
+    try:
+        actor = create_transformer_actor(model_name=args.model, allow_huggingface_download=True)()
 
-    # Warmup: load kernels / stabilize allocator, then set the baseline.
-    warm = min(len(texts), args.batch)
-    actor(build_batch(texts[:warm]))
-    gc.collect()
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    base = read_gpu_memory(device)
-    logger.info(
-        "direct: post-warmup baseline allocated=%.1fMB reserved=%.1fMB", base["allocated_MB"], base["reserved_MB"]
-    )
-
-    # --- (a) No monotonic ALLOCATED growth across many __call__s (the A1 leak
-    # test). ``reserved`` is only logged here: in eager mode the caching allocator
-    # legitimately grows its pool to the working set's largest shape and keeps it
-    # (it drops only on empty_cache), so reserved does NOT return to baseline
-    # per-pass — that is normal, not a leak. Unbounded per-shape reserved growth
-    # (the compile blocker) is covered by run_reserved_bounded instead. ---
-    n_passes = args.passes
-    for i in range(n_passes):
-        start = (i * args.batch) % max(1, len(texts) - args.batch)
-        actor(build_batch(texts[start : start + args.batch]))
+        # Warmup: load kernels / stabilize allocator, then set the baseline.
+        warm = min(len(texts), args.batch)
+        actor(build_batch(texts[:warm]))
         gc.collect()
-        cur = read_gpu_memory(device)
-        alloc_drift = cur["allocated_MB"] - base["allocated_MB"]
-        resv_drift = cur["reserved_MB"] - base["reserved_MB"]
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        base = read_gpu_memory(device)
         logger.info(
-            "direct: pass %d/%d allocated=%.1fMB (drift=%.1f) reserved=%.1fMB (drift=%.1f)",
-            i + 1,
-            n_passes,
-            cur["allocated_MB"],
+            "direct: post-warmup baseline allocated=%.1fMB reserved=%.1fMB", base["allocated_MB"], base["reserved_MB"]
+        )
+
+        # --- (a) No monotonic ALLOCATED growth across many __call__s (the A1 leak
+        # test). ``reserved`` is only logged here: in eager mode the caching
+        # allocator legitimately grows its pool to the working set's largest shape
+        # and keeps it (it drops only on empty_cache), so reserved does NOT return
+        # to baseline per-pass — that is normal, not a leak. Unbounded per-shape
+        # reserved growth (the compile blocker) is covered by run_reserved_bounded
+        # instead. ---
+        n_passes = args.passes
+        for i in range(n_passes):
+            start = (i * args.batch) % max(1, len(texts) - args.batch)
+            actor(build_batch(texts[start : start + args.batch]))
+            gc.collect()
+            cur = read_gpu_memory(device)
+            alloc_drift = cur["allocated_MB"] - base["allocated_MB"]
+            resv_drift = cur["reserved_MB"] - base["reserved_MB"]
+            logger.info(
+                "direct: pass %d/%d allocated=%.1fMB (drift=%.1f) reserved=%.1fMB (drift=%.1f)",
+                i + 1,
+                n_passes,
+                cur["allocated_MB"],
+                alloc_drift,
+                cur["reserved_MB"],
+                resv_drift,
+            )
+            if alloc_drift > BASELINE_TOLERANCE_MB:
+                logger.error("direct: FAIL allocated grew %.1fMB above baseline on pass %d", alloc_drift, i + 1)
+                ok = False
+                break
+
+        # --- (b) First-attempt OOM recovers, correct count + order ---
+        longest = sorted(texts, key=len, reverse=True)[: max(1, args.oom_count // 4) or 1]
+        oom_texts = (longest * ((args.oom_count // len(longest)) + 1))[: args.oom_count]
+        oom_actor = create_transformer_actor(
+            model_name=args.model, gpu_batch_size=args.oom_count, allow_huggingface_download=True
+        )()
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        oom_base = read_gpu_memory(device)
+        try:
+            out = oom_actor(build_batch(oom_texts))
+        except RuntimeError:
+            logger.exception("direct: FAIL OOM recovery raised instead of recovering")
+            return False
+        preds = out["predictions_raw_json"]
+        if len(preds) != len(oom_texts):
+            logger.error("direct: FAIL recovery returned %d results for %d inputs", len(preds), len(oom_texts))
+            ok = False
+        else:
+            logger.info("direct: OOM recovery returned %d/%d predictions in order", len(preds), len(oom_texts))
+
+        # The handled-OOM path must actually have fired — otherwise this whole
+        # scenario is a vacuous pass (the batch was small enough to never OOM).
+        handled = oom_actor._handled_oom_count
+        logger.info("direct: actor handled %d OOM(s) during recovery", handled)
+        if handled <= 0:
+            logger.error("direct: FAIL forced batch did not trigger a handled OOM (test is vacuous)")
+            ok = False
+
+        # ``allocated`` must return to baseline after the OOM cascade — the core
+        # leak test (A1). Checked before empty_cache so a real leak cannot be
+        # masked.
+        gc.collect()
+        post = read_gpu_memory(device)
+        alloc_drift = post["allocated_MB"] - oom_base["allocated_MB"]
+        logger.info(
+            "direct: post-OOM-recovery allocated drift=%.1fMB reserved=%.1fMB",
             alloc_drift,
-            cur["reserved_MB"],
-            resv_drift,
+            post["reserved_MB"],
         )
         if alloc_drift > BASELINE_TOLERANCE_MB:
-            logger.error("direct: FAIL allocated grew %.1fMB above baseline on pass %d", alloc_drift, i + 1)
+            logger.error("direct: FAIL allocated leaked %.1fMB after OOM recovery", alloc_drift)
             ok = False
-            break
 
-    # --- (b) First-attempt OOM recovers, correct count + order ---
-    longest = sorted(texts, key=len, reverse=True)[: max(1, args.oom_count // 4) or 1]
-    oom_texts = (longest * ((args.oom_count // len(longest)) + 1))[: args.oom_count]
-    oom_actor = create_transformer_actor(
-        model_name=args.model, gpu_batch_size=args.oom_count, allow_huggingface_download=True
-    )()
-    gc.collect()
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-    torch.cuda.reset_peak_memory_stats()
-    oom_base = read_gpu_memory(device)
-    try:
-        out = oom_actor(build_batch(oom_texts))
-    except RuntimeError:
-        logger.exception("direct: FAIL OOM recovery raised instead of recovering")
-        return False
-    preds = out["predictions_raw_json"]
-    if len(preds) != len(oom_texts):
-        logger.error("direct: FAIL recovery returned %d results for %d inputs", len(preds), len(oom_texts))
-        ok = False
-    else:
-        logger.info("direct: OOM recovery returned %d/%d predictions in order", len(preds), len(oom_texts))
+        # ``reserved`` legitimately spikes during the deliberately-forced OOM, but
+        # in eager mode empty_cache() must be able to RECLAIM it back near baseline
+        # — the honest reserved leak test (under the compile blocker, graph pools
+        # cannot be reclaimed and this would fail).
+        torch.cuda.empty_cache()
+        reclaimed = read_gpu_memory(device)
+        resv_drift = reclaimed["reserved_MB"] - oom_base["reserved_MB"]
+        logger.info("direct: post-empty_cache reserved=%.1fMB (drift=%.1f)", reclaimed["reserved_MB"], resv_drift)
+        if resv_drift > RESERVED_TOLERANCE_MB:
+            logger.error("direct: FAIL reserved not reclaimed by empty_cache (drift %.1fMB) after OOM", resv_drift)
+            ok = False
 
-    # ``allocated`` must return to baseline after the OOM cascade — the core leak
-    # test (A1). It is checked before empty_cache so a real leak cannot be masked.
-    gc.collect()
-    post = read_gpu_memory(device)
-    alloc_drift = post["allocated_MB"] - oom_base["allocated_MB"]
-    logger.info(
-        "direct: post-OOM-recovery allocated drift=%.1fMB reserved=%.1fMB",
-        alloc_drift,
-        post["reserved_MB"],
-    )
-    if alloc_drift > BASELINE_TOLERANCE_MB:
-        logger.error("direct: FAIL allocated leaked %.1fMB after OOM recovery", alloc_drift)
-        ok = False
+        # Whole-device footprint (``total - free`` via ``mem_get_info``) must also
+        # return to baseline once the pool is reclaimed. This is the metric the
+        # harness advertises but previously never asserted; it catches leaks that
+        # escape the per-process counters (e.g. child allocations). Equivalent to
+        # ``oom_base.free - reclaimed.free`` since total is constant.
+        footprint_drift = oom_base["free_MB"] - reclaimed["free_MB"]
+        logger.info(
+            "direct: post-empty_cache device footprint free=%.1fMB (drift vs baseline=%.1f)",
+            reclaimed["free_MB"],
+            footprint_drift,
+        )
+        if footprint_drift > FOOTPRINT_TOLERANCE_MB:
+            logger.error("direct: FAIL device footprint grew %.1fMB after OOM recovery", footprint_drift)
+            ok = False
 
-    # ``reserved`` legitimately spikes during the deliberately-forced OOM, but in
-    # eager mode empty_cache() must be able to RECLAIM it back near baseline — the
-    # honest reserved leak test (under the compile blocker, graph pools cannot be
-    # reclaimed and this would fail).
-    torch.cuda.empty_cache()
-    reclaimed = read_gpu_memory(device)
-    resv_drift = reclaimed["reserved_MB"] - oom_base["reserved_MB"]
-    logger.info("direct: post-empty_cache reserved=%.1fMB (drift=%.1f)", reclaimed["reserved_MB"], resv_drift)
-    if resv_drift > RESERVED_TOLERANCE_MB:
-        logger.error("direct: FAIL reserved not reclaimed by empty_cache (drift %.1fMB) after OOM", resv_drift)
-        ok = False
+        # --- (c) Peak ALLOCATED below total VRAM by a margin. (Peak reserved is
+        # not asserted: the forced-OOM probe deliberately drives it toward VRAM.)
+        # ---
+        peak_alloc = post["peak_allocated_MB"]
+        total_mb = _mb(total_vram)
+        logger.info("direct: peak allocated=%.1fMB / total=%.1fMB", peak_alloc, total_mb)
+        if peak_alloc > total_mb * PEAK_HEADROOM_FRACTION:
+            logger.error("direct: FAIL peak allocated exceeded %.0f%% of VRAM", PEAK_HEADROOM_FRACTION * 100)
+            ok = False
 
-    # --- (c) Peak ALLOCATED below total VRAM by a margin. (Peak reserved is not
-    # asserted: the forced-OOM probe deliberately drives it toward VRAM.) ---
-    peak_alloc = post["peak_allocated_MB"]
-    total_mb = _mb(total_vram)
-    logger.info("direct: peak allocated=%.1fMB / total=%.1fMB", peak_alloc, total_mb)
-    if peak_alloc > total_mb * PEAK_HEADROOM_FRACTION:
-        logger.error("direct: FAIL peak allocated exceeded %.0f%% of VRAM", PEAK_HEADROOM_FRACTION * 100)
-        ok = False
-
-    logger.info("direct: %s", "PASS" if ok else "FAIL")
-    return ok
+        logger.info("direct: %s", "PASS" if ok else "FAIL")
+        return ok
+    finally:
+        # Release the in-process actors (each pins a model on the GPU) so they do
+        # not leak VRAM into any subsequent scenario in the same process.
+        actor = None
+        oom_actor = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def run_reserved_bounded(args) -> bool:
@@ -294,36 +337,79 @@ def run_reserved_bounded(args) -> bool:
 
 def run_ray(args) -> bool:
     """Full Ray Data pipeline via LocalJobRunner. Returns True on pass."""
+    import os
+
     import pandas as pd
 
     from tide2.runner.local_runner import LocalJobRunner
     from tide2.utils.text_processing import compute_text_hash
 
-    texts = load_texts(args.parquet, args.column, args.limit)
-    logger.info("ray: loaded %d notes", len(texts))
+    source = load_texts(args.parquet, args.column, args.limit)
+    logger.info("ray: loaded %d source notes", len(source))
+
+    # Build a genuinely oversized ACTOR batch. ``map_batches``'s ``batch_size``
+    # caps the rows an actor gets per ``__call__``, so pinning ``gpu_batch_size``
+    # alone never OOMs — and the raw SHIELD notes are mostly short (one sub-max
+    # chunk each), so even a large row count fits. We therefore synthesize
+    # ``oom_count`` *unique* near-max-length notes (one full chunk each) from the
+    # longest source text. With ``batch_size == gpu_batch_size == oom_count`` the
+    # actor's first forward is ``oom_count`` full-length sequences — large enough
+    # to OOM and exercise recovery — while unique hashes keep the coverage check
+    # meaningful. ~1900 chars ≈ 475 tokens keeps each note a single near-max
+    # chunk (just under the 512 chunk size, avoiding a tiny second chunk). The
+    # model runs in fp16, so ``oom_count`` must be large enough that this many
+    # half-precision full-length sequences overflow VRAM.
+    base = max(source, key=len) if source else "word "
+    per_note = (base * ((1900 // max(1, len(base))) + 1))[:1900]
+    texts = [f"{i} {per_note}" for i in range(args.oom_count)]
 
     df = pd.DataFrame({"note_text": texts})
     df["text_hash"] = df["note_text"].apply(compute_text_hash)
     df["patient_id"] = df["text_hash"]
     input_hashes = set(df["text_hash"])
+    logger.info("ray: built %d near-max-length notes (%d chars each)", len(texts), len(per_note))
 
+    ok = True
     with tempfile.TemporaryDirectory(dir=args.workdir) as tmp:
         in_path = Path(tmp) / "shield_input.parquet"
         out_path = Path(tmp) / "transformer_out"
         df.to_parquet(in_path, index=False)
 
+        # Cross-process handled-OOM counter: the actor runs in a Ray worker, so we
+        # cannot read its in-process ``_handled_oom_count``. It appends to this
+        # file (env var inherited by the local Ray workers) each time it recovers
+        # from a CUDA OOM; we count the lines afterwards to prove the recovery
+        # path actually fired.
+        count_file = Path(tmp) / "handled_oom.count"
+        os.environ["TIDE2_OOM_COUNT_FILE"] = str(count_file)
+
+        # Force an oversized ACTOR batch: ``map_batches``'s ``batch_size`` caps how
+        # many rows the actor receives per ``__call__``, so pinning
+        # ``gpu_batch_size`` alone never builds an oversized forward — the batch fed
+        # to the actor must itself be large. Drive both to ``oom_count`` so the
+        # actor gets one huge batch and attempts a single oversized forward that
+        # OOMs, exercising recovery.
         runner = LocalJobRunner(num_gpus=1)
         try:
             runner.run_transformer(
                 input_path=str(in_path),
                 output_path=str(out_path),
                 model_name=args.model,
-                batch_size=args.batch,
-                gpu_batch_size=args.oom_count,  # inflate to force first-attempt OOM in the actor
+                batch_size=args.oom_count,  # oversized actor batch (see above)
+                gpu_batch_size=args.oom_count,  # inflate to force a first-attempt OOM in the actor
                 enable_checkpoint=False,
             )
         finally:
             runner.shutdown()
+            os.environ.pop("TIDE2_OOM_COUNT_FILE", None)
+
+        handled = 0
+        if count_file.exists():
+            handled = sum(1 for _ in count_file.open())
+        logger.info("ray: actor handled %d OOM(s) during recovery", handled)
+        if handled <= 0:
+            logger.error("ray: FAIL oversized batch did not trigger a handled OOM (test is vacuous)")
+            ok = False
 
         out_files = list(out_path.glob("**/*.parquet"))
         if not out_files:
@@ -341,8 +427,8 @@ def run_ray(args) -> bool:
         logger.error("ray: FAIL fewer output rows (%d) than input notes (%d)", len(out_df), len(input_hashes))
         return False
 
-    logger.info("ray: PASS")
-    return True
+    logger.info("ray: %s", "PASS" if ok else "FAIL")
+    return ok
 
 
 def main() -> int:
