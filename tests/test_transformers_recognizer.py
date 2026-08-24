@@ -435,3 +435,66 @@ class TestTransformersRecognizer:
                 TransformersRecognizer(model_name="MISSING_MODEL")
         finally:
             Path(config_path).unlink()
+
+    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.config.get_resource_path")
+    def test_long_note_tail_entity_is_detected(self, mock_get_path, mock_resolve_model):
+        """Regression for C2: PHI in the tail of a long note must be inferred.
+
+        The chunking decision used a char->token estimate but then handed that
+        already-tokenized length to ``split_text_to_word_chunks``, which divided
+        by 4 a second time. The offsets then spanned only the first ~quarter of
+        the note, so any PHI in the tail was never sent to the model and never
+        redacted. This test mocks inference so only the tail chunk yields an
+        entity, forcing full-length coverage to be exercised.
+        """
+        mock_resolve_model.return_value = "/fake/model/path"
+        config_path = create_temp_config(self.mock_config)
+        mock_get_path.return_value = config_path
+
+        try:
+            recognizer = TransformersRecognizer(model_name="TEST_MODEL")
+
+            tail_name = "Zebediah"
+            note = "Patient John here. " + ("filler text with no phi here. " * 130) + f" Provider: {tail_name}."
+            assert len(note) > 3000  # long enough to force chunking
+            tail_start = note.index(tail_name)
+
+            # Mock the inference core: small max length forces chunking, and the
+            # fake model only emits a PERSON token for the chunk that actually
+            # contains the tail name (using chunk-local offsets, as the real
+            # pipeline does).
+            mock_core = Mock()
+            mock_core.model_max_length = 512
+
+            def fake_infer(chunk_text):
+                idx = chunk_text.find(tail_name)
+                if idx == -1:
+                    return []
+                return [
+                    {
+                        "entity": "B-PERSON",
+                        "score": 0.99,
+                        "start": idx,
+                        "end": idx + len(tail_name),
+                        "word": tail_name,
+                    }
+                ]
+
+            mock_core.infer_single_raw.side_effect = fake_infer
+            recognizer._core = mock_core
+
+            results = recognizer._get_ner_results_for_text(note)
+
+            # The tail PHI must be detected at its true document position.
+            tail_hits = [r for r in results if r["start"] == tail_start]
+            assert tail_hits, "tail PHI entity was dropped (partial de-identification)"
+            assert tail_hits[0]["entity_group"] == "PERSON"
+            assert tail_hits[0]["word"] == tail_name
+
+            # The tail chunk must actually have been sent to the model, i.e. the
+            # chunk offsets covered the end of the note.
+            inferred = [call.args[0] for call in mock_core.infer_single_raw.call_args_list]
+            assert any(tail_name in chunk for chunk in inferred), "tail was never sent to the model"
+        finally:
+            Path(config_path).unlink()
