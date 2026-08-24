@@ -60,6 +60,22 @@ _VRAM_TIER_MID_GB = 24
 # batches can exceed 512 (see that method for why that stays memory-safe).
 _MAX_INITIAL_GPU_BATCH = 512
 
+# Length-homogeneity bound for in-actor length bucketing. A group may only grow
+# while its longest member is within this factor of its shortest, capping the
+# worst-case in-group padding waste (HF pads every member of a forward to the
+# group's longest). Without it, when the memory cap already fits the whole batch
+# (cap >= batch size) every text lands in one group and short texts are padded up
+# to the batch's single longest text — the degenerate case that defeats bucketing.
+# 1.5 (tolerate <=50% padding) was the knee on a real mixed-length SHIELD batch:
+# it cut padded-token waste from ~2.2x to ~1.3x and sped the forward ~1.7x, while
+# tighter factors only added forward-launch overhead for no further gain.
+_MAX_GROUP_LENGTH_SPAN = 1.5
+
+# Below this many characters the span bound is not enforced: padding waste on very
+# short texts is negligible in absolute terms, so grouping them freely avoids
+# over-splitting a crowd of tiny texts into many tiny forwards.
+_GROUP_SPAN_MIN_ANCHOR_CHARS = 128
+
 
 def _numpy_default(obj: Any) -> Any:
     """json.dumps default handler for numpy scalar types."""
@@ -512,10 +528,16 @@ class TransformerInferenceActor:
         that waste, this:
 
         1. orders the texts by length (a cheap ``len`` proxy);
-        2. partitions the length-sorted order into groups whose size is set from
-           the group's own longest member via :meth:`_batch_cap_for_seq`, so each
-           forward pads to a near-uniform length and per-forward memory is
-           predictable (an OOM-safety bonus);
+        2. partitions the length-sorted order into groups bounded by *both* the
+           memory-safe batch cap for the group's longest member
+           (:meth:`_batch_cap_for_seq`) *and* a length span
+           (``_MAX_GROUP_LENGTH_SPAN``). The span bound matters when the cap alone
+           already admits the whole batch (cap >= batch size): without it every
+           text would land in one group and short texts would be padded up to the
+           batch's single longest, the degenerate case that defeats bucketing
+           (measured ~1.85x forward slowdown on a mixed-length SHIELD batch). With
+           both bounds each forward pads to a near-uniform length and per-forward
+           memory is predictable (an OOM-safety bonus);
         3. runs each group as its own forward(s), halving the batch on CUDA OOM;
         4. reassembles outputs into the original input order via a carried index
            map.
@@ -549,12 +571,21 @@ class TransformerInferenceActor:
 
         pos = 0
         while pos < n:
-            # Grow a length-homogeneous group from the sorted order, stopping once
-            # adding the next (longer) text would exceed the memory-safe batch cap
-            # at that longer length. Since ``order`` is ascending, the candidate is
-            # always the group's new longest member.
+            # Grow a length-homogeneous group from the sorted order. Stop once
+            # adding the next (longer) text would either exceed the memory-safe
+            # batch cap at that longer length, or stretch the group's length span
+            # past ``_MAX_GROUP_LENGTH_SPAN`` (which would pad the group's shorter
+            # members too aggressively). Since ``order`` is ascending, the group's
+            # shortest member is ``order[pos]`` and the candidate ``order[end]`` is
+            # always the group's new longest member. The span bound is relaxed for
+            # very short groups, where padding waste is negligible.
+            span_anchor = max(len(texts[order[pos]]), _GROUP_SPAN_MIN_ANCHOR_CHARS)
             end = pos + 1
-            while end < n and (end - pos + 1) <= self._batch_cap_for_seq(len(texts[order[end]])):
+            while (
+                end < n
+                and (end - pos + 1) <= self._batch_cap_for_seq(len(texts[order[end]]))
+                and len(texts[order[end]]) <= span_anchor * _MAX_GROUP_LENGTH_SPAN
+            ):
                 end += 1
 
             group_idx = order[pos:end]

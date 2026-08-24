@@ -9,6 +9,8 @@ no CUDA — so they run in PR CI. OOM/batch-shrink behavior lives in
 
 from __future__ import annotations
 
+from tide2.actors.transformer import _GROUP_SPAN_MIN_ANCHOR_CHARS
+from tide2.actors.transformer import _MAX_GROUP_LENGTH_SPAN
 from tide2.actors.transformer import TransformerInferenceActor
 
 
@@ -124,3 +126,67 @@ class TestBucketingReassembly:
 
         assert _markers(results) == texts
         assert len(results) == 3
+
+
+class TestLengthSpanBoundary:
+    """The span bound splits wide-length batches even when the memory cap fits all.
+
+    This is the M8 fix: when ``_batch_cap_for_seq`` already admits the whole batch
+    (cap >= batch size) the memory model alone leaves one big group, padding short
+    texts up to the batch's single longest. ``_MAX_GROUP_LENGTH_SPAN`` caps that
+    in-group padding waste.
+    """
+
+    def _text(self, chars: int) -> str:
+        return "x" * chars
+
+    def test_wide_span_splits_under_infinite_cap(self):
+        # Cap admits everything, so ONLY the span bound can force a split.
+        core = _RecordingCore()
+        actor = _make_actor(core, cap=lambda _c: 10**9)
+        # Anchor for the first (shortest) group is max(200, floor); 200*1.5 = 300,
+        # so 200/250 group together and 400/500 form a second group.
+        assert _MAX_GROUP_LENGTH_SPAN == 1.5
+        assert _GROUP_SPAN_MIN_ANCHOR_CHARS <= 200
+        texts = [self._text(n) for n in (250, 200, 500, 400)]
+
+        results = actor._run_inference_raw_with_oom_recovery(texts)
+
+        assert _markers(results) == texts  # original order preserved
+        assert len(core.calls) == 2
+        assert [len(t) for t in core.calls[0]] == [200, 250]
+        assert [len(t) for t in core.calls[1]] == [400, 500]
+
+    def test_within_span_stays_one_group(self):
+        # Longest within 1.5x of shortest (and above the anchor) => single forward.
+        core = _RecordingCore()
+        actor = _make_actor(core, cap=lambda _c: 10**9)
+        texts = [self._text(n) for n in (200, 260, 300)]  # 300/200 = 1.5x exactly
+
+        actor._run_inference_raw_with_oom_recovery(texts)
+
+        assert len(core.calls) == 1
+
+    def test_short_texts_ignore_span(self):
+        # Below the anchor, a wide ratio must NOT split (padding waste is trivial).
+        core = _RecordingCore()
+        actor = _make_actor(core, cap=lambda _c: 10**9)
+        small = _GROUP_SPAN_MIN_ANCHOR_CHARS // 8 or 1
+        texts = [self._text(small), self._text(small * 6)]  # 6x ratio, both tiny
+
+        actor._run_inference_raw_with_oom_recovery(texts)
+
+        assert len(core.calls) == 1
+
+    def test_span_and_cap_compose(self):
+        # A tight cap can still split a span-homogeneous run into cap-sized forwards.
+        core = _RecordingCore()
+        actor = _make_actor(core, cap=lambda _c: 2)
+        texts = [self._text(n) for n in (200, 210, 220, 230)]  # all within span
+
+        actor._run_inference_raw_with_oom_recovery(texts)
+
+        # Span keeps them together, but cap=2 forces 2-row forwards.
+        assert all(len(call) <= 2 for call in core.calls)
+        flat = [t for call in core.calls for t in call]
+        assert sorted(flat, key=len) == sorted(texts, key=len)
