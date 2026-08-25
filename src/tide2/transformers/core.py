@@ -25,8 +25,9 @@ from .config import load_model_config
 
 logger = logging.getLogger(__name__)
 
-# Fixed schema of a raw BIO token prediction (see infer_raw). Used to build a
-# stable dedupe key that does not depend on dict insertion order.
+# Fixed schema of a raw BIO token prediction (see infer_single_raw /
+# forward_windows). Used to build a stable dedupe key that does not depend on dict
+# insertion order.
 _RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
 
 
@@ -324,44 +325,6 @@ class TransformerCore:
         model_device = next(model.parameters()).device
         logger.info(f"[{thread_name}] Pipeline loaded on device: {model_device}")
 
-    def infer_raw(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run raw inference on texts, returning BIO tokens.
-
-        This method runs the transformer pipeline on a batch of texts and returns
-        the raw predictions without BIO aggregation.
-
-        Args:
-            texts: List of text strings to process
-            batch_size: Optional batch size for pipeline (default: process all at once)
-
-        Returns:
-            List of prediction lists, one per input text. Each prediction is a dict:
-            {
-                "entity": "B-PERSON",
-                "score": 0.95,
-                "start": 0,
-                "end": 4,
-                "word": "John",
-                "index": 1,
-            }
-        """
-        pipeline_instance = self._ensure_pipeline_loaded()
-
-        if not texts:
-            return []
-
-        # Run pipeline
-        if batch_size is not None:
-            results = pipeline_instance(texts, batch_size=batch_size)
-        else:
-            results = pipeline_instance(texts)
-
-        # Handle single-text case (pipeline returns list of dicts, not list of lists)
-        if len(texts) == 1 and results and isinstance(results[0], dict):
-            return [results]
-
-        return results
-
     def tokenize_ragged(self, texts: list[str]) -> Any:
         """Tokenize a batch **once**, with no truncation, no padding, and offsets.
 
@@ -409,7 +372,7 @@ class TransformerCore:
         what lets the caller's ``empty_cache()`` reclaim before retrying at a
         smaller window-batch. Because the windows are supplied pre-tokenized, that
         retry never re-tokenizes. See
-        :meth:`tide2.actors.transformer.TransformerInferenceActor._forward_windows_with_shrink`.
+        :meth:`tide2.actors.transformer.TransformerInferenceActor._forward_windows`.
 
         Args:
             windows: List of ``(content_ids, offsets, text)`` tuples, one per
@@ -612,33 +575,6 @@ class TransformerCore:
 
         # Aggregate BIO tokens
         return aggregate_bio_tokens(raw_predictions, text)
-
-    def infer_batch_aggregated(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run inference on a batch of texts with BIO aggregation.
-
-        Args:
-            texts: List of texts to process
-            batch_size: Optional batch size for pipeline
-
-        Returns:
-            List of aggregated entity prediction lists, one per input text
-        """
-        raw_results = self.infer_raw(texts, batch_size=batch_size)
-
-        aggregated_results = []
-        for text, raw_preds in zip(texts, raw_results, strict=True):
-            if not raw_preds:
-                aggregated_results.append([])
-                continue
-
-            # Remove duplicates (can occur from chunking at caller level)
-            deduped_preds = _dedupe_raw_predictions(raw_preds)
-
-            # Aggregate BIO tokens
-            aggregated = aggregate_bio_tokens(deduped_preds, text)
-            aggregated_results.append(aggregated)
-
-        return aggregated_results
 
     @property
     def model_max_length(self) -> int:

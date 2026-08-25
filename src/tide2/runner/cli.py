@@ -108,7 +108,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("chunk_size", "chunk_size"),
                 ("chunk_overlap", "chunk_overlap"),
                 ("num_agg_actors", "num_agg_actors"),
-                ("short_seq_budget", "short_seq_budget"),
                 ("read_cpus", "read_cpus"),
                 ("flat_map_cpus", "flat_map_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -204,7 +203,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("batch_size", "batch_size"),
                 ("model_path", "model_path"),
                 ("num_agg_actors", "num_agg_actors"),
-                ("short_seq_budget", "short_seq_budget"),
                 ("read_cpus", "read_cpus"),
                 ("flat_map_cpus", "flat_map_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -370,7 +368,8 @@ Examples:
     run_p.add_argument(
         "--gpu-batch-size",
         type=int,
-        help="GPU batch size for HF pipeline inference (transformer jobs, auto-computed if not set)",
+        help="Token windows per GPU forward (transformer jobs). Size for the load; "
+        "the actor halves and retries on OOM. Nominal default if not set.",
     )
     run_p.add_argument("--object-store-gb", type=int, help="Object store memory in GB")
     run_p.add_argument("--cpus-per-actor", type=int, help="CPUs per actor (default: 2)")
@@ -430,11 +429,6 @@ Examples:
         "--num-agg-actors",
         type=int,
         help="Number of CPU actors for BIO aggregation (transformer jobs, auto-computed if not set)",
-    )
-    run_p.add_argument(
-        "--short-seq-budget",
-        type=float,
-        help="Memory budget fraction for short sequences (transformer jobs, auto-computed from GPU VRAM if not set)",
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")
