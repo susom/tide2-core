@@ -430,8 +430,6 @@ class TransformerInferenceActor:
                     raise  # non-OOM: propagate unchanged
                 if batch_size <= 1:
                     raise RuntimeError("CUDA OOM on a single token window") from e
-            else:
-                return out
                 # Count the handled OOM so tests can prove the recovery path ran.
                 # Defensive getattr: actors built via __new__ in unit tests skip
                 # __init__ and so never set _handled_oom_count.
@@ -443,6 +441,8 @@ class TransformerInferenceActor:
                 # tensors, so this reclaims real VRAM before the smaller retry.
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+            else:
+                return out
 
     def _plan_windows(
         self,
