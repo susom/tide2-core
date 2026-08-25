@@ -11,6 +11,7 @@ import socket
 import threading
 from pathlib import Path
 from typing import Any
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -29,6 +30,83 @@ logger = logging.getLogger(__name__)
 # forward_windows). Used to build a stable dedupe key that does not depend on dict
 # insertion order.
 _RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
+
+
+class _Window(NamedTuple):
+    """One token-space window carved from a single input text.
+
+    Windowing (not truncation) is how tide2 covers a text whose tokenized length
+    exceeds the model's per-window budget. Each window carries the source text's
+    index (``owner``) plus the content token ids and their character offsets for
+    this slice — all sourced from a single tokenization, so offsets are already
+    relative to ``text`` and never need re-basing when window predictions are
+    merged back. ``text`` is the *whole* source text; ``offsets`` index into it.
+    """
+
+    owner: int
+    content_ids: list[int]
+    offsets: list[tuple[int, int]]
+    text: str
+    token_start: int  # index of this window's first content token within the text
+    token_end: int  # exclusive index of its last content token within the text
+
+
+def plan_windows(
+    texts: list[str],
+    input_ids: list[list[int]],
+    offset_mapping: list[list[Any]],
+    token_budget: int,
+    window_overlap: int,
+) -> list[_Window]:
+    """Slice each text's tokens into ≤-budget windows (never truncating).
+
+    The single windowing implementation shared by the transformer actor (batch
+    path) and — via :meth:`TransformerCore.tokenize_and_window` — the recognizer.
+    A text within budget becomes a single window; an over-budget text is sliced
+    into windows of ``token_budget`` content tokens that step forward by
+    ``token_budget - window_overlap`` (>= 1), so consecutive windows overlap by
+    ``window_overlap`` and together cover every token with no gaps. Char offsets
+    are carried straight from the single tokenization, so they already index into
+    the source ``texts[owner]``.
+
+    Args:
+        texts: The source texts, in the caller's order (each window's ``owner`` is
+            an index into this list).
+        input_ids: Ragged content-token ids per text (from
+            :meth:`TransformerCore.tokenize_ragged`).
+        offset_mapping: Ragged ``(start, end)`` char spans per text, aligned to
+            ``input_ids``.
+        token_budget: Max content tokens per window (see
+            :attr:`TransformerCore.token_budget`). Clamped to ``>= 1``.
+        window_overlap: Token overlap between adjacent windows. Clamped to
+            ``[0, token_budget - 1]`` so the step stays ``>= 1``.
+
+    Returns:
+        The windows across all texts, in text order (a text producing zero tokens
+        contributes no window).
+    """
+    budget = max(1, token_budget)
+    overlap = min(max(0, window_overlap), budget - 1)
+    step = max(1, budget - overlap)
+
+    windows: list[_Window] = []
+    for owner, text in enumerate(texts):
+        ids = input_ids[owner]
+        offs = offset_mapping[owner]
+        n = len(ids)
+        if n == 0:
+            continue
+        if n <= budget:
+            windows.append(_Window(owner, list(ids), [tuple(o) for o in offs], text, 0, n))
+            continue
+        start = 0
+        while start < n:
+            end = min(start + budget, n)
+            windows.append(_Window(owner, list(ids[start:end]), [tuple(o) for o in offs[start:end]], text, start, end))
+            if end == n:
+                break
+            start += step
+    return windows
 
 
 def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
@@ -287,16 +365,15 @@ class TransformerCore:
 
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
 
-        # Per-model max sequence length from the config, e.g. {"MODEL_MAX_LENGTH": 512}.
-        # Some tokenizers ship a sentinel model_max_length (e.g. XLM-R/SentencePiece's
-        # 1e30) that exceeds the model's real position-embedding limit, so tide2's
-        # chunking/truncation never bounds sequences and the model raises
-        # "expanded size of the tensor (N) must match the existing size (512)".
-        # Pinning it here makes truncation (below) and the model_max_length property
-        # honor the model's true limit. Absent key => keep the tokenizer's value.
-        _cfg_mml = self._config.get("MODEL_MAX_LENGTH")
-        if _cfg_mml:
-            tokenizer.model_max_length = int(_cfg_mml)
+        # Per-model max sequence length is the single length authority for tide2's
+        # token-accurate windowing (see :attr:`token_budget`). It MUST be pinned
+        # explicitly per model in the config (``MODEL_MAX_LENGTH``): tokenizers ship
+        # an unreliable model_max_length — a sentinel (XLM-R/SentencePiece's 1e30)
+        # that never bounds sequences, or an off-by-two value (RoBERTa reports 514
+        # for a real 512 context). Deriving from either silently reintroduces the
+        # over-length crash, so we resolve it here from the config and refuse to run
+        # without it rather than fall back to the tokenizer sentinel.
+        tokenizer.model_max_length = self._resolve_model_max_length()
 
         # Build pipeline kwargs
         # Note: transformers 5.x removed the `framework` argument from pipeline()
@@ -355,6 +432,28 @@ class TransformerCore:
             padding=False,
             return_offsets_mapping=True,
         )
+
+    def tokenize_and_window(self, texts: list[str], window_overlap: int) -> list[_Window]:
+        """Tokenize a batch **once** and slice it into ≤-budget token windows.
+
+        The shared tokenize→window primitive: it runs the single
+        :meth:`tokenize_ragged` pass and hands the ragged ids/offsets to
+        :func:`plan_windows` against :attr:`token_budget`. Callers (the transformer
+        actor's batch path; the recognizer once #54 lands) get one windowing
+        implementation with no duplicated char/token arithmetic. Because
+        tokenization happens here exactly once, downstream windowing and OOM
+        retries reuse the result and never re-tokenize.
+
+        Args:
+            texts: Texts to tokenize and window, in the caller's order.
+            window_overlap: Token overlap between adjacent windows of an
+                over-budget text (clamped to ``[0, token_budget - 1]``).
+
+        Returns:
+            The token windows across all ``texts`` (see :func:`plan_windows`).
+        """
+        encoded = self.tokenize_ragged(texts)
+        return plan_windows(texts, encoded["input_ids"], encoded["offset_mapping"], self.token_budget, window_overlap)
 
     def forward_windows(self, windows: list[tuple[list[int], list[tuple[int, int]], str]]) -> list[list[dict]]:
         """GPU forward + prediction extraction for pre-tokenized token windows.
@@ -423,6 +522,12 @@ class TransformerCore:
         (transformers 5.x dropped ``build_inputs_with_special_tokens`` /
         ``prepare_for_model`` and only implements ``get_special_tokens_mask`` for
         already-formatted sequences). Cached on the instance.
+
+        Raises:
+            RuntimeError: If the probe diff cannot derive affixes whose total length
+                matches ``num_special_tokens_to_add(pair=False)`` — i.e. windowed
+                inference would otherwise run without the model's special tokens.
+                Raised before caching, so the failure is not sticky.
         """
         cached = getattr(self, "_special_affixes", None)
         if cached is not None:
@@ -440,6 +545,22 @@ class TransformerCore:
                 prefix = list(with_sp[:i])
                 suffix = list(with_sp[i + span :])
                 break
+
+        # Validate before caching: an empty/partial diff would silently forward
+        # windows without the model's special tokens (degraded NER), and caching
+        # would make that failure sticky. Cross-check against the count the
+        # tokenizer itself declares — the same API model_max_length windowing
+        # already trusts via ``num_special_tokens`` (below).
+        expected = tokenizer.num_special_tokens_to_add(pair=False)
+        if len(prefix) + len(suffix) != expected:
+            raise RuntimeError(
+                "Could not derive special-token affixes for "
+                f"{getattr(tokenizer, 'name_or_path', tokenizer)!r}: probe diff "
+                f"yielded prefix={prefix} suffix={suffix} "
+                f"({len(prefix) + len(suffix)} tokens) but the tokenizer adds "
+                f"{expected} special token(s) to a single sequence. Windowed "
+                "inference would run without the model's special tokens."
+            )
 
         self._special_affixes = (prefix, suffix)
         return prefix, suffix
@@ -576,11 +697,43 @@ class TransformerCore:
         # Aggregate BIO tokens
         return aggregate_bio_tokens(raw_predictions, text)
 
+    def _resolve_model_max_length(self) -> int:
+        """The model's real tokenized context window, from ``MODEL_MAX_LENGTH``.
+
+        This is the single length authority for token-accurate windowing. It is a
+        hard requirement in the model config — no fallback to the tokenizer's
+        ``model_max_length`` (which is unreliable: 1e30 sentinels, or RoBERTa's
+        off-by-two 514). A config missing it raises so a wrong context can never
+        silently reintroduce the over-length crash.
+
+        Raises:
+            ValueError: If the model config has no ``MODEL_MAX_LENGTH`` or it is
+                not a positive integer.
+        """
+        raw = self._config.get("MODEL_MAX_LENGTH")
+        if raw is None:
+            raise ValueError(
+                f"Model {self.model_name!r} config is missing the required "
+                f"'MODEL_MAX_LENGTH' key. It must be set to the model's real "
+                f"tokenized context window (e.g. 512 for BERT/RoBERTa, 8192 for "
+                f"ModernBERT); tide2 will not fall back to the tokenizer sentinel."
+            )
+        value = int(raw)
+        if value <= 0:
+            raise ValueError(
+                f"Model {self.model_name!r} config has non-positive "
+                f"MODEL_MAX_LENGTH={raw!r}; it must be a positive integer."
+            )
+        return value
+
     @property
     def model_max_length(self) -> int:
-        """Maximum input length for the tokenizer."""
-        pipeline_instance = self._ensure_pipeline_loaded()
-        return getattr(pipeline_instance.tokenizer, "model_max_length", 512)
+        """The model's real tokenized context window (from ``MODEL_MAX_LENGTH``).
+
+        Raises:
+            ValueError: If the model config does not pin ``MODEL_MAX_LENGTH``.
+        """
+        return self._resolve_model_max_length()
 
     @property
     def num_special_tokens(self) -> int:
@@ -589,10 +742,21 @@ class TransformerCore:
         For a single sequence this is typically 2 (e.g. BERT's ``[CLS]``/``[SEP]``
         or RoBERTa's ``<s>``/``</s>``). Callers subtract it from
         :attr:`model_max_length` to get the per-window content-token budget used
-        for token-space windowing.
+        for token-space windowing (see :attr:`token_budget`).
         """
         self._ensure_pipeline_loaded()
         return int(self._tokenizer.num_special_tokens_to_add(pair=False))
+
+    @property
+    def token_budget(self) -> int:
+        """Per-window content-token budget: context window minus special tokens.
+
+        The single source of truth for how many content tokens fit in one forward
+        pass: :attr:`model_max_length` (the real context window) minus the special
+        tokens the tokenizer wraps each sequence with (:attr:`num_special_tokens`).
+        Chunks longer than this are windowed, never truncated. Always ``>= 1``.
+        """
+        return max(1, self.model_max_length - self.num_special_tokens)
 
     def get_device_info(self) -> str:
         """Get current device information."""

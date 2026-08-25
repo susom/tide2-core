@@ -37,19 +37,19 @@ def actor():
         pytest.skip(f"model {_MODEL} unavailable: {e}")
 
 
-def _dense_chunk_over_budget(actor) -> str:
-    """Build a chunk whose real tokenization exceeds the per-window budget."""
+def _dense_note_over_budget(actor) -> str:
+    """Build a note whose real tokenization exceeds the per-window budget."""
     # Clinical-ish dense text; ~2-3 chars/token on this model, so this comfortably
     # exceeds a 510-token budget and forces multiple windows.
     sentence = "The patient was seen in clinic on 03/14 for follow-up of hypertension and diabetes; labs were ordered. "
     text = sentence * 40
     n_tokens = len(actor._core.tokenize_ragged([text])["input_ids"][0])
-    assert n_tokens > actor._token_budget, f"expected an over-budget chunk, got {n_tokens} tokens"
+    assert n_tokens > actor._token_budget, f"expected an over-budget note, got {n_tokens} tokens"
     return text
 
 
 def test_real_tokenizer_windows_cover_dense_chunk(actor):
-    text = _dense_chunk_over_budget(actor)
+    text = _dense_note_over_budget(actor)
     enc = actor._core.tokenize_ragged([text])
 
     windows = actor._plan_windows([text], enc["input_ids"], enc["offset_mapping"])
@@ -72,17 +72,16 @@ def test_tail_phi_detected_after_windowing(actor):
     text = filler + tail
     expected_start = text.index("Jonathan Whitfield")
 
-    raw = actor({"chunk_text": [text], "text_hash": ["h"], "chunk_id": [0], "char_offset_start": [0]})
-    agg = BIOAggregationActor()(
+    raw = actor({"note_text": [text], "text_hash": ["h"], "patient_id": [""]})
+    agg = BIOAggregationActor(_MODEL)(
         {
-            "chunk_text": [text],
+            "note_text": [text],
             "predictions_raw_json": raw["predictions_raw_json"],
             "text_hash": ["h"],
-            "chunk_id": [0],
-            "char_offset_start": [0],
+            "patient_id": [""],
         }
     )
-    entities = json.loads(agg["predictions_json"][0])
+    entities = json.loads(agg["recognizer_results_json"][0])
 
     # An entity must be detected overlapping the tail name — proof the tail was
     # forwarded (the old truncating path never saw these characters).
@@ -94,14 +93,14 @@ def test_tail_phi_detected_after_windowing(actor):
 def test_forced_small_batch_preserves_coverage(actor):
     from tide2.actors.transformer import create_transformer_actor
 
-    text = _dense_chunk_over_budget(actor)
+    text = _dense_note_over_budget(actor)
     # Pin a tiny gpu_batch_size so windows are forced through many small forwards
     # (and any OOM shrink), then confirm the merged coverage is still complete.
     small = create_transformer_actor(model_name=_MODEL, gpu_batch_size=1, allow_huggingface_download=True)()
-    out = small({"chunk_text": [text], "text_hash": ["h"], "chunk_id": [0], "char_offset_start": [0]})
+    out = small({"note_text": [text], "text_hash": ["h"], "patient_id": [""]})
     preds = json.loads(out["predictions_raw_json"][0])
 
-    # Every predicted token offset lies within the chunk and the last window's
-    # tokens (near the end of the chunk) are represented — nothing was dropped.
-    assert preds, "expected some predictions on a long clinical chunk"
+    # Every predicted token offset lies within the note and the last window's
+    # tokens (near the end of the note) are represented — nothing was dropped.
+    assert preds, "expected some predictions on a long clinical note"
     assert max(p["end"] for p in preds) > len(text) * 0.9
