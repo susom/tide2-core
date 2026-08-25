@@ -221,7 +221,14 @@ class TransformerCore:
         # dtype (float16 default).
         _cfg_dtype = self._config.get("DTYPE")
         if _cfg_dtype:
-            self.dtype = getattr(torch, _cfg_dtype)
+            resolved_dtype = getattr(torch, _cfg_dtype, None)
+            if not isinstance(resolved_dtype, torch.dtype):
+                raise ValueError(
+                    f"Model {model_name!r} config has invalid DTYPE={_cfg_dtype!r}: it must name a "
+                    f"torch dtype (e.g. 'float16', 'float32', 'bfloat16'). Got "
+                    f"{'no such torch attribute' if resolved_dtype is None else type(resolved_dtype).__name__}."
+                )
+            self.dtype = resolved_dtype
 
         # Resolve model path
         if model_path is not None:

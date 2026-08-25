@@ -259,7 +259,9 @@ class TestPerOperatorReservations:
         monkeypatch.setattr(runner, "_resolve_transformer_resources", lambda *_a, **_k: (0, True, 1, 1))
         from tide2.transformers import config as tconfig
 
-        monkeypatch.setattr(tconfig, "load_model_config", lambda _name: {"CHUNK_OVERLAP_SIZE": 40})
+        monkeypatch.setattr(
+            tconfig, "load_model_config", lambda _name: {"CHUNK_OVERLAP_SIZE": 40, "MODEL_MAX_LENGTH": 512}
+        )
         from tide2 import actors
 
         monkeypatch.setattr(actors, "create_transformer_actor", lambda **_k: MagicMock())
@@ -278,6 +280,24 @@ class TestPerOperatorReservations:
         assert captured_ds["read"]["ray_remote_args"] == {"num_cpus": 0.25}
         assert "flat_map" not in captured_ds
         assert captured_ds["write"]["ray_remote_args"] == {"num_cpus": 0.5}
+
+    def test_transformer_missing_model_max_length_raises_on_driver(self, monkeypatch, tmp_path):
+        """run_transformer fails fast on the driver if MODEL_MAX_LENGTH is absent."""
+        runner = _make_runner(monkeypatch)
+        monkeypatch.setattr(runner, "_resolve_transformer_resources", lambda *_a, **_k: (0, True, 1, 1))
+        from tide2.transformers import config as tconfig
+
+        # Config with no MODEL_MAX_LENGTH — the single length authority is missing.
+        monkeypatch.setattr(tconfig, "load_model_config", lambda _name: {"CHUNK_OVERLAP_SIZE": 40})
+
+        with pytest.raises(ValueError, match="MODEL_MAX_LENGTH"):
+            runner.run_transformer(
+                input_path="in",
+                output_path=str(tmp_path / "out"),
+                model_name="fake-model",
+                model_path=str(tmp_path / "model"),
+                enable_checkpoint=False,
+            )
 
 
 # ---------------------------------------------------------------------------

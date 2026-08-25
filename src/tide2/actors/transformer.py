@@ -47,6 +47,7 @@ import torch
 
 from tide2.transformers import TransformerCore
 from tide2.transformers.config import format_transformer_recognizer_name
+from tide2.transformers.core import _dedupe_raw_predictions
 from tide2.transformers.core import _Window
 from tide2.transformers.core import plan_windows
 from tide2.utils.text_processing import aggregate_bio_tokens
@@ -488,10 +489,12 @@ class BIOAggregationActor:
         if not raw_tokens or not note_text:
             return "[]", 0
 
-        # Remove duplicate raw tokens (window overlap produces them; the raw-token
-        # dedupe key includes ``index`` so identical spans from different windows
-        # survive to here — the span-level IoU dedup below collapses them).
-        raw_tokens = [dict(t) for t in {tuple(d.items()) for d in raw_tokens}]
+        # Remove duplicate raw tokens (window overlap produces them). Uses the
+        # stable fixed-schema key (``_RAW_PRED_KEYS``) rather than dict-insertion
+        # order, so dedup is deterministic regardless of JSON key ordering. The key
+        # includes ``index`` so identical spans from different windows survive to
+        # here — the span-level IoU dedup below collapses them.
+        raw_tokens = _dedupe_raw_predictions(raw_tokens)
 
         # BIO tokens → aggregated spans (document-relative offsets already).
         aggregated = aggregate_bio_tokens(raw_tokens, note_text)
