@@ -58,8 +58,7 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # project_id: "your-gcp-project"
 # chunk_size: 512
 # chunk_overlap: 40
-# gpu_batch_size: auto-computed from model config and free GPU memory
-# short_seq_budget: auto-computed from total GPU VRAM (0.6 for L4, 0.7 for A6000, 0.8 for H100)
+# gpu_batch_size: token windows per GPU forward; size for the load (actor halves and retries on OOM)
 # num_agg_actors: auto-computed as ~30% of available CPUs
 
 # =========================================================================
