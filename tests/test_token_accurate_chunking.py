@@ -72,6 +72,16 @@ class TestLengthAuthority:
         assert core.num_special_tokens == 2
         assert core.token_budget == 510  # 512 - 2
 
+    def test_invalid_dtype_raises_actionable_error(self, monkeypatch):
+        # A typo'd DTYPE must fail with a clear ValueError naming the config key,
+        # not a bare AttributeError from getattr(torch, ...). Raised in __init__
+        # before any model/network access, so no model load is needed.
+        import tide2.transformers.core as core_mod
+
+        monkeypatch.setattr(core_mod, "load_model_config", lambda _n: {"MODEL_MAX_LENGTH": 512, "DTYPE": "flaot16"})
+        with pytest.raises(ValueError, match="DTYPE"):
+            core_mod.TransformerCore(model_name="typo-dtype-model", load_immediately=False)
+
 
 # ---------------------------------------------------------------------------
 # 2. Shared windowing primitive: plan_windows

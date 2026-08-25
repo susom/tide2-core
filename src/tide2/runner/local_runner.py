@@ -887,6 +887,20 @@ class LocalJobRunner:
         # per-window token budget itself is the model's real context window,
         # resolved inside the actor from MODEL_MAX_LENGTH (no CHUNK_SIZE here).
         model_config = load_model_config(model_name)
+
+        # Fail fast on the driver if the single length authority is missing/invalid.
+        # MODEL_MAX_LENGTH is a hard requirement (the transformer actor resolves the
+        # per-window token budget from it); validating here surfaces a clear
+        # driver-side error instead of a harder-to-diagnose failure deep inside Ray
+        # worker actor init.
+        _mml = model_config.get("MODEL_MAX_LENGTH")
+        if not isinstance(_mml, int) or _mml <= 0:
+            raise ValueError(
+                f"Model {model_name!r} config is missing a valid 'MODEL_MAX_LENGTH' "
+                f"(got {_mml!r}). It must be a positive integer equal to the model's real "
+                f"tokenized context window (e.g. 512 for BERT/RoBERTa, 8192 for ModernBERT)."
+            )
+
         if chunk_overlap is None:
             chunk_overlap = model_config.get("CHUNK_OVERLAP_SIZE", 40)
 
