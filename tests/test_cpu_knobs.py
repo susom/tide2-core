@@ -253,13 +253,13 @@ class TestPerOperatorReservations:
         assert captured_ds["read"]["ray_remote_args"] == {"num_cpus": 0.25}
         assert captured_ds["write"]["ray_remote_args"] == {"num_cpus": 0.5}
 
-    def test_transformer_read_write_flat_map(self, monkeypatch, tmp_path, captured_ds):
+    def test_transformer_read_write(self, monkeypatch, tmp_path, captured_ds):
         runner = _make_runner(monkeypatch)
         # Avoid ray.cluster_resources(): force CPU-only, single actor each.
         monkeypatch.setattr(runner, "_resolve_transformer_resources", lambda *_a, **_k: (0, True, 1, 1))
         from tide2.transformers import config as tconfig
 
-        monkeypatch.setattr(tconfig, "load_model_config", lambda _name: {"CHUNK_SIZE": 512, "CHUNK_OVERLAP_SIZE": 40})
+        monkeypatch.setattr(tconfig, "load_model_config", lambda _name: {"CHUNK_OVERLAP_SIZE": 40})
         from tide2 import actors
 
         monkeypatch.setattr(actors, "create_transformer_actor", lambda **_k: MagicMock())
@@ -270,13 +270,13 @@ class TestPerOperatorReservations:
             model_name="fake-model",
             model_path=str(tmp_path / "model"),  # skip resolve_model_path download
             read_cpus=0.25,
-            flat_map_cpus=0.3,
             write_cpus=0.5,
             enable_checkpoint=False,
         )
 
+        # No char-chunking flat_map any more: whole notes flow straight to the actor.
         assert captured_ds["read"]["ray_remote_args"] == {"num_cpus": 0.25}
-        assert captured_ds["flat_map"]["num_cpus"] == 0.3
+        assert "flat_map" not in captured_ds
         assert captured_ds["write"]["ray_remote_args"] == {"num_cpus": 0.5}
 
 

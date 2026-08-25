@@ -3,7 +3,7 @@
 # All keys match CLI arg names (with underscores).
 # CLI flags always override config values.
 #
-# Job types: recognizer, anonymizer, transformer, reassembly, pipeline, llm-recognizer
+# Job types: recognizer, anonymizer, transformer, pipeline, llm-recognizer
 
 # =========================================================================
 # Job settings (all job types)
@@ -20,7 +20,7 @@ num_cpus: 224
 object_store_gb: 100
 
 # =========================================================================
-# Actor tuning (recognizer, anonymizer, reassembly, pipeline)
+# Actor tuning (recognizer, anonymizer, pipeline)
 # =========================================================================
 num_actors: 100
 batch_size: 200
@@ -56,8 +56,8 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # model_path: /path/to/local/model
 # bucket_name: "your-gcs-bucket"
 # project_id: "your-gcp-project"
-# chunk_size: 512
-# chunk_overlap: 40
+# chunk_overlap: 40  # token overlap between windows (per-window budget = model's MODEL_MAX_LENGTH)
+# batch_size: whole notes per actor call (host-memory knob; GPU stays bounded by gpu_batch_size)
 # gpu_batch_size: token windows per GPU forward; size for the load (actor halves and retries on OOM)
 # num_agg_actors: auto-computed as ~30% of available CPUs
 

@@ -78,15 +78,12 @@ def load_texts(parquet_path: str, column: str, limit: int | None) -> list[str]:
 
 
 def build_batch(texts: list[str]) -> dict[str, list]:
-    """Build a columnar batch shaped like the Ray Data transformer input."""
+    """Build a columnar batch shaped like the Ray Data transformer input (whole notes)."""
     n = len(texts)
     return {
-        "chunk_text": list(texts),
+        "note_text": list(texts),
         "text_hash": [f"h{i}" for i in range(n)],
-        "chunk_id": list(range(n)),
-        "char_offset_start": [0] * n,
         "patient_id": [f"p{i}" for i in range(n)],
-        "chunk_uid": [f"u{i}" for i in range(n)],
     }
 
 

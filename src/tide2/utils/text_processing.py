@@ -9,7 +9,6 @@ Key Functions:
 - split_text_to_word_chunks: Split text into overlapping chunks with optional metadata
 - sort_tokens_by_position: Sort tokens by start position for BIO aggregation
 - aggregate_bio_tokens: Aggregate BIO-tagged tokens into continuous entity spans
-- reconstruct_document_spans: Map chunk-local spans to document-global coordinates
 - deduplicate_overlapping_entities: Remove duplicate entities using IoU threshold
 
 Author: TIDE 2.0 Team
@@ -495,71 +494,6 @@ def _finalize_span(span_tokens: list[dict], original_text: str) -> dict:
         "start": start_pos,
         "end": end_pos,
     }
-
-
-def reconstruct_document_spans(chunk_predictions: list[dict], original_text: str) -> list[dict]:
-    """
-    Reconstruct entity spans relative to original document positions.
-
-    Takes entity predictions from individual chunks (with chunk-local offsets)
-    and maps them back to document-global coordinates by adding chunk offsets.
-
-    Args:
-        chunk_predictions: List of dicts with keys:
-            - chunk_id: Chunk identifier
-            - char_offset_start: Start position of chunk in document
-            - predictions: List of entities with chunk-local 'start' and 'end'
-        original_text: Original document text for extracting entity text
-
-    Returns:
-        List of entities with document-global coordinates:
-            - entity: Entity type
-            - score: Confidence score
-            - start: Global start position in document
-            - end: Global end position in document
-            - text: Extracted text from document
-            - chunk_id: Source chunk identifier
-
-    Example:
-        >>> chunk_preds = [
-        ...     {
-        ...         "chunk_id": 0,
-        ...         "char_offset_start": 0,
-        ...         "predictions": [{"entity_group": "PERSON", "score": 0.9, "start": 0, "end": 4}]
-        ...     },
-        ...     {
-        ...         "chunk_id": 1,
-        ...         "char_offset_start": 100,
-        ...         "predictions": [{"entity_group": "LOCATION", "score": 0.85, "start": 10, "end": 17}]
-        ...     }
-        ... ]
-        >>> original_text = "John lives in Seattle"
-        >>> entities = reconstruct_document_spans(chunk_preds, original_text)
-        >>> entities[1]["start"]  # Location entity in second chunk
-        110
-    """
-    all_entities = []
-
-    for chunk_pred in chunk_predictions:
-        char_offset = chunk_pred["char_offset_start"]
-
-        for entity in chunk_pred["predictions"]:
-            # Adjust spans from chunk-local to document-global coordinates
-            global_start = int(entity["start"] + char_offset)
-            global_end = int(entity["end"] + char_offset)
-
-            all_entities.append(
-                {
-                    "entity": entity["entity_group"],
-                    "score": entity["score"],
-                    "start": global_start,
-                    "end": global_end,
-                    "text": original_text[global_start:global_end],
-                    "chunk_id": chunk_pred["chunk_id"],
-                }
-            )
-
-    return all_entities
 
 
 def calculate_iou(span1: tuple[int, int], span2: tuple[int, int]) -> float:

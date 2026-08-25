@@ -96,6 +96,7 @@
     },
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 512,
+    "MODEL_MAX_LENGTH": 512,
     "ID_SCORE_MULTIPLIER": 0.5,
     "ID_ENTITY_NAME": "ID"
   },
@@ -152,6 +153,7 @@
     },
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 512,
+    "MODEL_MAX_LENGTH": 512,
     "ID_SCORE_MULTIPLIER": 0.5,
     "ID_ENTITY_NAME": "ID"
   },
@@ -198,6 +200,7 @@
     },
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 512,
+    "MODEL_MAX_LENGTH": 512,
     "ID_SCORE_MULTIPLIER": 0.4,
     "ID_ENTITY_NAME": "ID"
   },
@@ -242,6 +245,7 @@
     "DEFAULT_EXPLANATION": "Identified as {} by finetuned BioClinical-ModernBERT-large_finetuned NER model",
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 8100,
+    "MODEL_MAX_LENGTH": 8192,
     "ID_SCORE_MULTIPLIER": 0.5,
     "ID_ENTITY_NAME": "ID"
   },
@@ -286,6 +290,7 @@
     "DEFAULT_EXPLANATION": "Identified as {} by finetuned microsoft/deberta-v3-base model",
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 512,
+    "MODEL_MAX_LENGTH": 512,
     "ID_SCORE_MULTIPLIER": 0.5,
     "ID_ENTITY_NAME": "ID"
   },
@@ -359,6 +364,7 @@
     "MODEL_TO_PRESIDIO_MAPPING": {},
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 512,
+    "MODEL_MAX_LENGTH": 512,
     "ID_SCORE_MULTIPLIER": 0.5,
     "ID_ENTITY_NAME": "ID",
     "TAG_SCHEME": "BIO",

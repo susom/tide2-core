@@ -223,10 +223,9 @@ class TestEndToEndCoverage:
         actor = _make_actor(core, budget=510, overlap=40)
 
         batch = {
-            "chunk_text": [text],
+            "note_text": [text],
             "text_hash": ["h0"],
-            "chunk_id": [0],
-            "char_offset_start": [0],
+            "patient_id": [""],
         }
         out = actor(batch)
 

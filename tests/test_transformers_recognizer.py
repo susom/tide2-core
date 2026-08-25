@@ -42,6 +42,7 @@ class TestTransformersRecognizer:
                 "DATASET_TO_PRESIDIO_MAPPING": {"PERSON": "PERSON", "LOCATION": "LOCATION", "PHONE": "PHONE_NUMBER"},
                 "CHUNK_OVERLAP_SIZE": 40,
                 "CHUNK_SIZE": 600,
+                "MODEL_MAX_LENGTH": 512,
                 "ID_ENTITY_NAME": "ID",
                 "ID_SCORE_MULTIPLIER": 0.5,
             }
@@ -89,12 +90,12 @@ class TestTransformersRecognizer:
 
         This is the property the homogenization change exists to guarantee: a note
         analyzed through the live ``TransformersRecognizer`` carries the same
-        ``recognizer_name`` as the same note reassembled from cached chunk
-        predictions via ``reassemble_chunks_for_document``.
+        ``recognizer_name`` as the same note processed through the batch path's
+        per-note aggregation stage (``BIOAggregationActor``).
         """
         import json
 
-        from tide2.runner.transformer import reassemble_chunks_for_document
+        from tide2.actors.transformer import BIOAggregationActor
 
         mock_resolve_model.return_value = "/fake/model/path"
         config_path = create_temp_config(self.mock_config)
@@ -104,16 +105,12 @@ class TestTransformersRecognizer:
             # Live path: the recognizer's own name.
             live_name = TransformersRecognizer(model_name="TEST_MODEL").name
 
-            # Cached/batch path: the name baked into reassembled results.
+            # Batch path: the name baked into the aggregation stage's output.
             note_text = "John lives in Seattle"
-            chunk_rows = [
-                {
-                    "chunk_id": 0,
-                    "char_offset_start": 0,
-                    "predictions_json": json.dumps([{"entity_group": "PERSON", "score": 0.9, "start": 0, "end": 4}]),
-                }
-            ]
-            results_json, entity_count = reassemble_chunks_for_document(chunk_rows, note_text, "TEST_MODEL")
+            raw_json = json.dumps(
+                [{"entity": "B-PERSON", "score": 0.9, "start": 0, "end": 4, "word": "John", "index": 1}]
+            )
+            results_json, entity_count = BIOAggregationActor("TEST_MODEL")._format_note(raw_json, note_text)
             assert entity_count == 1
             cached_name = json.loads(results_json)[0]["recognition_metadata"]["recognizer_name"]
 

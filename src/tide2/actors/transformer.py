@@ -2,45 +2,55 @@
 Ray Actors for transformer NER inference.
 
 This module provides:
-- TransformerInferenceActor: GPU actor for raw token inference (no BIO aggregation)
-- BIOAggregationActor: CPU actor for BIO token aggregation and serialization
+- TransformerInferenceActor: GPU actor that tokenizes + token-windows whole notes
+  and forwards them, emitting raw BIO tokens (no aggregation)
+- BIOAggregationActor: CPU actor for per-note BIO aggregation → span dedup →
+  Presidio formatting (emits document-ready recognizer_results_json)
 
 The two actors form a streaming pipeline where GPU inference and CPU
-post-processing run concurrently via Ray Data's streaming executor:
+post-processing run concurrently via Ray Data's streaming executor. Whole notes
+flow to the GPU actor — there is no separate char-chunking stage and no separate
+reassembly stage:
 
-    ReadParquet → FlatMap(chunk) → MapBatches(GPU inference) → MapBatches(BIO aggregation) → Write
+    ReadParquet → MapBatches(GPU inference, per note) → MapBatches(aggregation, per note) → Write
 
 Thread/Process Safety:
     Each Actor maintains its own state. The GPU actor loads a transformer model
-    on a dedicated GPU. The CPU actor is stateless.
+    on a dedicated GPU. The CPU actor holds only the model name.
 
 Usage with Ray Data:
     ds.map_batches(
         TransformerInferenceActor,
-        batch_size=512,
+        batch_size=8,
         num_gpus=1,
         compute=ray.data.ActorPoolStrategy(size=num_gpus),
         fn_constructor_kwargs={"model_name": "StanfordAIMI/stanford-deidentifier-v2"},
     )
     ds.map_batches(
         BIOAggregationActor,
-        batch_size=512,
+        batch_size=8,
         compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
+        fn_constructor_kwargs={"model_name": "StanfordAIMI/stanford-deidentifier-v2"},
     )
 """
 
 import json
 import logging
 import os
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from typing import NamedTuple
 
 import numpy as np
 import torch
 
 from tide2.transformers import TransformerCore
+from tide2.transformers.config import format_transformer_recognizer_name
+from tide2.transformers.core import _Window
+from tide2.transformers.core import plan_windows
 from tide2.utils.text_processing import aggregate_bio_tokens
+from tide2.utils.text_processing import deduplicate_overlapping_entities
 
 logger = logging.getLogger(__name__)
 
@@ -58,24 +68,6 @@ _DEFAULT_GPU_BATCH_SIZE = 64
 _DEFAULT_WINDOW_OVERLAP = 40
 
 
-class _Window(NamedTuple):
-    """One token-space window carved from a single input chunk.
-
-    Windowing (not truncation) is how the actor covers a chunk whose tokenized
-    length exceeds the model's per-window budget. Each window carries the source
-    chunk's index (``owner``) plus the content token ids and their chunk-relative
-    character offsets for this slice — all sourced from a single tokenization, so
-    offsets never need re-basing when window predictions are merged back.
-    """
-
-    owner: int
-    content_ids: list[int]
-    offsets: list[tuple[int, int]]
-    text: str
-    token_start: int  # index of this window's first content token within the chunk
-    token_end: int  # exclusive index of its last content token within the chunk
-
-
 def _numpy_default(obj: Any) -> Any:
     """json.dumps default handler for numpy scalar types."""
     if isinstance(obj, np.integer):
@@ -91,7 +83,8 @@ class TransformerInferenceActor:
 
     This actor is designed to be used with Ray Data's map_batches() with
     ActorPoolStrategy. Each actor loads a transformer model on a GPU and
-    performs token classification inference on text chunks.
+    performs token classification inference on **whole notes** — token-windowing
+    is the actor's single chunker, so there is no upstream char-chunking stage.
 
     The actor returns raw BIO tokens (not aggregated) so that the CPU-heavy
     BIO aggregation can run in a separate BIOAggregationActor, allowing GPU
@@ -99,25 +92,25 @@ class TransformerInferenceActor:
 
     The actor handles:
     - Model loading with GPU placement (via TransformerCore)
-    - Token-accurate windowing of over-budget chunks (never truncation)
+    - Token-accurate windowing of over-budget notes (never truncation)
     - Batch inference with automatic OOM recovery
     - JSON serialization of raw token predictions
 
     Inference flow (single tokenization, window-don't-truncate, OOM-safe retry):
 
-    1. Tokenize every input chunk **once** (ragged, no truncation, char offsets).
-    2. Any chunk whose token length exceeds the per-window budget
-       (``model_max_length`` minus the tokenizer's special tokens) is sliced into
-       overlapping ≤-budget token windows — the earlier truncating path silently
-       dropped the tail of dense chunks, so PHI there was never redacted.
+    1. Tokenize every note **once** (ragged, no truncation, char offsets).
+    2. Any note whose token length exceeds the per-window budget
+       (``token_budget`` = real context window minus special tokens) is sliced
+       into overlapping ≤-budget token windows — the earlier truncating path
+       silently dropped the tail of dense notes, so PHI there was never redacted.
     3. Windows are length-sorted (within this one ``__call__``) and forwarded at a
        fixed batch size, halving on OOM. Each forward releases every CUDA tensor on
        any exit; on CUDA OOM the forward halves the batch and retries over the
        **same** tokenized windows (never re-tokenizing).
-    4. Window predictions are merged back per input chunk and emitted as the same
-       ``predictions_raw_json`` contract as before; overlap-region duplicates are
-       handled by the existing downstream dedup (BIO raw-token tuples; reassembly
-       IoU).
+    4. Window predictions are merged back per note (offsets are already
+       document-relative) and emitted as ``predictions_raw_json``; overlap-region
+       duplicates are handled by the downstream aggregation dedup (BIO raw-token
+       tuples; span-level IoU).
     """
 
     def __init__(
@@ -193,12 +186,13 @@ class TransformerInferenceActor:
         self.model_path = self._core.model_path
         self._seq_len = self._core.model_max_length
 
-        # Per-window content-token budget: the model's max length minus the
-        # special tokens the tokenizer adds (e.g. [CLS]/[SEP]). Chunks longer than
-        # this are windowed, not truncated. Clamp the window overlap below the
-        # budget so the window step stays >= 1 (guaranteed forward progress).
+        # Per-window content-token budget from the single length authority
+        # (:attr:`TransformerCore.token_budget` = real context window minus special
+        # tokens). Notes longer than this are windowed, not truncated. Clamp the
+        # window overlap below the budget so the window step stays >= 1 (guaranteed
+        # forward progress).
         self._num_special_tokens = self._core.num_special_tokens
-        self._token_budget = max(1, self._seq_len - self._num_special_tokens)
+        self._token_budget = self._core.token_budget
         self._window_overlap = min(self._window_overlap, self._token_budget - 1)
 
         # Windows per GPU forward. Operator-supplied for real runs; the nominal
@@ -219,67 +213,59 @@ class TransformerInferenceActor:
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
-        Process a batch of text chunks through transformer inference (raw tokens).
+        Process a batch of **whole notes** through transformer inference (raw tokens).
 
         This method is called by Ray Data's map_batches() with batches in
-        columnar format (dict of column name -> list of values).
+        columnar format (dict of column name -> list of values). Each note is
+        tokenized once and token-windowed against the model's real budget inside
+        this one call, so there is no separate char-chunking stage and the window
+        char offsets are already document-relative.
 
-        Returns raw BIO tokens (not aggregated). BIO aggregation is handled
-        by the downstream BIOAggregationActor for GPU/CPU overlap.
+        Returns raw BIO tokens (not aggregated). Per-note BIO aggregation +
+        span dedup + Presidio formatting is handled by the downstream
+        BIOAggregationActor for GPU/CPU overlap.
 
         Args:
             batch: Dictionary with columnar data:
-                - chunk_text: List of chunk text strings
+                - note_text: List of full document texts
                 - text_hash: List of document text hashes
-                - chunk_id: List of chunk identifiers within each document
-                - char_offset_start: List of character offsets in original document
                 - patient_id: List of patient identifiers (passed through)
 
         Returns:
-            Dictionary with inference results in columnar format:
+            Dictionary with inference results in columnar format (one row per note):
                 - text_hash: Document text hashes (passed through)
-                - chunk_id: Chunk identifiers (passed through)
-                - char_offset_start: Character offsets (passed through)
                 - patient_id: Patient identifiers (passed through)
-                - chunk_text: Chunk text (passed through for BIO aggregation)
-                - predictions_raw_json: JSON-serialized list of raw BIO token dicts
+                - note_text: Full document text (passed through for BIO aggregation)
+                - predictions_raw_json: JSON-serialized list of raw BIO token dicts,
+                  with document-relative char offsets
         """
-        chunk_texts = batch["chunk_text"]
+        note_texts = batch["note_text"]
         text_hashes = batch["text_hash"]
-        chunk_ids = batch["chunk_id"]
-        char_offsets = batch["char_offset_start"]
-        patient_ids = batch.get("patient_id", [""] * len(chunk_texts))
-        chunk_uids = batch.get("chunk_uid", [""] * len(chunk_texts))
+        patient_ids = batch.get("patient_id", [""] * len(note_texts))
 
-        batch_size = len(chunk_texts)
+        batch_size = len(note_texts)
 
         # Handle empty batches
         if batch_size == 0:
             return {
                 "text_hash": [],
-                "chunk_id": [],
-                "chunk_uid": [],
-                "char_offset_start": [],
                 "patient_id": [],
-                "chunk_text": [],
+                "note_text": [],
                 "predictions_raw_json": [],
             }
 
         # Filter out None/empty texts
-        chunk_texts = list(chunk_texts)
-        valid_indices = [i for i, t in enumerate(chunk_texts) if t]
+        note_texts = list(note_texts)
+        valid_indices = [i for i, t in enumerate(note_texts) if t]
         if not valid_indices:
             return {
                 "text_hash": list(text_hashes),
-                "chunk_id": list(chunk_ids),
-                "chunk_uid": list(chunk_uids),
-                "char_offset_start": list(char_offsets),
                 "patient_id": list(patient_ids),
-                "chunk_text": chunk_texts,
+                "note_text": note_texts,
                 "predictions_raw_json": ["[]"] * batch_size,
             }
 
-        valid_texts = [chunk_texts[i] for i in valid_indices]
+        valid_texts = [note_texts[i] for i in valid_indices]
 
         # Run raw inference with OOM recovery (no BIO aggregation)
         self._log_gpu_mem(f"before __call__ (n={len(valid_texts)})")
@@ -288,19 +274,16 @@ class TransformerInferenceActor:
 
         # Map predictions back to original indices and serialize to JSON
         predictions_raw_json_list = ["[]"] * batch_size
-        for idx, preds in zip(valid_indices, raw_results, strict=False):
+        for idx, preds in zip(valid_indices, raw_results, strict=True):
             try:
                 predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
             except Exception:
-                logger.exception(f"Error serializing raw predictions for chunk {chunk_ids[idx]}")
+                logger.exception(f"Error serializing raw predictions for note {text_hashes[idx]}")
 
         return {
             "text_hash": list(text_hashes),
-            "chunk_id": list(chunk_ids),
-            "chunk_uid": list(chunk_uids),
-            "char_offset_start": list(char_offsets),
             "patient_id": list(patient_ids),
-            "chunk_text": chunk_texts,
+            "note_text": note_texts,
             "predictions_raw_json": predictions_raw_json_list,
         }
 
@@ -347,24 +330,24 @@ class TransformerInferenceActor:
             logger.warning("could not record handled OOM to %s", path, exc_info=True)
 
     def _run_inference_raw_with_oom_recovery(self, texts: list[str]) -> list[list[dict]]:
-        """Tokenize once, window long chunks, length-sort, forward, merge results.
+        """Tokenize once, window long notes, length-sort, forward, merge results.
 
-        This is the actor's whole inference path. It tokenizes every chunk exactly
-        once (no truncation), windows any chunk over the per-window token budget
+        This is the actor's whole inference path. It tokenizes every note exactly
+        once (no truncation), windows any note over the per-window token budget
         instead of dropping its tail, sorts the windows by token length within this
         one ``__call__`` (so multi-slice batches don't pad short windows to the
         batch max), forwards them at a fixed batch size that halves on OOM (never
-        re-tokenizing), and merges each chunk's window predictions back into one
-        list. The emitted per-chunk contract is unchanged; overlap-region
-        duplicates are removed downstream (BIO dedup + reassembly IoU).
+        re-tokenizing), and merges each note's window predictions back into one
+        list. Overlap-region duplicates are removed downstream (BIO dedup +
+        span-level IoU in the aggregation actor).
 
         Args:
-            texts: List of chunk text strings to process (assumed non-empty; the
+            texts: List of note text strings to process (assumed non-empty; the
                 caller filters empties).
 
         Returns:
-            List of raw token lists (one per input chunk), aligned to ``texts``.
-            A chunk that tokenizes to zero tokens yields an empty list.
+            List of raw token lists (one per input note), aligned to ``texts``.
+            A note that tokenizes to zero tokens yields an empty list.
 
         Raises:
             RuntimeError: If OOM persists at a single window, or for any non-OOM
@@ -380,7 +363,7 @@ class TransformerInferenceActor:
         input_ids = encoded["input_ids"]
         offset_mapping = encoded["offset_mapping"]
 
-        # 2. Window (don't truncate) any chunk over budget.
+        # 2. Window (don't truncate) any note over budget.
         windows = self._plan_windows(texts, input_ids, offset_mapping)
         if not windows:
             return results
@@ -391,7 +374,7 @@ class TransformerInferenceActor:
         windows.sort(key=lambda w: len(w.content_ids))
 
         # 4. Forward (halve-and-retry on OOM), then merge each window onto its
-        #    owner. Offsets are chunk-relative, so this is a plain concatenation;
+        #    owner. Offsets are document-relative, so this is a plain concatenation;
         #    order across windows does not matter (downstream aggregation sorts by
         #    start position).
         for window, preds in zip(windows, self._forward_windows(windows), strict=True):
@@ -450,112 +433,136 @@ class TransformerInferenceActor:
         input_ids: list[list[int]],
         offset_mapping: list[list[Any]],
     ) -> list[_Window]:
-        """Slice each chunk's tokens into ≤-budget windows (never truncating).
+        """Slice each note's tokens into ≤-budget windows (never truncating).
 
-        A chunk within budget becomes a single window; an over-budget chunk is
-        sliced into windows of ``_token_budget`` content tokens that step forward
-        by ``budget - overlap`` (>= 1), so consecutive windows overlap by
-        ``_window_overlap`` and together cover every token with no gaps. Char
-        offsets are carried straight from the single tokenization.
+        Thin adapter onto the shared :func:`tide2.transformers.core.plan_windows`
+        primitive, applying this actor's resolved ``_token_budget`` and
+        ``_window_overlap``. Kept so the actor's inference path (and its tests)
+        window through one shared implementation.
         """
-        budget = self._token_budget
-        step = max(1, budget - self._window_overlap)
-
-        windows: list[_Window] = []
-        for owner, text in enumerate(texts):
-            ids = input_ids[owner]
-            offs = offset_mapping[owner]
-            n = len(ids)
-            if n == 0:
-                continue
-            if n <= budget:
-                windows.append(_Window(owner, list(ids), [tuple(o) for o in offs], text, 0, n))
-                continue
-            start = 0
-            while start < n:
-                end = min(start + budget, n)
-                windows.append(
-                    _Window(owner, list(ids[start:end]), [tuple(o) for o in offs[start:end]], text, start, end)
-                )
-                if end == n:
-                    break
-                start += step
-        return windows
+        return plan_windows(texts, input_ids, offset_mapping, self._token_budget, self._window_overlap)
 
 
 class BIOAggregationActor:
     """
-    Stateless CPU actor for BIO token aggregation and serialization.
+    CPU actor for per-note BIO aggregation → dedup → Presidio formatting.
 
-    Takes raw BIO tokens from TransformerInferenceActor and aggregates them
-    into entity spans using aggregate_bio_tokens(). This separates CPU-heavy
-    post-processing from GPU inference so they can run concurrently via
-    Ray Data streaming.
+    Takes raw BIO tokens from TransformerInferenceActor (one row per whole note,
+    with document-relative char offsets) and produces document-ready
+    ``recognizer_results_json`` directly — folding in what the old separate
+    reassembly stage did. Because notes are processed whole in the GPU actor,
+    there is no cross-document grouping or offset re-basing left to do; this stage
+    only aggregates BIO tokens, dedups the overlap-region duplicates window
+    overlap produces, and formats to Presidio's RecognizerResult shape. Running it
+    as its own CPU actor lets it overlap GPU inference via Ray Data streaming.
 
-    Input columns:
-        - text_hash, chunk_id, char_offset_start, patient_id: passed through
-        - chunk_text: original text (needed for BIO aggregation)
+    Input columns (one row per note):
+        - text_hash, patient_id: passed through
+        - note_text: full document text (needed for aggregation + matched text)
         - predictions_raw_json: JSON-serialized raw BIO token dicts
 
-    Output columns:
-        - text_hash, chunk_id, char_offset_start, patient_id: passed through
-        - predictions_json: JSON-serialized aggregated entity spans
+    Output columns (one row per note):
+        - text_hash, patient_id, note_text: passed through
+        - recognizer_results_json: JSON-serialized Presidio RecognizerResult list
+        - entity_count: number of entities in recognizer_results_json
+        - processing_timestamp: ISO timestamp of this batch
     """
 
+    def __init__(self, model_name: str) -> None:
+        """Initialize the aggregation actor.
+
+        Args:
+            model_name: Transformer model name, used to stamp the canonical
+                Presidio ``recognizer_name`` on every emitted entity.
+        """
+        self._model_name = model_name
+        self._recognizer_name = format_transformer_recognizer_name(model_name)
+
+    def _format_note(self, raw_json: str, note_text: str) -> tuple[str, int]:
+        """Aggregate one note's raw BIO tokens into ``recognizer_results_json``.
+
+        aggregate BIO tokens → dedup overlapping spans (IoU 0.5) → Presidio shape.
+        Reproduces the span-level output the old chunk→reassembly path produced.
+        """
+        raw_tokens = json.loads(raw_json) if raw_json else []
+        if not raw_tokens or not note_text:
+            return "[]", 0
+
+        # Remove duplicate raw tokens (window overlap produces them; the raw-token
+        # dedupe key includes ``index`` so identical spans from different windows
+        # survive to here — the span-level IoU dedup below collapses them).
+        raw_tokens = [dict(t) for t in {tuple(d.items()) for d in raw_tokens}]
+
+        # BIO tokens → aggregated spans (document-relative offsets already).
+        aggregated = aggregate_bio_tokens(raw_tokens, note_text)
+
+        # Normalize to the {entity,...} shape deduplicate_overlapping_entities and
+        # the formatter expect (aggregate_bio_tokens emits ``entity_group``).
+        entities = [
+            {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"]} for s in aggregated
+        ]
+        entities = deduplicate_overlapping_entities(entities, iou_threshold=0.5)
+
+        ner_results = []
+        for e in entities:
+            start = e["start"]
+            end = e["end"]
+            matched_text = note_text[start:end] if note_text and start < len(note_text) else ""
+            ner_results.append(
+                {
+                    "entity_type": e["entity"],
+                    "start": start,
+                    "end": end,
+                    "score": e["score"],
+                    "analysis_explanation": None,
+                    "recognition_metadata": {
+                        "recognizer_name": self._recognizer_name,
+                        "matched_pattern": matched_text,
+                        "recognizer_identifier": f"{self._recognizer_name}_{id(e)}",
+                    },
+                }
+            )
+
+        return json.dumps(ner_results, ensure_ascii=False), len(ner_results)
+
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """Aggregate raw BIO tokens into entity spans."""
-        chunk_texts = batch["chunk_text"]
+        """Aggregate raw BIO tokens into document-level recognizer results."""
+        note_texts = batch["note_text"]
         raw_json_list = batch["predictions_raw_json"]
         text_hashes = batch["text_hash"]
-        chunk_ids = batch["chunk_id"]
-        char_offsets = batch["char_offset_start"]
-        patient_ids = batch.get("patient_id", [""] * len(chunk_texts))
-        chunk_uids = batch.get("chunk_uid", [""] * len(chunk_texts))
+        patient_ids = batch.get("patient_id", [""] * len(note_texts))
 
-        batch_size = len(chunk_texts)
+        batch_size = len(note_texts)
 
         if batch_size == 0:
             return {
                 "text_hash": [],
-                "chunk_id": [],
-                "chunk_uid": [],
-                "char_offset_start": [],
                 "patient_id": [],
-                "predictions_json": [],
-                "chunk_status": [],
+                "note_text": [],
+                "recognizer_results_json": [],
+                "entity_count": [],
+                "processing_timestamp": [],
             }
 
-        predictions_json_list = []
-        chunk_statuses = []
+        timestamp = datetime.now(tz=UTC).isoformat()
+        results_json_list: list[str] = []
+        entity_counts: list[int] = []
         for i in range(batch_size):
             try:
-                raw_tokens = json.loads(raw_json_list[i])
-                text = chunk_texts[i] if chunk_texts[i] else ""
-
-                if not raw_tokens or not text:
-                    predictions_json_list.append("[]")
-                    chunk_statuses.append("success")
-                    continue
-
-                # Remove duplicates (can occur from chunking)
-                raw_tokens = [dict(t) for t in {tuple(d.items()) for d in raw_tokens}]
-
-                aggregated = aggregate_bio_tokens(raw_tokens, text)
-                predictions_json_list.append(json.dumps(aggregated, ensure_ascii=False))
-                chunk_statuses.append("success")
+                results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
             except Exception:
-                logger.exception(f"Error aggregating predictions for chunk {chunk_ids[i]}")
-                predictions_json_list.append("[]")
-                chunk_statuses.append("failed")
+                logger.exception(f"Error aggregating predictions for note {text_hashes[i]}")
+                results_json, count = "[]", 0
+            results_json_list.append(results_json)
+            entity_counts.append(count)
 
         return {
             "text_hash": list(text_hashes),
-            "chunk_id": list(chunk_ids),
-            "chunk_uid": list(chunk_uids),
-            "char_offset_start": list(char_offsets),
             "patient_id": list(patient_ids),
-            "predictions_json": predictions_json_list,
-            "chunk_status": chunk_statuses,
+            "note_text": list(note_texts),
+            "recognizer_results_json": results_json_list,
+            "entity_count": entity_counts,
+            "processing_timestamp": [timestamp] * batch_size,
         }
 
 
