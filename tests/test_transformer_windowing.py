@@ -16,7 +16,7 @@ Asserted (mapping to the plan's acceptance criteria):
     (d) under a simulated CUDA OOM, results stay complete/ordered and the
         tokenizer is called exactly once (no re-tokenize);
     plus edge cases: within-budget parity (single window), exactly-at-budget,
-    empty/zero-token, degenerate long-but-few-tokens, and multi-chunk bucketing.
+    empty/zero-token, degenerate long-but-few-tokens, and multi-chunk forwarding.
 """
 
 import json
@@ -76,14 +76,14 @@ class _FakeTokenizerCore:
 
 
 def _make_actor(
-    core: _FakeTokenizerCore, *, budget: int, overlap: int, cap=lambda _t: 10**9
+    core: _FakeTokenizerCore, *, budget: int, overlap: int, gpu_batch_size: int = 10**9
 ) -> TransformerInferenceActor:
     actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
     actor._core = core
     actor._token_budget = budget
     actor._window_overlap = overlap
     actor._num_special_tokens = core.num_special_tokens
-    actor._batch_cap_for_tokens = cap
+    actor._gpu_batch_size = gpu_batch_size
     actor._handled_oom_count = 0
     return actor
 
@@ -250,12 +250,12 @@ class TestOomKeepsCoverageAndTokenizesOnce:
         assert actor._handled_oom_count > 0  # the OOM path actually fired
 
 
-class TestMultiChunkBucketing:
-    """Bucketing groups windows by length and merges every chunk correctly."""
+class TestMultiChunkForward:
+    """Length-sort + fixed-batch forward merges every chunk back correctly."""
 
     def test_multiple_chunks_each_fully_covered(self):
         core = _FakeTokenizerCore(chars_per_token=1)
-        actor = _make_actor(core, budget=8, overlap=2, cap=lambda _t: 2)  # small cap -> many groups
+        actor = _make_actor(core, budget=8, overlap=2, gpu_batch_size=2)  # small batch -> many slices
         texts = ["x" * 20, "y" * 3, "z" * 15, "w" * 9]
 
         results = actor._run_inference_raw_with_oom_recovery(texts)
@@ -263,23 +263,23 @@ class TestMultiChunkBucketing:
         assert len(results) == len(texts)
         for text, preds in zip(texts, results, strict=True):
             assert _covered_chars(preds) == set(range(len(text)))
-        # Every forward respected the window-batch cap of 2.
+        # Every forward respected the gpu_batch_size slice of 2.
         assert all(size <= 2 for size in core.forward_sizes)
 
-    def test_buckets_are_length_homogeneous(self):
+    def test_different_length_chunks_sorted_and_merged(self):
+        # Texts of different lengths across many slices: the sort groups like-length
+        # windows (so a slice never pads a short window up to a long one) yet
+        # merge-by-owner still reassembles every chunk fully and in input order.
         core = _FakeTokenizerCore(chars_per_token=1)
-        actor = _make_actor(core, budget=100, overlap=0, cap=lambda _t: 3)
-        # Distinct within-budget lengths -> one window each, bucketed by length.
-        texts = ["a" * n for n in [7, 1, 3, 9, 2, 5, 4, 8, 6]]
-        enc = core.tokenize_ragged(texts)
-        windows = actor._plan_windows(texts, enc["input_ids"], enc["offset_mapping"])
+        actor = _make_actor(core, budget=100, overlap=0, gpu_batch_size=3)
+        texts = ["a" * n for n in [7, 1, 3, 9, 2, 5, 4, 8, 6]]  # one within-budget window each
 
-        groups = actor._bucket_windows(windows)
+        results = actor._run_inference_raw_with_oom_recovery(texts)
 
-        # Concatenating groups reproduces the fully length-sorted window order.
-        flat = [windows[i] for g in groups for i in g]
-        assert [len(w.content_ids) for w in flat] == sorted(len(w.content_ids) for w in windows)
-        # Within each group lengths are non-decreasing (homogeneous slice).
-        for g in groups:
-            lengths = [len(windows[i].content_ids) for i in g]
-            assert lengths == sorted(lengths)
+        # results stay aligned to the input order despite the internal length sort.
+        assert len(results) == len(texts)
+        for text, preds in zip(texts, results, strict=True):
+            assert _covered_chars(preds) == set(range(len(text)))
+
+        # Every forward respected the gpu_batch_size slice.
+        assert all(size <= 3 for size in core.forward_sizes)

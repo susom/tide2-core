@@ -772,7 +772,6 @@ class LocalJobRunner:
         num_transformer_actors: int | None = None,
         batch_size: int = 512,
         gpu_batch_size: int | None = None,
-        short_seq_budget: float | None = None,
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         num_agg_actors: int | None = None,
@@ -846,9 +845,9 @@ class LocalJobRunner:
                 available CPUs in CPU-only mode.
             batch_size: Batch size for map_batches (chunks per actor call).
                 Larger values reduce Ray Data dispatch overhead.
-            gpu_batch_size: Batch size for HuggingFace pipeline inference
-                (texts fed to GPU at once). None = auto-compute from model
-                config and available GPU memory.
+            gpu_batch_size: Number of token windows per GPU forward. Size it for
+                the load; if a batch OOMs, the actor halves and retries. None = a
+                nominal default that only needs to run out of the box.
             chunk_size: Maximum chunk size in tokens (default: from model config)
             chunk_overlap: Overlap between chunks in tokens (default: from model config)
             num_agg_actors: Number of CPU actors for BIO aggregation.
@@ -928,7 +927,6 @@ class LocalJobRunner:
             bucket_name=bucket_name,
             project_id=project_id,
             gpu_batch_size=gpu_batch_size,
-            short_seq_budget=short_seq_budget,
         )
 
         input_pattern = self._resolve_input_pattern(input_path)

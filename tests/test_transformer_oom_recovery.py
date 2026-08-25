@@ -75,20 +75,20 @@ class _FakeCore:
 
 
 def _make_actor(
-    core: _FakeCore, *, budget: int = 10**9, overlap: int = 0, cap=lambda _t: 10**9
+    core: _FakeCore, *, budget: int = 10**9, overlap: int = 0, gpu_batch_size: int = 10**9
 ) -> TransformerInferenceActor:
-    """Build a model-less actor wired to a fake core and a stubbed length cap.
+    """Build a model-less actor wired to a fake core and a fixed GPU batch size.
 
     A huge ``budget`` puts each text in a single window (window count == text
-    count), so ``cap`` alone drives grouping/shrink and the fake core alone
-    decides OOM — the real memory model is never touched.
+    count), so ``gpu_batch_size`` alone drives slicing/shrink and the fake core
+    alone decides OOM — no memory model is involved.
     """
     actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
     actor._core = core
     actor._token_budget = budget
     actor._window_overlap = overlap
     actor._num_special_tokens = core.num_special_tokens
-    actor._batch_cap_for_tokens = cap
+    actor._gpu_batch_size = gpu_batch_size
     actor._handled_oom_count = 0
     return actor
 
