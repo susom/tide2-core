@@ -2,6 +2,13 @@
 
 <!-- version list -->
 
+## [1.3.0](https://github.com/susom/tide2-core/compare/v1.2.4...v1.3.0) (2026-08-26)
+
+
+### Features
+
+* **transformers:** add sentry-clinical-ner model config and default the pipeline notebook to it ([#55](https://github.com/susom/tide2-core/issues/55)) ([d5e0231](https://github.com/susom/tide2-core/commit/d5e023195c3de032f8be5ebcc54b9af303d960cf))
+
 ## [1.2.4](https://github.com/susom/tide2-core/compare/v1.2.3...v1.2.4) (2026-07-24)
 
 
