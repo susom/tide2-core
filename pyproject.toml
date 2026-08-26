@@ -16,7 +16,7 @@ description = "An advanced data de-identification and anonymization toolkit comb
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE-MIT"]
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 authors = [{ name = "TIDE 2.0 Team" }]
 keywords = [
     "anonymization",
@@ -38,6 +38,7 @@ classifiers = [
     "Topic :: Text Processing :: Linguistic",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
     # Google Cloud services
