@@ -9,7 +9,6 @@ Key Functions:
 - split_text_to_word_chunks: Split text into overlapping chunks with optional metadata
 - sort_tokens_by_position: Sort tokens by start position for BIO aggregation
 - aggregate_bio_tokens: Aggregate BIO-tagged tokens into continuous entity spans
-- reconstruct_document_spans: Map chunk-local spans to document-global coordinates
 - deduplicate_overlapping_entities: Remove duplicate entities using IoU threshold
 
 Author: TIDE 2.0 Team
@@ -19,6 +18,8 @@ Updated: January 2026
 from __future__ import annotations
 
 import hashlib
+from typing import Literal
+from typing import overload
 
 
 def compute_text_hash(text: str) -> str:
@@ -39,6 +40,18 @@ def compute_text_hash(text: str) -> str:
         '64ec88ca00b268e5ba1a35678a1b5316d212f4f366b2477232534a8aeca37f3c'
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@overload
+def split_text_to_word_chunks(
+    input_length: int, chunk_length: int, overlap_length: int, return_metadata: Literal[False] = False
+) -> list[list[int]]: ...
+
+
+@overload
+def split_text_to_word_chunks(
+    input_length: int, chunk_length: int, overlap_length: int, return_metadata: Literal[True]
+) -> list[dict[str, int]]: ...
 
 
 def split_text_to_word_chunks(
@@ -88,46 +101,35 @@ def split_text_to_word_chunks(
     chunk_length_chars = chunk_length * 4
     overlap_length_chars = overlap_length * 4
 
+    # Compute (start, end) spans once, then format per requested output shape so
+    # each return statement produces a homogeneously-typed list.
     if input_length_tokens < chunk_length:
-        if return_metadata:
-            return [
-                {
-                    "start": 0,
-                    "end": input_length,
-                    "chunk_id": 0,
-                    "char_offset_start": 0,
-                    "char_offset_end": input_length,
-                }
-            ]
-        return [[0, input_length]]
+        spans: list[tuple[int, int]] = [(0, input_length)]
+    else:
+        if chunk_length <= overlap_length:
+            import logging
 
-    if chunk_length <= overlap_length:
-        import logging
-
-        logger = logging.getLogger(__name__)
-        logger.warning(
-            "overlap_length should be shorter than chunk_length, setting overlap_length to half of chunk_length"
-        )
-        overlap_length = chunk_length // 2
-        overlap_length_chars = overlap_length * 4
-
-    chunks = []
-
-    # Calculate step size in characters (chunk_length - overlap_length) in token space → chars
-    step_size_chars = (chunk_length - overlap_length) * 4
-
-    for chunk_id, i in enumerate(range(0, input_length - overlap_length_chars, step_size_chars)):
-        start = i
-        end = min(i + chunk_length_chars, input_length)
-
-        if return_metadata:
-            chunks.append(
-                {"start": start, "end": end, "chunk_id": chunk_id, "char_offset_start": start, "char_offset_end": end}
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "overlap_length should be shorter than chunk_length, setting overlap_length to half of chunk_length"
             )
-        else:
-            chunks.append([start, end])
+            overlap_length = chunk_length // 2
+            overlap_length_chars = overlap_length * 4
 
-    return chunks
+        # Calculate step size in characters (chunk_length - overlap_length) in token space → chars
+        step_size_chars = (chunk_length - overlap_length) * 4
+
+        spans = [
+            (i, min(i + chunk_length_chars, input_length))
+            for i in range(0, input_length - overlap_length_chars, step_size_chars)
+        ]
+
+    if return_metadata:
+        return [
+            {"start": s, "end": e, "chunk_id": cid, "char_offset_start": s, "char_offset_end": e}
+            for cid, (s, e) in enumerate(spans)
+        ]
+    return [[s, e] for s, e in spans]
 
 
 def sort_tokens_by_position(tokens: list[dict]) -> list[dict]:
@@ -197,7 +199,7 @@ def _is_word_start_token(token: dict) -> bool:
     return False  # Conservative default for continuation tokens
 
 
-def _normalize_token_labels(
+def _normalize_token_labels(  # noqa: PLR0915 # long but cohesive single-pass label normalization
     tokens: list[dict],
     original_text: str,
     max_gap: int = 2,
@@ -307,7 +309,7 @@ def _normalize_token_labels(
             )
 
         # Normalize all tokens in the group to the winning type
-        for j, token in enumerate(group):
+        for token in group:
             current_type = _get_entity_type(token["entity"])
             if current_type != best_type:
                 # Create a copy with normalized entity type
@@ -492,71 +494,6 @@ def _finalize_span(span_tokens: list[dict], original_text: str) -> dict:
         "start": start_pos,
         "end": end_pos,
     }
-
-
-def reconstruct_document_spans(chunk_predictions: list[dict], original_text: str) -> list[dict]:
-    """
-    Reconstruct entity spans relative to original document positions.
-
-    Takes entity predictions from individual chunks (with chunk-local offsets)
-    and maps them back to document-global coordinates by adding chunk offsets.
-
-    Args:
-        chunk_predictions: List of dicts with keys:
-            - chunk_id: Chunk identifier
-            - char_offset_start: Start position of chunk in document
-            - predictions: List of entities with chunk-local 'start' and 'end'
-        original_text: Original document text for extracting entity text
-
-    Returns:
-        List of entities with document-global coordinates:
-            - entity: Entity type
-            - score: Confidence score
-            - start: Global start position in document
-            - end: Global end position in document
-            - text: Extracted text from document
-            - chunk_id: Source chunk identifier
-
-    Example:
-        >>> chunk_preds = [
-        ...     {
-        ...         "chunk_id": 0,
-        ...         "char_offset_start": 0,
-        ...         "predictions": [{"entity_group": "PERSON", "score": 0.9, "start": 0, "end": 4}]
-        ...     },
-        ...     {
-        ...         "chunk_id": 1,
-        ...         "char_offset_start": 100,
-        ...         "predictions": [{"entity_group": "LOCATION", "score": 0.85, "start": 10, "end": 17}]
-        ...     }
-        ... ]
-        >>> original_text = "John lives in Seattle"
-        >>> entities = reconstruct_document_spans(chunk_preds, original_text)
-        >>> entities[1]["start"]  # Location entity in second chunk
-        110
-    """
-    all_entities = []
-
-    for chunk_pred in chunk_predictions:
-        char_offset = chunk_pred["char_offset_start"]
-
-        for entity in chunk_pred["predictions"]:
-            # Adjust spans from chunk-local to document-global coordinates
-            global_start = int(entity["start"] + char_offset)
-            global_end = int(entity["end"] + char_offset)
-
-            all_entities.append(
-                {
-                    "entity": entity["entity_group"],
-                    "score": entity["score"],
-                    "start": global_start,
-                    "end": global_end,
-                    "text": original_text[global_start:global_end],
-                    "chunk_id": chunk_pred["chunk_id"],
-                }
-            )
-
-    return all_entities
 
 
 def calculate_iou(span1: tuple[int, int], span2: tuple[int, int]) -> float:
