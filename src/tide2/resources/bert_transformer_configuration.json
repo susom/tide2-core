@@ -285,7 +285,6 @@
     "DEFAULT_EXPLANATION": "Identified as {} by the stanford-med-hdr/tide2-sentry-clinical-ner NER model",
     "CHUNK_OVERLAP_SIZE": 40,
     "CHUNK_SIZE": 512,
-    "MODEL_MAX_LENGTH": 512,
     "ID_SCORE_MULTIPLIER": 0.5,
     "ID_ENTITY_NAME": "ID"
   }
