@@ -19,8 +19,9 @@ run distributed via **Ray** (`ray.data.map_batches` over CPU/GPU actors).
 
 ## Gotchas (read first — these are the non-obvious rules)
 
-- **uv only** — never `pip` or `poetry`. **Python 3.12 only** (`>=3.12,<3.13`),
-  constrained by the `spacy`/`thinc` C-extension stack.
+- **uv only** — never `pip` or `poetry`. **Python 3.12 or 3.13** (`>=3.12,<3.14`).
+  3.14 is excluded until the `spacy`/`thinc` C-extension stack ships and is tested
+  against cp314 wheels.
 - **`make setup-hooks` is mandatory** — installs the pre-commit hooks **and** the
   `commit-msg` hook. Without it, commits aren't validated locally and fail later.
   (The Dev Container runs it for you.)

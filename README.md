@@ -342,7 +342,7 @@ Pages artifact.
 ## Requirements
 
 - **Dev Container**: Recommended — provides the full environment with no manual setup (requires Docker and VS Code with the Dev Containers extension)
-- **Python**: 3.12 (required, `>=3.12,<3.13`) — constrained to 3.12 for compatibility with the `spacy`/`thinc` C-extension stack and other pinned dependencies.
+- **Python**: 3.12 or 3.13 (required, `>=3.12,<3.14`) — 3.14 is excluded until the `spacy`/`thinc` C-extension stack and other pinned dependencies are tested against cp314 wheels.
 - **Package Manager**: uv (not pip or poetry)
 - **Virtual Environment**: `.venv/` (activated automatically in the Dev Container; must be activated manually for local installs)
 - **Core Dependencies**: Presidio, Ray (`>=2.54`), Cryptography, Faker, Google Cloud libraries, and the ML inference stack (`torch`, `transformers>=5.0`, `spacy`) — all required and shipped in the base install

@@ -33,8 +33,8 @@ make setup-hooks          # REQUIRED: installs pre-commit AND the commit-msg hoo
 Notes:
 
 - This project uses **`uv`** — not `pip` or `poetry`.
-- Python **3.12 only** (`>=3.12,<3.13`), constrained by the `spacy`/`thinc`
-  C-extension stack.
+- Python **3.12 or 3.13** (`>=3.12,<3.14`); 3.14 is excluded until the
+  `spacy`/`thinc` C-extension stack is tested against cp314 wheels.
 
 ## Branching & workflow (trunk-based)
 
