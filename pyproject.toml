@@ -113,6 +113,11 @@ dev = [
     "cython",
     "ipykernel",
     "jupyter",
+    # Security floors for jupyter-stack transitives (dev-only; not shipped in the wheel)
+    "jupyterlab>=4.6.2", # transitive via jupyter; pinned for security (CVE-2026-73415/73416/73417)
+    "jupyter-server>=2.20.0", # transitive via jupyter; pinned for security (CVE-2026-44727)
+    "mistune>=3.3.0", # transitive via nbconvert; pinned for security (multiple parser CVEs)
+    "bleach>=6.4.0", # transitive via nbconvert; pinned for security (GHSA-gj48-438w-jh9v, GHSA-8rfp-98v4-mmr6)
     "scikit-learn>=1.8,<2",
     "scipy>=1.12,<2",
     "tqdm>=4.67,<5",
