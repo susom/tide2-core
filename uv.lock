@@ -4208,7 +4208,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.4,<10" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1,<8" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.1,<8" },
-    { name = "python-multipart", specifier = ">=0.0.31" },
+    { name = "python-multipart", specifier = ">=0.0.31,<1" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
     { name = "ray", extras = ["data", "default"], specifier = ">=2.56,<3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },

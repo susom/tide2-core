@@ -79,7 +79,7 @@ dependencies = [
     "starlette>=1.0,<2", # transitive via streamlit; pinned for security/compat
     "click>=8.3.3,<9", # transitive via streamlit/ray/presidio; pinned for security (CVE-2026-7246)
     "pillow>=12.3.0,<13", # transitive via streamlit; pinned for security (multiple image-parser CVEs)
-    "python-multipart>=0.0.31", # transitive via streamlit; pinned for security (CVE-2026-53538/53539/53540)
+    "python-multipart>=0.0.31,<1", # transitive via streamlit; pinned for security (CVE-2026-53538/53539/53540)
     "gitpython>=3.1.59,<4", # transitive via streamlit; pinned for security (multiple CVEs)
     "tornado>=6.5.8,<7", # transitive via streamlit; pinned for security (CVE-2026-82397)
     # Utilities
