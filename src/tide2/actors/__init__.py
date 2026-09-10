@@ -27,7 +27,6 @@ Example:
 from tide2.actors.anonymizer import AnonymizerActor
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.actors.anonymizer import create_anonymizer_actor_class  # Backwards compatibility
-from tide2.actors.reassembly import ReassemblyActor
 from tide2.actors.recognizer import NoOpContextEnhancer
 from tide2.actors.recognizer import RecognizerActor
 
@@ -68,7 +67,6 @@ __all__ = [
     "BIOAggregationActor",
     "LlmRecognizerActor",
     "NoOpContextEnhancer",
-    "ReassemblyActor",
     "RecognizerActor",
     "TransformerInferenceActor",
     "create_anonymizer_actor",

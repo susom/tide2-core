@@ -6,6 +6,7 @@ This module provides common functions used across all execution modes
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +23,29 @@ DEFAULT_SEGMENT_SIZE = 20
 # Default dashboard host (localhost for security)
 DEFAULT_DASHBOARD_HOST = "127.0.0.1"
 
+# CUDA allocator hint for GPU actors. expandable_segments lets PyTorch's caching
+# allocator grow/shrink segments instead of pre-carving fixed blocks, reducing
+# fragmentation-driven OOM headroom loss. NOTE: this is a fragmentation mitigation,
+# NOT a leak fix (see the OOM-recovery fix in transformers/core.py and
+# actors/transformer.py). It must be set BEFORE CUDA initializes in the worker
+# process, which is why it is injected via Ray's runtime_env rather than in the
+# actor __init__ (too late — CUDA is already up).
+_PYTORCH_CUDA_ALLOC_CONF_DEFAULT = "expandable_segments:True"
 
-def resolve_input_files(input_glob: str | list[str]) -> list[str]:
+
+def gpu_worker_runtime_env() -> dict[str, Any]:
+    """Ray ``runtime_env`` that configures the CUDA allocator for GPU workers.
+
+    Returns a ``{"env_vars": {...}}`` dict setting ``PYTORCH_CUDA_ALLOC_CONF`` so
+    Ray applies it to every worker process before CUDA initializes. Respects an
+    operator-provided ``PYTORCH_CUDA_ALLOC_CONF`` in the driver environment
+    (passed through verbatim) instead of overriding it.
+    """
+    alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", _PYTORCH_CUDA_ALLOC_CONF_DEFAULT)
+    return {"env_vars": {"PYTORCH_CUDA_ALLOC_CONF": alloc_conf}}
+
+
+def resolve_input_files(input_glob: str | list[str]) -> list[str]:  # noqa: PLR0911 - one return per input kind
     """
     Resolve glob pattern to list of files.
 
@@ -132,6 +154,8 @@ def init_ray_local(
         "ignore_reinit_error": True,
         "include_dashboard": True,
         "_metrics_export_port": metrics_port,
+        # Configure the CUDA allocator for GPU actors before CUDA initializes.
+        "runtime_env": gpu_worker_runtime_env(),
     }
 
     if num_cpus:

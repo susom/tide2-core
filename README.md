@@ -95,7 +95,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 ## Features
 
 ### Entity Recognition
-- **Transformer-based NER**: HuggingFace transformer models with direct batch inference (bypasses HF pipeline), BIO token aggregation, and chunk-to-document reassembly
+- **Transformer-based NER**: HuggingFace transformer models with direct batch inference (bypasses HF pipeline), token-accurate windowing of whole notes, and per-note BIO aggregation to document-level entities
 - **Regex recognizers**: Phone, URL/IP, Email, SSN, Address — replacements for Presidio defaults (10-100x faster)
 - **Healthcare-specific**: MRN, Accession Number, HAR code recognizers
 - **Known values detection**: Aho-Corasick based matching against patient databases
@@ -118,11 +118,13 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Ray-based Batch Processing
 - **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
-- **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor`, `ReassemblyActor` for `ray.data.map_batches`
-- **Two-stage GPU/CPU pipeline**: GPU inference returns raw BIO tokens; CPU actors aggregate them concurrently via Ray Data streaming
-- **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with batch tokenize → single GPU forward pass → offset-based extraction
-- **Adaptive GPU batching**: Auto-computes batch size from model config and free GPU memory; adjusts based on text lengths with VRAM-aware budgets (override via `--short-seq-budget`)
-- **OOM recovery**: Automatic batch splitting on CUDA out-of-memory errors
+- **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor` for `ray.data.map_batches`
+- **Two-stage GPU/CPU pipeline**: whole notes flow to the GPU actor (tokenize → token-window → forward), which returns raw BIO tokens; the CPU aggregation actor turns them into document-level `recognizer_results_json` concurrently via Ray Data streaming. There is no separate char-chunking stage and no separate reassembly stage — the actor's token-windowing is the single chunker.
+- **Single length authority**: the model's real tokenized context window (`MODEL_MAX_LENGTH`, pinned per model in `bert_transformer_configuration.json`) is the only sequence-length source. The per-window content-token budget is `MODEL_MAX_LENGTH` minus the tokenizer's special tokens; a model config missing `MODEL_MAX_LENGTH` fails fast rather than falling back to the tokenizer's unreliable sentinel.
+- **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with a single batch tokenize → GPU forward pass → offset-based extraction. Tokenization happens **exactly once** per batch (ragged, no truncation, with char offsets); windowing and OOM retries reuse that single tokenization and never re-tokenize.
+- **Token-accurate windowing**: The GPU actor covers **every token of every note**. Any note that tokenizes past the per-window token budget is sliced into overlapping ≤-budget token windows instead of being truncated — the earlier char-approximation chunker (`1 token ≈ 4 chars`) plus truncation silently dropped the tail of token-dense notes (real clinical text runs ~2.2–3.2 chars/token, so a char-sized chunk can be well over 512 tokens and lose ~30% of its content), so PHI there was never detected or redacted. Because notes are windowed whole, char offsets are already document-relative; window predictions are merged back per note and overlap-region duplicates are removed by the aggregation stage (BIO raw-token tuples + span-level IoU).
+- **GPU batching**: Windows are forwarded at an operator-supplied batch size (`--gpu-batch-size`), which should be set for real runs. Within a single `__call__` the windows are length-sorted so multi-slice batches don't pad short windows to the batch max. There is no auto batch sizing or memory model — size the forward for the load and rely on OOM recovery as the safety net.
+- **OOM recovery**: On CUDA out-of-memory the GPU actor halves the batch and re-forwards the whole set over the **same** already-tokenized windows (never re-tokenizing) — a single owner of sub-batching. Recovery releases the failed forward's GPU tensors at the source so `empty_cache()` can actually reclaim between attempts and the retry converges instead of exhausting VRAM. The GPU allocator is also configured with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (via Ray `runtime_env`) as fragmentation headroom.
 - **Fault tolerance**: Actor restarts, task retries, graceful shutdown
 - **YAML config**: All CLI arguments can be specified in a YAML config file (`--config`)
 
@@ -131,10 +133,15 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **String parsers**: Name parsing/classification, address parsing, format detection
 - **Span metrics**: Gold vs ML evaluation, O(n log n) conflict resolution
 - **GCS cache**: Auto-download models from GCS to `~/.cache/tide2/`
-- **Model compilation**: `torch.compile` with mega-cache support for faster inference startup
+
+> **Note:** the batch inference pipeline runs **eager** (no `torch.compile`).
+> Compilation was measured to add nothing at the batch sizes this pipeline runs,
+> and its only wired mode (`reduce-overhead` / CUDA graphs) grew *reserved* VRAM
+> per input shape and leaked toward OOM under shape churn, so it was removed. A
+> stray `compiled_cache.bin` beside the model weights is ignored.
 
 ### Command Line Tools
-- **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
+- **`tide2-runner`**: Ray-based single-node job runner with five job types: `recognizer`, `anonymizer`, `transformer`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
 - **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
 
 
@@ -155,7 +162,7 @@ tide2-runner run recognizer -i ./data/input -o ./data/output
 tide2-runner run recognizer -i gs://bucket/input -o gs://bucket/output \
     --num-cpus 224 --num-actors 200
 
-# Run transformer NER on GPU
+# Run transformer NER on GPU (runs eager; the batch pipeline does not use torch.compile)
 tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
     --model StanfordAIMI/stanford-deidentifier-v2 --batch-size 2048
 
@@ -176,12 +183,12 @@ tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
 
 # Run on a small box (e.g. 2-CPU Google Colab) WITHOUT deadlocking. Two fixes
 # are required together (see below): fractional CPUs AND --no-checkpoint.
-# GPU box (T4): the transformer actor is GPU-pinned, so budget read/flat-map/
-# write/agg fractionally; CPU-only box: also give the transformer actor ~C-1.
+# GPU box (T4): the transformer actor is GPU-pinned, so budget read/write/agg
+# fractionally; CPU-only box: also give the transformer actor ~C-1.
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --model StanfordAIMI/stanford-deidentifier-v2 \
     --num-actors 1 --cpus-per-actor 0.5 --worker-num-cpus 1.0 \
-    --read-cpus 0.25 --flat-map-cpus 0.25 --write-cpus 0.25 \
+    --read-cpus 0.25 --write-cpus 0.25 \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 ```
 
@@ -194,7 +201,7 @@ the stage hangs forever at `0/1` (`backpressured:tasks(ResourceBudget)`). On a
 2-CPU box there are **two independent causes — both must be fixed together**:
 
 1. **Whole-CPU operator reservations.** Defaults reserve ~1 CPU per operator;
-   read + flat_map + actor + agg + write exceeds 2. Fix with fractional CPUs.
+   read + actor + agg + write exceeds 2. Fix with fractional CPUs.
 2. **The checkpoint shuffle.** Row-level resume injects a sort + repartition
    shuffle (extra operators) that re-triggers the deadlock *even with* fractional
    CPUs. Fix with `--no-checkpoint` (trades resume capability, not correctness).
@@ -204,7 +211,7 @@ on, so omitting them preserves large-VM behavior. Size them to fit the sum of a
 stage's *concurrent* operator reservations within the available CPUs (C = total CPUs):
 
 - **Big box (C ≳ 16)**: use defaults (omit all knobs).
-- **Transformer stage**: `--read-cpus`, `--flat-map-cpus`, `--write-cpus`,
+- **Transformer stage**: `--read-cpus`, `--write-cpus`,
   `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
   transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
   caps the actor's torch threads).
@@ -257,20 +264,18 @@ tide2/
 ├── recognizers/              # PII detection (Presidio EntityRecognizer subclasses)
 ├── anonymizers/              # PII replacement (Presidio Operator subclasses)
 ├── transformers/             # Core NER inference engine (TransformerCore)
-│   ├── core.py              # Model loading, direct inference, BIO aggregation
+│   ├── core.py              # Model loading, direct inference, tokenize+window primitive, BIO aggregation
 │   └── config.py            # Model configuration management
 ├── actors/                   # Ray actors for distributed batch processing
-│   ├── transformer.py       # GPU inference actor + CPU BIO aggregation actor
+│   ├── transformer.py       # GPU inference actor (tokenize→window→forward) + CPU aggregation actor
 │   ├── recognizer.py        # CPU recognizer actor
 │   ├── anonymizer.py        # CPU anonymizer actor
-│   ├── reassembly.py        # Chunk-to-document reassembly actor
 │   └── llm_recognizer.py    # LLM-based recognizer actor
 ├── cryptographic/            # FPE, key management, date jitter derivation
 ├── string_parsers/           # Name/address parsing, format detection
 ├── runner/                   # Ray-based single-node job runner + CLI
-│   ├── local_runner.py      # LocalJobRunner: transformer/recognizer/anonymizer/reassembly/pipeline/llm
+│   ├── local_runner.py      # LocalJobRunner: transformer/recognizer/anonymizer/pipeline/llm
 │   ├── cli.py               # tide2-runner CLI with YAML config support
-│   ├── transformer.py       # Document chunking and reassembly logic
 │   ├── fault_tolerance.py   # Actor restarts, graceful shutdown
 │   └── utils.py             # Runner utilities
 ├── cli/                      # Streamlit visualizer

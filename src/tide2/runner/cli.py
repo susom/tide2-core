@@ -22,6 +22,25 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _warn_deprecated_chunk_size(args: argparse.Namespace) -> None:
+    """Emit a DeprecationWarning if --chunk-size was passed (transformer/pipeline).
+
+    The per-window token budget is now the model's real context window
+    (``MODEL_MAX_LENGTH``); ``--chunk-size`` no longer has any effect and is
+    ignored. ``--chunk-overlap`` still controls the token overlap between windows.
+    """
+    if getattr(args, "chunk_size", None) is not None:
+        import warnings
+
+        warnings.warn(
+            "--chunk-size is deprecated and ignored: the per-window token budget is now the "
+            "model's real context window (MODEL_MAX_LENGTH). Remove it; use --chunk-overlap "
+            "to control window overlap.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """Run a job."""
     from tide2.runner.local_runner import LocalJobRunner
@@ -97,6 +116,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             if not args.model:
                 print("Error: --model is required for transformer jobs")
                 sys.exit(1)
+            _warn_deprecated_chunk_size(args)
             transformer_kwargs: dict = {}
             for attr, key in [
                 ("num_gpus", "num_gpus"),
@@ -105,13 +125,9 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("model_path", "model_path"),
                 ("bucket_name", "bucket_name"),
                 ("project_id", "project_id"),
-                ("chunk_size", "chunk_size"),
                 ("chunk_overlap", "chunk_overlap"),
-                ("compile_cache_path", "compile_cache_path"),
                 ("num_agg_actors", "num_agg_actors"),
-                ("short_seq_budget", "short_seq_budget"),
                 ("read_cpus", "read_cpus"),
-                ("flat_map_cpus", "flat_map_cpus"),
                 ("write_cpus", "write_cpus"),
                 ("agg_num_cpus", "agg_num_cpus"),
                 ("transformer_cpus", "transformer_cpus"),
@@ -120,36 +136,11 @@ def cmd_run(args: argparse.Namespace) -> None:
                 val = getattr(args, attr, None)
                 if val is not None:
                     transformer_kwargs[key] = val
-            if getattr(args, "compile_model", False):
-                transformer_kwargs["compile_model"] = True
-            if getattr(args, "pre_chunked", False):
-                transformer_kwargs["pre_chunked"] = True
             result = runner.run_transformer(
                 input_path=args.input,
                 output_path=args.output,
                 model_name=args.model,
                 **transformer_kwargs,
-            )
-        elif args.job_type == "reassembly":
-            if not args.model:
-                print("Error: --model is required for reassembly jobs")
-                sys.exit(1)
-
-            reassembly_kwargs: dict = {}
-            for attr, key in [
-                ("num_actors", "num_actors"),
-                ("batch_size", "batch_size"),
-                ("cpus_per_actor", "num_cpus"),
-            ]:
-                val = getattr(args, attr, None)
-                if val is not None:
-                    reassembly_kwargs[key] = val
-
-            result = runner.run_reassembly(
-                input_path=args.input,
-                output_path=args.output,
-                model_name=args.model,
-                **reassembly_kwargs,
             )
         elif args.job_type == "llm-recognizer":
             if not args.project_id:
@@ -197,20 +188,17 @@ def cmd_run(args: argparse.Namespace) -> None:
                 sys.exit(1)
 
             # Build per-stage kwargs from CLI flags
+            _warn_deprecated_chunk_size(args)
             t_kw: dict = {}
             for attr, key in [
                 ("num_gpus", "num_gpus"),
                 ("bucket_name", "bucket_name"),
                 ("project_id", "project_id"),
-                ("chunk_size", "chunk_size"),
                 ("chunk_overlap", "chunk_overlap"),
                 ("batch_size", "batch_size"),
                 ("model_path", "model_path"),
-                ("compile_cache_path", "compile_cache_path"),
                 ("num_agg_actors", "num_agg_actors"),
-                ("short_seq_budget", "short_seq_budget"),
                 ("read_cpus", "read_cpus"),
-                ("flat_map_cpus", "flat_map_cpus"),
                 ("write_cpus", "write_cpus"),
                 ("agg_num_cpus", "agg_num_cpus"),
                 ("transformer_cpus", "transformer_cpus"),
@@ -219,8 +207,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 val = getattr(args, attr, None)
                 if val is not None:
                     t_kw[key] = val
-            if getattr(args, "compile_model", False):
-                t_kw["compile_model"] = True
 
             r_kw: dict = {}
             for attr, key in [
@@ -362,7 +348,7 @@ Examples:
     )
     run_p.add_argument(
         "job_type",
-        choices=["recognizer", "anonymizer", "transformer", "reassembly", "pipeline", "llm-recognizer"],
+        choices=["recognizer", "anonymizer", "transformer", "pipeline", "llm-recognizer"],
         help="Type of job to run",
     )
     run_p.add_argument("--config", "-c", help="Path to YAML config file (CLI flags override config values)")
@@ -376,7 +362,8 @@ Examples:
     run_p.add_argument(
         "--gpu-batch-size",
         type=int,
-        help="GPU batch size for HF pipeline inference (transformer jobs, auto-computed if not set)",
+        help="Token windows per GPU forward (transformer jobs). Size for the load; "
+        "the actor halves and retries on OOM. Nominal default if not set.",
     )
     run_p.add_argument("--object-store-gb", type=int, help="Object store memory in GB")
     run_p.add_argument("--cpus-per-actor", type=int, help="CPUs per actor (default: 2)")
@@ -395,11 +382,6 @@ Examples:
         "--write-cpus",
         type=float,
         help="CPUs per write_parquet task (recognizer/anonymizer/transformer/llm-recognizer/pipeline, default: 1.0)",
-    )
-    run_p.add_argument(
-        "--flat-map-cpus",
-        type=float,
-        help="CPUs per chunking flat_map task (transformer/pipeline jobs, default: 1.0)",
     )
     run_p.add_argument(
         "--agg-num-cpus",
@@ -425,26 +407,21 @@ Examples:
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")
     run_p.add_argument("--bucket-name", help="GCS bucket for model loading (transformer jobs)")
     run_p.add_argument("--project-id", help="GCP project ID for model loading (transformer jobs)")
-    run_p.add_argument("--chunk-size", type=int, help="Max chunk size in tokens (transformer jobs, default: 512)")
     run_p.add_argument(
-        "--chunk-overlap", type=int, help="Overlap between chunks in tokens (transformer jobs, default: 40)"
+        "--chunk-size",
+        type=int,
+        help="DEPRECATED and ignored (transformer/pipeline jobs): the per-window token budget is now "
+        "the model's real context window (MODEL_MAX_LENGTH), not a separate chunk size.",
     )
     run_p.add_argument(
-        "--compile-model", action="store_true", help="Apply torch.compile with mega-cache (transformer jobs)"
-    )
-    run_p.add_argument("--compile-cache-path", help="Path to compiled cache .bin file (transformer jobs)")
-    run_p.add_argument(
-        "--pre-chunked", action="store_true", help="Input is pre-chunked, skip chunking step (transformer jobs only)"
+        "--chunk-overlap",
+        type=int,
+        help="Token overlap between adjacent windows for over-budget notes (transformer/pipeline jobs, default: 40)",
     )
     run_p.add_argument(
         "--num-agg-actors",
         type=int,
         help="Number of CPU actors for BIO aggregation (transformer jobs, auto-computed if not set)",
-    )
-    run_p.add_argument(
-        "--short-seq-budget",
-        type=float,
-        help="Memory budget fraction for short sequences (transformer jobs, auto-computed from GPU VRAM if not set)",
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")
