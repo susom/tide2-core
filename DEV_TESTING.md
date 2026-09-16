@@ -33,18 +33,28 @@ from scratch:
     (46,435 rows, since deleted) with no errors.
 - **Benchmarking investigation is closed out** — see the *Benchmarking /
   GPU-utilization investigation* section below for the full results table.
-  Conclusion: ~50-65% GPU duty cycle is the likely ceiling for this
-  architecture; don't re-try hypotheses 2-4, 6, or 7 without new evidence.
+  Conclusion: ~50-65% GPU duty cycle is the likely ceiling for
+  *overlap*-based approaches on this architecture; don't re-try hypotheses
+  2-4, 6, or 7 without new evidence.
 - **CUDA streams / async pipelining (hypothesis #7) was tried and reverted**
   this session — single-thread software pipelining (`_launch_forward`/
   `_collect_results` split) + pinned memory/`non_blocking=True` H2D copy
   showed no reproducible wall-clock or utilization improvement. `core.py` is
   back to the hypothesis #4 baseline; see the results table for the full
   A/B evidence before trying a variant of this again.
-- **Not yet tried** (bigger, untested ideas if resuming perf work):
-  process-based tokenization, or a genuinely separate `torch.cuda.Stream()`
-  with fixed-size buffers + explicit events (see hypothesis #7's write-up for
-  why plain default-stream reordering wasn't enough).
+- **Length-bucketing (hypothesis #8) is a confirmed win** this session —
+  sorting `chunk_texts` by length before batching (in
+  `examples/gpu_batch_pipeline.py`'s `run_transformer_stage`) cut real
+  padding waste instead of trying to overlap around it: 69s → 37s on the
+  1-file input, reproduced twice, correctness-verified against baseline. This
+  is currently the only change with a large, reproducible win in this whole
+  investigation. Only lives in the (gitignored) example script, not `core.py`.
+- **Not yet tried** (bigger, untested ideas if resuming perf work): re-test
+  `--gpu-batch-size` now that bucketing is in place (hypothesis #3's "bigger
+  batch = worse" finding may not hold anymore), verify the attention backend
+  is `sdpa` not `eager`, process-based tokenization, or
+  `torch.compile(mode="reduce-overhead")` with CUDA graphs (needs a
+  `scripts/compile_model.py` cache-generation tool that doesn't exist yet).
 - **Teardown**: if wrapping up for good, `kubectl delete -f dev-pod.yaml` (see
   *Cleanup* at the end of this file) — otherwise leave the pod running, it's
   cheap to reuse across sessions.
@@ -208,6 +218,7 @@ re-run these): all changes below except the two marked "kept" were reverted.
 | 5 | Fine-grained timing of one `_forward_batch_direct` call (tokenize vs to_device vs forward vs softmax vs copy_back, with `torch.cuda.synchronize()` around each) | Direct instrumentation, 300 sub-batches | **Real finding**: tokenize = 33% of time, forward pass = 66%, everything else ≈0%. Tokenize runs entirely before the GPU call with zero overlap. |
 | 6 | Hide tokenize behind the GPU forward pass via a background thread (HF fast tokenizers release the GIL for the Rust tokenization loop) | Prefetch next sub-batch's tokenization while the current forward pass runs | Overlap *mechanism* worked (`tokenize_wait≈0.00s` for 13/15 sample batches) but **total critical-path time was unchanged** (56.34s vs 56.25s) — the background thread's Python-level tensor/`BatchEncoding` construction contends for the GIL with the main thread's own work, canceling the benefit. Reverted. |
 | 7 | Single-thread software pipelining (no background thread, so no GIL contention): split `_forward_and_postprocess` into `_launch_forward` (H2D copy + forward + softmax, enqueues async CUDA work, no `.cpu()`) and `_collect_results` (the `.cpu()` sync point), then reorder `infer_raw_direct`'s loop to depth-2 — tokenize sub-batch i+1 and enqueue its GPU work *before* blocking on sub-batch i's results. Also pinned the tokenizer's output tensors (`.pin_memory()`) and used `non_blocking=True` for the H2D copy, since a plain `.to(device)` on pageable memory is synchronous regardless of pipelining and would silently defeat it. | **No reproducible improvement.** Full 1-file pipeline run: 70s (baseline was 70-72s). Isolated `infer_raw_direct` over all 16,216 chunks: 56.9-57.6s pipelined vs 57.6s baseline — within run-to-run noise. A paired N=30 in-process comparison of "launch+immediate collect" vs "launch+tokenize_next+collect" gave statistically indistinguishable means (160ms vs 158ms, stdev ~40ms). A separate 5-trial CUDA-event probe *did* show partial overlap in isolation (GPU-reported exec time ≈ total wall time including the CPU work gap, i.e. the CPU work looked "free"), but this didn't survive averaging over many real batches — most of the apparent per-batch timing variance turned out to be batch-content variance (variable real sequence length → variable padding → variable true compute time), not an overlap effect. Reverted (`core.py` back to the vectorized-postprocessing baseline from hypothesis #4). |
+| 8 | Reduce actual GPU compute (not just overlap it): hypothesis #3 already proved padding waste is real, but chunks were still batched in document order, so each batch of 64 padded to whatever the longest chunk in that arbitrary grouping was. Sort `chunk_texts` by character length (cheap proxy for token count) before batching in `run_transformer_stage` (examples/gpu_batch_pipeline.py), run inference on the sorted order, then unsort predictions back to the original per-chunk order before reassembly. | **Confirmed real win.** Same-session back-to-back A/B on the 1-file input: baseline 69s → bucketed 37s (~46% wall-clock reduction), reproduced twice. Correctness verified two ways: (a) row order/`text_hash` alignment unaffected (sorting only reorders the GPU call, not `chunk_rows`/output rows); (b) output content diffed positionally against baseline — 88/15368 rows differ only in Faker-substituted values (URLs/IDs, which are unseeded-random by design: a baseline-vs-itself rerun showed the *same* 88 mismatches), and entity_count differs by ±1 on only 7/15368 rows (0.046%), consistent with ordinary fp16 batch-composition numerical noise, not a bucketing bug. **Kept** — this is scratch/example code only (`examples/` is gitignored on this branch, not part of the library). |
 
 **Where this leaves it**: ~50-65% GPU duty cycle looks like the natural
 ceiling for this model/tokenizer/batch-size on this GPU given the current
@@ -215,24 +226,42 @@ synchronous, single-stream `TransformerCore` architecture. Every "overlap it
 in Python" lever has been tried — background thread (#6), single-thread
 reorder + pinned memory + non_blocking H2D (#7) — and each either didn't
 apply (the thing it targeted wasn't actually the bottleneck) or was canceled
-by the GIL or by batch-to-batch variance swamping the effect size. Further
-gains would require either:
+by the GIL or by batch-to-batch variance swamping the effect size. Hypothesis
+#8 broke that pattern by *reducing real GPU work* (less padding waste)
+instead of trying to hide CPU time behind it, and it's the first thing in
+this whole investigation with a large, reproducible, verified effect.
+Further gains would require either:
+- **Extending #8**: combine length-bucketing with the existing
+  `--gpu-batch-size`/`--row-batch-size` knobs (larger batches now waste much
+  less padding since same-length chunks are grouped together — hypothesis
+  #3's "bigger batch = worse" finding may no longer hold once bucketed;
+  worth re-testing), or verify the attention backend (`attn_implementation`)
+  is `sdpa` rather than `eager` (neither `TransformerCore` nor the example
+  script sets this explicitly today), or
 - **Process-based tokenization** (real GIL avoidance, but untested — passing
   tokenized tensors across a process boundary has its own serialization cost
   that could easily eat the gain), or
+- **`torch.compile(mode="reduce-overhead", fullgraph=True)` with CUDA
+  graphs** — `TransformerCore` already has the `compile_model`/
+  `compile_cache_path` plumbing, but `_resolve_compile_cache_path` expects a
+  pre-built `compiled_cache.bin` generated by `scripts/compile_model.py`,
+  which **does not exist in this repo**. CUDA graphs want fixed shapes, so
+  this would need combining with #8's bucketing (or padding to one fixed
+  length) to avoid constant recompilation. Bigger lift than #8, not
+  attempted, or
 - **A genuinely separate `torch.cuda.Stream()` for H2D copies** with
-  fixed-size padded buffers (to remove batch-content variance from the
-  comparison) and explicit `torch.cuda.Event` wait/record pairs — not
-  attempted; #7 only reordered work on the *default* stream, which relies on
-  the CUDA driver already overlapping compute with unrelated CPU work rather
-  than forcing it via a second stream. Given #7's evidence that any real
-  overlap window here is on the order of tens of ms (swamped by ~40ms of
-  inherent per-batch variance), this is a low-confidence next step, not a
-  promising one.
+  fixed-size padded buffers and explicit `torch.cuda.Event` wait/record
+  pairs — not attempted; #7 only reordered work on the *default* stream.
+  Given #7's evidence that any real overlap window here is on the order of
+  tens of ms (swamped by ~40ms of inherent per-batch variance), this is a
+  low-confidence next step, not a promising one.
 
 Don't re-try hypotheses 2-4, 6, or 7 without new evidence; they're falsified
-for this workload. If picking this back up, start from #5's breakdown (get a
-fresh tokenize/forward split first) rather than guessing again.
+for this workload. If picking this back up on the overlap side, start from
+#5's breakdown (get a fresh tokenize/forward split first) rather than
+guessing again. On the compute-reduction side (the more promising direction
+after #8), start by re-benchmarking `--gpu-batch-size` now that bucketing is
+in place.
 
 ## Cleanup
 
