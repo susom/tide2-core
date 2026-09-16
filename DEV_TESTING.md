@@ -68,10 +68,26 @@ from scratch:
   --num-gpu-workers 3`); ~25% faster than the session's starting point (89s).
   Full commands + numbers in the *Final baseline* subsection at the end of
   the results section.
+- **Ray vs no-Ray comparison done** (this branch's whole reason for
+  existing) — see the *Ray vs no-Ray comparison* section right after *Final
+  baseline*. Headline: `main`'s Ray pipeline takes 391.4s vs this branch's
+  67s on the same input, **but this is not a clean "Ray adds overhead"
+  result** — `main` is missing hypothesis #8's length-bucketing entirely,
+  which also explains a 22% entity-span mismatch rate between the two (a
+  real, reproducible fp16 numerical effect of unsorted/unbucketed batch
+  padding, not a correctness bug — root-caused via an isolated
+  `batch_size=1` repro). The wall-clock gap's own root cause is still
+  unexplained (`--gpu-batch-size` ruled out; Ray orchestration overhead is
+  the leading untested candidate). Read the whole section before quoting
+  the 67s vs 391s number out of context.
 - **Not yet tried** (bigger, untested ideas if resuming perf work): verify
   the attention backend is `sdpa` not `eager`, process-based tokenization, or
   `torch.compile(mode="reduce-overhead")` with CUDA graphs (needs a
   `scripts/compile_model.py` cache-generation tool that doesn't exist yet).
+  For the Ray comparison specifically: isolate the timing gap's real cause
+  (Ray Data/actor orchestration overhead vs. the 10-actor CPU-stage fan-out),
+  or port length-bucketing into `main`'s `TransformerInferenceActor` for a
+  fair apples-to-apples Ray-overhead measurement.
 - **Teardown**: if wrapping up for good, `kubectl delete -f dev-pod.yaml` (see
   *Cleanup* at the end of this file) — otherwise leave the pod running, it's
   cheap to reuse across sessions.
@@ -333,6 +349,198 @@ worker, defaults before hypotheses #8/#10/#11): **~25% wall-clock reduction**,
 and GPU memory usage went from ~1.2GB (barely touching the L4's 23GB) to
 ~3.3-4.4GB — the hardware is now actually being used instead of sitting
 mostly idle.
+
+## Ray vs no-Ray comparison (does removing Ray actually help?)
+
+This whole branch exists as a proof-of-concept: is `main`'s Ray-based
+`tide2-runner run pipeline` actually slower than a plain-Python
+single/multi-process pipeline doing the same work? This section runs
+`main`'s real Ray code on the *same pod, same 3-file input* as the Final
+baseline above, and is far more nuanced than a single wall-clock number —
+read the whole thing before quoting just the headline numbers.
+
+### Getting main's Ray code running on this pod (environment notes)
+
+The dev pod's image was built from *this* branch, which has no `ray`
+installed (`chore: nuked ray`) and a different `src/tide2` (this branch has
+its own accumulated changes — see *Why the comparison is confounded* below).
+To run `main`'s code on the same pod without a full image rebuild:
+
+- `git show main:pyproject.toml` / `uv.lock` don't need a full
+  `make docker-gpu` — the `production-gpu` Dockerfile target requires
+  `prefect.yaml`/`prefect_job_template.json`, which aren't tracked in this
+  repo (deployment artifacts supplied separately) and aren't needed just to
+  run the CLI. Instead: `kubectl cp` main's `pyproject.toml`/`uv.lock` onto
+  the pod, then `uv sync --locked --no-dev` **inside the pod** (the `uv`
+  binary is already there from the image build) — main's dependency set is
+  a superset of this branch's (adds `ray[default,data]`, `streamlit`,
+  `google-cloud-*`), so this is a safe, one-directional upgrade of the venv.
+- **`src/tide2` has to be swapped wholesale, not just `runner`/`actors`.**
+  The two branches differ well beyond Ray removal (`transformers/core.py`
+  ~198 lines, `transformers/reassembly.py` moved to `runner/transformer.py`,
+  `recognizers/nlp_engine.py`, etc.) — copying just `runner`/`actors` from
+  `main` onto this branch's `src/tide2` leaves an inconsistent hybrid that
+  either won't import or won't reflect either branch's real behavior.
+  Whichever CLI you need to run (`tide2-runner` vs
+  `examples/gpu_batch_pipeline.py`), replace the *entire*
+  `/opt/tide2/src/tide2` on the pod with that branch's version first:
+  ```bash
+  POD=$(kubectl get pods -n starr -l app.kubernetes.io/name=tide2-gpu-dev -o jsonpath='{.items[0].metadata.name}')
+  # To run main's tide2-runner:
+  git archive main -- src/tide2 | tar -x -C /tmp/main_src   # from a `main` checkout/worktree
+  kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
+  kubectl cp /tmp/main_src/src/tide2 "starr/$POD:/opt/tide2/src/tide2"
+  # To go back to running examples/gpu_batch_pipeline.py on this branch:
+  git archive nobody-loves-raymond -- src/tide2 | tar -x -C /tmp/nlr_src
+  kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
+  kubectl cp /tmp/nlr_src/src/tide2 "starr/$POD:/opt/tide2/src/tide2"
+  ```
+  (The venv/dependencies from the `uv sync` above don't need to change back
+  and forth — main's superset venv runs both branches' code fine.)
+- **Ray's memory auto-detection fails in this container as-is.** `ray.init()`
+  with no explicit sizing raises `ValueError: ... amount of memory on this
+  node available for tasks and actors (-7.79 GB) is less than -22% of total`.
+  Cause: `free -h` inside the pod reports the **host's** 125GiB (cgroup-blind
+  `/proc/meminfo`), while the actual enforced limit is the pod's 32Gi
+  (`cat /sys/fs/cgroup/memory.max` → `34359738368`) — Ray's sizing heuristic
+  gets a mismatched signal and computes negative headroom. Fix: pass explicit
+  `--num-cpus 24 --num-gpus 1 --object-store-gb 4` to `tide2-runner run
+  pipeline` (same class of fix as the README's small-box
+  `--object-store-gb` guidance, just triggered here by cgroup/host memory
+  mismatch rather than a genuinely tiny box).
+
+### Headline numbers
+
+```bash
+SALT_HEX=$(cat temp/salt.bin)
+KEY_HEX=$(cat temp/key.bin)
+kubectl exec -n starr "$POD" -- tide2-runner run pipeline \
+  --input /data/scratch/jmesterh-dev/input \
+  --output /data/scratch/jmesterh-dev/output/main_ray_baseline \
+  --model StanfordAIMI/stanford-deidentifier-v2 \
+  --num-cpus 24 --num-gpus 1 --object-store-gb 4 \
+  --salt-hex "$SALT_HEX" --key-hex "$KEY_HEX"
+```
+
+| | No-Ray (this branch, Final baseline) | `main` (Ray) |
+|---|---|---|
+| Wall-clock, 3-file input | **67s** | **391.4s** (~5.8x slower) |
+| Breakdown | n/a (single combined run) | transformer 244.8s + recognizer 61.8s + anonymizer 62.4s |
+| Output rows | 46,435 (verified) | 46,435 (verified) |
+
+Re-ran with `--gpu-batch-size 64` (matching this branch's default, instead of
+main's VRAM-auto-computed value) to test whether batch size explains the
+gap: **389.9s — no change.** Batch size is **not** the driver of the timing
+difference; root cause of the ~5.8x gap is still open (see below).
+
+### Why row counts aren't good enough QC — and what to compare instead
+
+`anonymized_note_text` and simple row counts are **not** valid correctness
+signals here: `FakerAnonymizer`-substituted values (URLs/emails/IDs) are
+unseeded-random by design (confirmed earlier — hypothesis #8's QC section —
+that even reruns of the *same* code produce different Faker output for the
+same input), so comparing anonymized text or counting rows tells you nothing
+about whether recognition itself agrees.
+
+The right comparison is the **resolved entity spans** — `(entity_type,
+start, end)` — since these are the one thing that should be idempotent
+across implementations for the same input text, independent of which
+(randomized) anonymization operator ran afterward. Two more wrinkles:
+
+- **`text_hash` isn't a safe join key** — 12,432 of 15,368 rows in file 0
+  alone share a `text_hash` with another row (duplicate note content across
+  different patients). Joined instead on **`row_id`**, which is already
+  present in the input parquet and threaded through by `main`'s pipeline,
+  but wasn't preserved by `examples/gpu_batch_pipeline.py`'s output — added
+  a `"row_id": note.get("row_id")` passthrough to `run_cpu_stage`'s output
+  row (see the script) to enable the join.
+- **Compare *resolved* spans, not raw per-recognizer spans.** `main`'s
+  `04_recognizer_output` checkpoint has *unresolved* overlapping spans
+  (e.g. PHONE/MRN/ID all claiming the same characters, from different
+  recognizers, before conflict resolution) — not comparable to this
+  branch's already-resolved `recognizer_results_json`. `main`'s
+  `06_anonymizer_output`'s `anonymizer_results_json` **is** post-resolution
+  and is the correct comparison point.
+
+Comparison script joins on `row_id`, and for each side builds
+`frozenset({(entity_type, start, end), ...})` per row, then checks set
+equality:
+
+```python
+noray_spans[row_id] = frozenset((s["entity_type"], s["start"], s["end"]) for s in json.loads(recognizer_results_json))
+ray_spans[row_id]   = frozenset((s["entity_type"], s["start"], s["end"]) for s in json.loads(anonymizer_results_json))
+```
+
+**Result: 46,435/46,435 row_ids matched on both sides; 77.8% exact span-set
+match (36,143), 22.2% mismatch (10,292).**
+
+### Root-causing the 22% span mismatch
+
+Ruled out, one by one (all verified identical or functionally equivalent
+between the two branches):
+
+- `reassemble_chunks_for_document`/`chunk_document_row` — byte-identical
+  logic; only moved from `runner/transformer.py` (main) to
+  `transformers/reassembly.py` (this branch) when Ray was removed.
+- `chunk_size`/`chunk_overlap` — both resolve to 512/40 for
+  `StanfordAIMI/stanford-deidentifier-v2` on both branches (main reads
+  these from the model's own config entry in
+  `bert_transformer_configuration.json`, which happens to match this
+  branch's hardcoded example-script defaults for this specific model).
+- `aggregate_bio_tokens` (BIO→entity merging) — unchanged between branches.
+- `infer_raw_direct`/`_forward_batch_direct` — main has the
+  pre-hypothesis-#4 nested-loop version, this branch has the vectorized
+  version; same math, same output.
+- dtype (`float16` default) and `transformers`/`torch`/`tokenizers`/
+  `presidio-analyzer`/`presidio-anonymizer` versions — all identical
+  between the two `uv.lock` files.
+- `--gpu-batch-size` — tested explicitly (see *Headline numbers* above):
+  matching it to 64 changed the match rate from 77.8% to 71.9%, i.e. no
+  systematic effect (well within the fp16 batch-composition noise floor
+  already characterized in hypothesis #8's QC, just a larger sample of it).
+
+**Found**: an isolated, single-text (`batch_size=1`, no padding at all)
+call to `TransformerCore.infer_raw_direct` on one specific mismatched note
+(`row_id=132db386...`, a short 255-char note) reproduces this branch's
+entity boundary (`HOSPITAL` at chars 145-152, `"LPCH IP"`) **exactly** —
+not main's actual Ray-pipeline output for the same text (145-155,
+`"LPCH IP NE"`). That wrong boundary is **reproducible**, not random: both
+completed Ray runs (auto batch size and matched `--gpu-batch-size 64`) give
+the identical (145, 155) for this row_id. Conclusion: **main's Ray actor
+batches chunks in whatever order Ray Data's blocks happen to produce — not
+sorted by length, unlike this branch's hypothesis #8 bucketing** — so this
+short note ends up batched alongside much longer chunks, producing heavy,
+uneven padding. That padding measurably (and reproducibly) shifts this
+borderline BIO tag's boundary via fp16 attention numerics. This is a real
+numerical sensitivity to *unsorted* batch composition, not a logic bug in
+either branch's recognition code.
+
+**Still unexplained**: the ~5.8x wall-clock gap itself. `--gpu-batch-size`
+is ruled out (identical timing with and without it matched). Leading
+untested candidates: Ray Data/actor task-scheduling and object-store
+serialization overhead, or the recognizer/anonymizer stage's 10-actor
+fan-out (main) vs this branch's single `ProcessPoolExecutor` worker
+(hypothesis #1). Not isolated in this session — start here if resuming.
+
+### Why the comparison is confounded (read before quoting the 67s vs 391s number)
+
+This is **not** a clean "Ray adds 5.8x overhead" result:
+
+1. `main`'s Ray pipeline has **no length-bucketing at all** — hypothesis #8
+   (this session's single biggest win, ~46% wall-clock reduction on its
+   own) only exists in this branch's example script. The 22% span mismatch
+   traces directly to that missing optimization's absence, not to Ray
+   itself being wrong.
+2. This branch has accumulated its own extra optimizations beyond removing
+   Ray (hypotheses #8-#11) that `main` has no equivalent of.
+3. The wall-clock gap's actual root cause (Ray orchestration overhead vs.
+   something else) is still open — see above.
+
+A fair "does Ray specifically add overhead" experiment would need to port
+hypothesis #8's length-bucketing into `main`'s `TransformerInferenceActor`
+and re-measure, isolating Ray's orchestration cost from this branch's other
+independent wins. Not done here. Take the 67s vs 391s numbers as "current
+state of each branch as found," not as an isolated Ray-overhead measurement.
 
 ## Cleanup
 
