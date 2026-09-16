@@ -49,10 +49,12 @@ from scratch:
   1-file input, reproduced twice, correctness-verified against baseline. This
   is currently the only change with a large, reproducible win in this whole
   investigation. Only lives in the (gitignored) example script, not `core.py`.
-- **Not yet tried** (bigger, untested ideas if resuming perf work): re-test
-  `--gpu-batch-size` now that bucketing is in place (hypothesis #3's "bigger
-  batch = worse" finding may not hold anymore), verify the attention backend
-  is `sdpa` not `eager`, process-based tokenization, or
+- **`--gpu-batch-size` sweep with bucketing (hypothesis #9) is done** —
+  bigger batches are *still* worse even with bucketing (16=35s, 32=36s,
+  64=37s, 96=40s, 128=49s, 256=76s). Keep the default at 64; don't try
+  increasing it again without new evidence.
+- **Not yet tried** (bigger, untested ideas if resuming perf work): verify
+  the attention backend is `sdpa` not `eager`, process-based tokenization, or
   `torch.compile(mode="reduce-overhead")` with CUDA graphs (needs a
   `scripts/compile_model.py` cache-generation tool that doesn't exist yet).
 - **Teardown**: if wrapping up for good, `kubectl delete -f dev-pod.yaml` (see
@@ -219,25 +221,25 @@ re-run these): all changes below except the two marked "kept" were reverted.
 | 6 | Hide tokenize behind the GPU forward pass via a background thread (HF fast tokenizers release the GIL for the Rust tokenization loop) | Prefetch next sub-batch's tokenization while the current forward pass runs | Overlap *mechanism* worked (`tokenize_wait≈0.00s` for 13/15 sample batches) but **total critical-path time was unchanged** (56.34s vs 56.25s) — the background thread's Python-level tensor/`BatchEncoding` construction contends for the GIL with the main thread's own work, canceling the benefit. Reverted. |
 | 7 | Single-thread software pipelining (no background thread, so no GIL contention): split `_forward_and_postprocess` into `_launch_forward` (H2D copy + forward + softmax, enqueues async CUDA work, no `.cpu()`) and `_collect_results` (the `.cpu()` sync point), then reorder `infer_raw_direct`'s loop to depth-2 — tokenize sub-batch i+1 and enqueue its GPU work *before* blocking on sub-batch i's results. Also pinned the tokenizer's output tensors (`.pin_memory()`) and used `non_blocking=True` for the H2D copy, since a plain `.to(device)` on pageable memory is synchronous regardless of pipelining and would silently defeat it. | **No reproducible improvement.** Full 1-file pipeline run: 70s (baseline was 70-72s). Isolated `infer_raw_direct` over all 16,216 chunks: 56.9-57.6s pipelined vs 57.6s baseline — within run-to-run noise. A paired N=30 in-process comparison of "launch+immediate collect" vs "launch+tokenize_next+collect" gave statistically indistinguishable means (160ms vs 158ms, stdev ~40ms). A separate 5-trial CUDA-event probe *did* show partial overlap in isolation (GPU-reported exec time ≈ total wall time including the CPU work gap, i.e. the CPU work looked "free"), but this didn't survive averaging over many real batches — most of the apparent per-batch timing variance turned out to be batch-content variance (variable real sequence length → variable padding → variable true compute time), not an overlap effect. Reverted (`core.py` back to the vectorized-postprocessing baseline from hypothesis #4). |
 | 8 | Reduce actual GPU compute (not just overlap it): hypothesis #3 already proved padding waste is real, but chunks were still batched in document order, so each batch of 64 padded to whatever the longest chunk in that arbitrary grouping was. Sort `chunk_texts` by character length (cheap proxy for token count) before batching in `run_transformer_stage` (examples/gpu_batch_pipeline.py), run inference on the sorted order, then unsort predictions back to the original per-chunk order before reassembly. | **Confirmed real win.** Same-session back-to-back A/B on the 1-file input: baseline 69s → bucketed 37s (~46% wall-clock reduction), reproduced twice. Correctness verified two ways: (a) row order/`text_hash` alignment unaffected (sorting only reorders the GPU call, not `chunk_rows`/output rows); (b) output content diffed positionally against baseline — 88/15368 rows differ only in Faker-substituted values (URLs/IDs, which are unseeded-random by design: a baseline-vs-itself rerun showed the *same* 88 mismatches), and entity_count differs by ±1 on only 7/15368 rows (0.046%), consistent with ordinary fp16 batch-composition numerical noise, not a bucketing bug. **Kept** — this is scratch/example code only (`examples/` is gitignored on this branch, not part of the library). |
+| 9 | With bucketing in place, does hypothesis #3's "bigger `--gpu-batch-size` is worse" finding still hold, or does bucketing unlock larger batches? | Swept `--gpu-batch-size` (16/32/64/96/128/256) on the bucketed 1-file input | **#3's finding still holds — bigger is still worse, even bucketed.** 16=35s, 32=36s, 64=37s (current default), 96=40s, 128=49s, 256=76s. Flat/near-optimal from 16-64, then degrades sharply. Sorting only reduces intra-batch length *variance*, and that window of variance still grows with batch size, so padding waste still increases with batch size — bucketing helps at any fixed batch size, it doesn't remove the incentive to keep batches small. **No change made** — the existing default of `--gpu-batch-size 64` is already at/near the sweet spot; don't increase it. |
+| 10 | The real headroom isn't compute *efficiency*, it's that a single process leaves the GPU idle ~35-50% of the time (waiting on the CPU-bound recognizer/anonymizer stage) while using only ~1.2GB of the L4's 23GB — so run N independent worker *processes*, each with its own `TransformerCore` on the same GPU, sharding input files across them, so one worker's GPU-idle CPU time gets filled by another's GPU compute. | Added `--num-gpu-workers` to `examples/gpu_batch_pipeline.py`: extracted the per-process pipeline into `run_pipeline()`, and for N>1 spawns N `multiprocessing` (spawn context — CUDA+fork is unsafe) processes, each handling a shard of `--input`'s files and writing its own `workerN.parquet` into `--output` (now a directory). First proven manually (3 separate `kubectl exec` processes on 3 file shards) before implementing: sequential single-process 3-file baseline 89s → 3 concurrent processes 64s, GPU util 50-65%→78% avg (100% peak), GPU memory 1.2GB→3.6GB peak (3 model copies). | **Confirmed real win, now implemented — but smaller once measured fairly.** The built-in `--num-gpu-workers 3` reproduced it end-to-end: 89s → 80s (~10%, vs the raw manual test's 64s — see caveats below), reproducible across 2 runs, correctness verified (46,435 rows total across `worker{0,1,2}.parquet`, matching sequential exactly). `--num-gpu-workers 2` on the *same* 3-file input was worse (91s, avg util only 44%) — but `_shard`'s naive round-robin (`items[i::num_shards]`) gives 3 files ÷ 2 workers a 2:1 split (one worker idle for the last third while the other finishes alone), not a real "2 workers < 3 workers" signal. Re-tested with a **balanced** 2-file input: 1 worker 71s → 2 workers 65s (~8%, avg util 48%, peak mem 3.07GB) — a real but modest win, in the same ballpark as the 3-worker case's ~10%, not the ~28% the initial raw manual demo suggested. Two caveats worth remembering: (1) **the built-in multiprocessing version underperforms the raw manual `kubectl exec`-per-process demo** (64.6% avg util / 80s vs 78% avg util / 64s at N=3) — likely `spawn`'s per-worker interpreter/import startup (re-importing torch/transformers/spacy from scratch each time) eating into the run, not yet investigated further; (2) **`_shard`'s file-level round-robin needs an even file-count/worker-count ratio (or at least similar-sized shards) to give a fair comparison** — don't read anything into `--num-gpu-workers` results without checking the resulting shard sizes are balanced. **Kept.** Still the most direct, reproducible answer to "the GPU is underused": scale *workers*, not batch size — memory headroom (1.2GB used of 23GB) is exactly what makes this safe on a single node/pod, even if the realistic gain is ~8-10% rather than ~28%. |
 
-**Where this leaves it**: ~50-65% GPU duty cycle looks like the natural
-ceiling for this model/tokenizer/batch-size on this GPU given the current
-synchronous, single-stream `TransformerCore` architecture. Every "overlap it
+**Where this leaves it**: ~50-65% GPU duty cycle *per single process* looks like
+the natural ceiling for this model/tokenizer/batch-size on this GPU given the
+current synchronous, single-stream `TransformerCore` architecture. Every "overlap it
 in Python" lever has been tried — background thread (#6), single-thread
 reorder + pinned memory + non_blocking H2D (#7) — and each either didn't
 apply (the thing it targeted wasn't actually the bottleneck) or was canceled
 by the GIL or by batch-to-batch variance swamping the effect size. Hypothesis
 #8 broke that pattern by *reducing real GPU work* (less padding waste)
 instead of trying to hide CPU time behind it, and it's the first thing in
-this whole investigation with a large, reproducible, verified effect.
+this whole investigation with a large, reproducible, verified effect. #9
+confirmed that win doesn't extend to bigger batches — keep
+`--gpu-batch-size` at 64 (or as low as 16-32, statistically indistinguishable).
 Further gains would require either:
-- **Extending #8**: combine length-bucketing with the existing
-  `--gpu-batch-size`/`--row-batch-size` knobs (larger batches now waste much
-  less padding since same-length chunks are grouped together — hypothesis
-  #3's "bigger batch = worse" finding may no longer hold once bucketed;
-  worth re-testing), or verify the attention backend (`attn_implementation`)
-  is `sdpa` rather than `eager` (neither `TransformerCore` nor the example
-  script sets this explicitly today), or
+- Verify the attention backend (`attn_implementation`) is `sdpa` rather than
+  `eager` (neither `TransformerCore` nor the example script sets this
+  explicitly today), or
 - **Process-based tokenization** (real GIL avoidance, but untested — passing
   tokenized tensors across a process boundary has its own serialization cost
   that could easily eat the gain), or
@@ -256,12 +258,13 @@ Further gains would require either:
   tens of ms (swamped by ~40ms of inherent per-batch variance), this is a
   low-confidence next step, not a promising one.
 
-Don't re-try hypotheses 2-4, 6, or 7 without new evidence; they're falsified
-for this workload. If picking this back up on the overlap side, start from
-#5's breakdown (get a fresh tokenize/forward split first) rather than
-guessing again. On the compute-reduction side (the more promising direction
-after #8), start by re-benchmarking `--gpu-batch-size` now that bucketing is
-in place.
+Don't re-try hypotheses 2-4, 6, 7, or 9 without new evidence; they're
+falsified for this workload. If picking this back up on the overlap side,
+start from #5's breakdown (get a fresh tokenize/forward split first) rather
+than guessing again. On the compute-reduction side (the more promising
+direction after #8), the next untried step is verifying the attention
+backend (`attn_implementation`) is `sdpa` not `eager` — cheap to check, and
+distinct from bucketing/batch-size which are both already settled (#8, #9).
 
 ## Cleanup
 
