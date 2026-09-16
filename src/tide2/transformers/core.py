@@ -2,22 +2,23 @@
 Core transformer inference engine.
 
 This module provides the TransformerCore class that encapsulates the shared logic
-for transformer-based NER inference, used by both the Presidio recognizer and
-the Ray actor.
+for transformer-based NER inference, used by the Presidio recognizer.
 """
 
 import logging
+import os
+import shutil
 import socket
 import threading
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from transformers import AutoModelForTokenClassification
 from transformers import AutoTokenizer
 from transformers import pipeline
 
-from tide2.utils.gcs_resource_manager import resolve_model_path
 from tide2.utils.text_processing import aggregate_bio_tokens
 
 from .config import load_model_config
@@ -27,6 +28,82 @@ logger = logging.getLogger(__name__)
 # Fixed schema of a raw BIO token prediction (see infer_raw). Used to build a
 # stable dedupe key that does not depend on dict insertion order.
 _RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
+
+# Weight file names that indicate a complete, usable model directory.
+_WEIGHT_FILES = (
+    "model.safetensors",
+    "pytorch_model.bin",
+    "model.safetensors.index.json",
+    "pytorch_model.bin.index.json",
+)
+
+
+def _get_cache_dir() -> Path:
+    """Get the TIDE model cache directory ($TIDE_CACHE_DIR or ~/.cache/tide2)."""
+    cache_dir_str = os.getenv("TIDE_CACHE_DIR")
+    cache_dir = Path(cache_dir_str).expanduser().resolve() if cache_dir_str else Path.home() / ".cache" / "tide2"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _validate_model_directory(model_dir: Path) -> bool:
+    """Check that a model directory has config.json and at least one weight file."""
+    if not (model_dir / "config.json").is_file():
+        return False
+    return any((model_dir / f).is_file() for f in _WEIGHT_FILES)
+
+
+def _resolve_model_path(model_name: str, allow_huggingface_download: bool) -> str:
+    """
+    Resolve a model name to a local directory.
+
+    Checks the local TIDE cache first, then falls back to downloading from
+    HuggingFace Hub (using model_name as the repo id) when allowed.
+
+    Args:
+        model_name: HuggingFace repo id or cached model directory name.
+        allow_huggingface_download: If True, download from HuggingFace Hub
+            when the model is not already cached locally.
+
+    Returns:
+        Local path to the model directory.
+
+    Raises:
+        ValueError: If the model isn't cached locally and downloads are disabled,
+            or if the downloaded model directory is incomplete.
+    """
+    local_model_path = _get_cache_dir() / "resources" / "models" / model_name
+
+    if local_model_path.exists() and local_model_path.is_dir():
+        if _validate_model_directory(local_model_path):
+            logger.info(f"Found model locally: {local_model_path}")
+            return str(local_model_path)
+        logger.warning(
+            f"Cached model directory {local_model_path} is incomplete "
+            f"(missing weight files or config.json). Re-downloading..."
+        )
+        shutil.rmtree(local_model_path)
+
+    if not allow_huggingface_download:
+        raise ValueError(
+            f"Model '{model_name}' not found locally at {local_model_path} and "
+            f"HuggingFace Hub downloads are disabled (allow_huggingface_download=False)."
+        )
+
+    logger.info(f"Downloading model '{model_name}' from HuggingFace Hub...")
+    from huggingface_hub import snapshot_download
+
+    local_model_path.mkdir(parents=True, exist_ok=True)
+    snapshot_download(repo_id=model_name, local_dir=str(local_model_path))
+    if not _validate_model_directory(local_model_path):
+        raise ValueError(
+            f"Downloaded model '{model_name}' from HuggingFace Hub is incomplete at "
+            f"{local_model_path}. Missing weight files (model.safetensors or "
+            f"pytorch_model.bin) or config.json. Check your network connection or "
+            f"try: huggingface-cli login"
+        )
+    logger.info(f"Successfully downloaded model to: {local_model_path}")
+    return str(local_model_path)
 
 
 def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
@@ -44,11 +121,11 @@ def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
 
 class TransformerCore:
     """
-    Core transformer inference engine used by both Presidio and Ray wrappers.
+    Core transformer inference engine used by the Presidio recognizer.
 
     This class handles:
     - Model configuration loading
-    - Model path resolution (local or GCS)
+    - Model path resolution (local cache or HuggingFace Hub)
     - Pipeline loading with device placement options
     - Raw inference (returns BIO tokens)
     - BIO token aggregation into entity spans
@@ -59,12 +136,10 @@ class TransformerCore:
 
     Args:
         model_name: Name of the model configuration to load
-        model_path: Optional explicit path to model (overrides GCS resolution)
-        bucket_name: Optional GCS bucket name for model loading
-        project_id: Optional GCP project ID for model loading
+        model_path: Optional explicit path to model (overrides cache/Hub resolution)
         device: Device placement strategy:
             - "auto": Use accelerate's device_map="auto" (recommended for single-text)
-            - "cuda:N": Explicit GPU placement (recommended for batch/actors)
+            - "cuda:N": Explicit GPU placement (recommended for batch inference)
             - "cpu": Force CPU placement
             - None: Auto-detect (cuda:0 if available, else cpu)
         dtype: Model dtype (default: torch.float16 for memory efficiency)
@@ -78,13 +153,13 @@ class TransformerCore:
         compile_cache_path: Override path to mega-cache .bin file. If None, looks
             for compiled_cache.bin in the resolved model directory.
         allow_huggingface_download: If True (default), fall back to downloading
-            from HuggingFace Hub when local cache and GCS both miss.
+            from HuggingFace Hub when the model is not in the local cache.
 
     Example:
         # For Presidio (lazy loading, auto device)
         core = TransformerCore(model_name="stanford_deidentifier", device="auto")
 
-        # For Ray actor (immediate loading, explicit GPU)
+        # For batch inference (immediate loading, explicit GPU)
         core = TransformerCore(
             model_name="stanford_deidentifier",
             device="cuda:0",
@@ -97,8 +172,6 @@ class TransformerCore:
         self,
         model_name: str,
         model_path: str | None = None,
-        bucket_name: str | None = None,
-        project_id: str | None = None,
         device: str | None = None,
         dtype: torch.dtype = torch.float16,
         load_immediately: bool = False,
@@ -112,8 +185,6 @@ class TransformerCore:
         Args:
             model_name: Key in ``bert_transformer_configuration.json``.
             model_path: Local path override for the model directory.
-            bucket_name: GCS bucket for auto-download.
-            project_id: GCP project for GCS access.
             device: Device string (``"cpu"``, ``"cuda"``, or ``"auto"``).
             dtype: Torch dtype for model weights.
             load_immediately: If True, load the pipeline during init.
@@ -121,11 +192,11 @@ class TransformerCore:
             compile_model: Whether to use a compiled model cache.
             compile_cache_path: Path to the compiled ``.bin`` cache file.
             allow_huggingface_download: If True, fall back to HuggingFace Hub
-                when local cache and GCS both miss.
+                when the model is not in the local cache.
         """
         # Treat local_files_only=True as an offline / no-network mode. It already
         # stops transformers.from_pretrained from reaching the Hub, but the
-        # name-only branch below calls resolve_model_path, which would still attempt
+        # name-only branch below calls _resolve_model_path, which would still attempt
         # a HuggingFace snapshot_download when allow_huggingface_download is set.
         # Disable that here so both code paths honor the offline contract and every
         # caller gets coherent behavior.
@@ -158,17 +229,15 @@ class TransformerCore:
             if Path(model_path).is_absolute() and not Path(model_path).is_dir():
                 raise ValueError(
                     f"model_path {model_path!r} is an absolute path but does not exist or "
-                    f"is not a directory on this node ({socket.gethostname()}). Under Ray, "
-                    f"ensure the model volume is mounted on all worker nodes, or pass a "
-                    f"HuggingFace repo id (e.g. 'StanfordAIMI/stanford-deidentifier-v2') "
-                    f"to load from the local HF cache instead."
+                    f"is not a directory on this node ({socket.gethostname()}). Ensure the "
+                    f"model volume is mounted, or pass a HuggingFace repo id (e.g. "
+                    f"'StanfordAIMI/stanford-deidentifier-v2') to load from the local HF "
+                    f"cache instead."
                 )
             self.model_path = model_path
         else:
-            self.model_path = resolve_model_path(
+            self.model_path = _resolve_model_path(
                 model_name=model_name,
-                bucket_name=bucket_name,
-                project_id=project_id,
                 allow_huggingface_download=allow_huggingface_download,
             )
             logger.info(f"Resolved model path: {self.model_path}")
@@ -426,22 +495,16 @@ class TransformerCore:
             batch_size = len(texts)
 
         all_results: list[list[dict]] = []
-
         for start in range(0, len(texts), batch_size):
             sub_texts = texts[start : start + batch_size]
-            sub_results = self._forward_batch_direct(sub_texts)
-            all_results.extend(sub_results)
+            all_results.extend(self._forward_batch_direct(sub_texts))
 
         return all_results
 
-    def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
-        """Single batch: tokenize → GPU forward → extract predictions."""
-        model = self._model
+    def _tokenize_batch(self, texts: list[str]) -> dict[str, Any]:
+        """Tokenize one sub-batch."""
         tokenizer = self._tokenizer
-        device = next(model.parameters()).device
-
-        # Batch tokenize
-        encoded = tokenizer(
+        return tokenizer(
             texts,
             padding=True,
             truncation=True,
@@ -450,6 +513,17 @@ class TransformerCore:
             return_special_tokens_mask=True,
         )
 
+    def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
+        """Single batch: tokenize -> GPU forward -> extract predictions."""
+        encoded = self._tokenize_batch(texts)
+        return self._forward_and_postprocess(texts, encoded)
+
+    def _forward_and_postprocess(self, texts: list[str], encoded: dict[str, Any]) -> list[list[dict]]:
+        """GPU forward pass + prediction extraction for an already-tokenized sub-batch."""
+        model = self._model
+        device = next(model.parameters()).device
+
+        encoded = dict(encoded)  # don't mutate the caller's dict via pop() below
         offset_mapping = encoded.pop("offset_mapping")  # (batch, seq_len, 2) — keep on CPU
         special_tokens_mask = encoded.pop("special_tokens_mask")  # (batch, seq_len) — keep on CPU
 
@@ -467,33 +541,39 @@ class TransformerCore:
         scores_np = scores_max.cpu().numpy()
         label_ids_np = label_ids.cpu().numpy()
         offset_np = offset_mapping.numpy()
-        special_np = special_tokens_mask.numpy()
+        special_np = special_tokens_mask.numpy().astype(bool)
 
-        # Extract per-text predictions
+        # Vectorized label lookup + masking. The previous implementation walked
+        # every (text, padded-token) pair in a pure-Python double loop - dead time
+        # that doesn't touch the GPU and scales with padding rather than actual
+        # content, which was enough to visibly stall GPU utilization on real
+        # batches. Filtering with numpy first means the remaining Python loop only
+        # runs once per surviving (non-special, non-ignored) prediction.
         id2label = self._id2label
-        ignore = self._ignore_labels_set
-        results: list[list[dict]] = []
+        label_names = np.array([id2label[i] for i in range(len(id2label))])
+        labels_np = label_names[label_ids_np]
 
-        for i, text in enumerate(texts):
-            preds: list[dict] = []
-            for j in range(scores_np.shape[1]):
-                if special_np[i, j]:
-                    continue
-                label = id2label[label_ids_np[i, j]]
-                if label in ignore:
-                    continue
-                s, e = int(offset_np[i, j, 0]), int(offset_np[i, j, 1])
-                preds.append(
-                    {
-                        "entity": label,
-                        "score": float(scores_np[i, j]),
-                        "start": s,
-                        "end": e,
-                        "word": text[s:e],
-                        "index": j,
-                    }
-                )
-            results.append(preds)
+        ignore = self._ignore_labels_set
+        ignore_mask = np.isin(labels_np, list(ignore)) if ignore else np.zeros_like(labels_np, dtype=bool)
+        valid_mask = ~special_np & ~ignore_mask
+
+        # np.nonzero on a 2D mask returns (row, col) pairs in row-major order,
+        # i.e. the same (text, token) order the original nested loop produced.
+        batch_idx, seq_idx = np.nonzero(valid_mask)
+        results: list[list[dict]] = [[] for _ in texts]
+        for b, j in zip(batch_idx.tolist(), seq_idx.tolist(), strict=True):
+            text = texts[b]
+            s, e = int(offset_np[b, j, 0]), int(offset_np[b, j, 1])
+            results[b].append(
+                {
+                    "entity": str(labels_np[b, j]),
+                    "score": float(scores_np[b, j]),
+                    "start": s,
+                    "end": e,
+                    "word": text[s:e],
+                    "index": j,
+                }
+            )
 
         return results
 

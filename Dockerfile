@@ -123,9 +123,6 @@ ENV UV_LOCKED=1 \
     UV_NO_CACHE=1 \
     UV_NO_DEV=1
 
-COPY --chown=${USER}:${GROUP} prefect.yaml ./
-COPY --chown=${USER}:${GROUP} prefect_job_template.json ./
-
 
 
 # ============================================================================
@@ -179,8 +176,6 @@ ENV UV_LOCKED=1 \
     UV_NO_DEV=1
 
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-COPY --chown=${USER}:${GROUP} prefect.yaml ./
 
 # ============================================================================
 # Development target

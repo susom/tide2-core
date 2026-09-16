@@ -30,11 +30,6 @@ High-performance recognizers (faster regex-only, used as default in workflows):
 - AddressRecognizer: High-performance US address detection using usaddress library
 - InstitutionRecognizer: Institution-specific PHI detection (ships with Stanford Health Care patterns)
 
-Note: For batch processing, use the runner module:
-    from tide2.runner import LocalJobRunner
-    runner = LocalJobRunner()
-    runner.run_recognition(input_path, output_path)
-
 Note: Conflict resolution and deduplication is now handled in tide2.utils.span_metrics
 using O(n log n) algorithms. See resolve_conflicts() and resolve_recognizer_results().
 """

@@ -18,7 +18,8 @@ def _get_cached_fpe(salt: bytes, key: bytes) -> FormatPreservingEncryption:
     Get a cached FormatPreservingEncryption instance.
 
     Cache is bounded to maxsize=16 to match typical core count.
-    This is process-local, which is appropriate for Ray worker-local usage.
+    This is process-local, which is appropriate when each worker process
+    holds its own cache.
 
     Args:
         salt: 32-byte salt
@@ -35,7 +36,7 @@ class HipsAlphaNumericAnonymizer(Operator):
     Anonymizer that replaces alphanumeric identifiers with format-preserving encryption.
 
     Uses cached FPE instances for performance. The cache is process-local,
-    which is appropriate for Ray worker-local usage patterns.
+    which is appropriate when each worker process holds its own cache.
     """
 
     def __init__(self):

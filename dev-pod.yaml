@@ -1,0 +1,65 @@
+# Scratch manifest for interactive GPU testing of the current branch on
+# onc-central-dev-gke (namespace: starr, node pool: onc-central-dev-l4, 1x L4 each).
+# Not part of the prefect/ray deployment path in pod.yaml - just a long-lived
+# pod you can `kubectl exec` into. Not committed / not part of the release process.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tide2-gpu-dev
+  namespace: starr
+  labels:
+    app.kubernetes.io/name: tide2-gpu-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tide2-gpu-dev
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tide2-gpu-dev
+    spec:
+      serviceAccountName: tide-sa
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+      restartPolicy: Always
+      containers:
+        - name: tide2-gpu-dev
+          image: us-west1-docker.pkg.dev/som-rit-infrastructure-prod/starr/tide2-gpu-dev:dev
+          imagePullPolicy: Always
+          # Keep the pod alive so it can be reused across `kubectl exec` runs
+          # instead of running a one-shot flow like the prefect job in pod.yaml.
+          command: ["sleep", "infinity"]
+          env:
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: expandable_segments:True
+          resources:
+            requests:
+              # This pod has the whole g2-standard-32 node (31.85 allocatable cores)
+              # to itself in practice - only GKE system daemonsets share it - so
+              # size close to the node instead of splitting it with other workloads.
+              # Leaves ~7 cores of headroom for those daemonsets/driver components.
+              cpu: "24"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "24"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - mountPath: /data
+              name: tide-volume
+            - mountPath: /dev/shm
+              name: dshm
+      volumes:
+        - name: tide-volume
+          persistentVolumeClaim:
+            claimName: tide-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

@@ -6,7 +6,7 @@ tool:
   tool_homepage: "https://github.com/susom/tide2-core"
   documentation_url: "https://susom.github.io/tide2-core/"
   tool_type: "Library"
-  tool_notes: "Data de-identification and anonymization toolkit combining multiple strategies with cryptographic techniques and ML-based entity recognition; runs distributed via Ray (ray.data.map_batches over CPU/GPU actors)"
+  tool_notes: "Data de-identification and anonymization toolkit combining multiple strategies with cryptographic techniques and ML-based entity recognition"
 
 domains:
   - "healthcare"
@@ -27,7 +27,7 @@ input:
     dataStandard:
       - "None"
     format:
-      - "dataframe"   # Parquet via Ray Data (FileFormat enum lacks "parquet")
+      - "dataframe"
       - "json"
       - "txt"
     proprietary: false
@@ -40,7 +40,7 @@ output:
     dataStandard:
       - "None"
     format:
-      - "dataframe"   # Parquet via Ray Data (FileFormat enum lacks "parquet")
+      - "dataframe"
       - "json"
       - "txt"
     proprietary: false

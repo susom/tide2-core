@@ -7,9 +7,11 @@ instead of copying them, because copied content drifts.
 ## Orientation
 
 TIDE 2.0 is a healthcare PII/PHI de-identification and anonymization toolkit built
-on **Microsoft Presidio**. The core is a two-stage pipeline — entity recognition
-(regex + transformer NER) → anonymization (HIPS crypto, FPE, faker, date jitter) —
-run distributed via **Ray** (`ray.data.map_batches` over CPU/GPU actors).
+on **Microsoft Presidio**. It is a library, not a service: a two-stage pipeline —
+entity recognition (regex + transformer NER) → anonymization (HIPS crypto, FPE,
+faker, date jitter) — that callers wire up directly via Presidio's
+`AnalyzerEngine`/`AnonymizerEngine`. There is no bundled CLI, batch runner, or
+orchestration layer in this repo; that lives in a separate consuming project.
 
 - Full overview + feature list + **module/architecture map**: [`README.md`](README.md).
   For the package layout, read README's *Architecture* section — **do not** keep a
@@ -48,10 +50,6 @@ run distributed via **Ray** (`ray.data.map_batches` over CPU/GPU actors).
   sklearn → pandas → pyarrow` (see the comment on the `docs` target for the exact
   chain). Every module must import cleanly, since pdoc imports them all (the docs
   build uses `uv sync --extra docs --extra llm`).
-- **Small-box / Colab Ray deadlock:** on ≲4-CPU boxes the pipeline hangs at `0/1`
-  unless you pass **fractional CPUs *and* `--no-checkpoint` together** — both fixes
-  are required. See README → *"Why small boxes deadlock"* for the knob table; don't
-  reproduce it here.
 
 ## Setup & everyday commands
 
@@ -126,11 +124,3 @@ Agent-relevant rules: the version is decided **once** by release-please and only
 **immutable/non-reusable** (bad release → yank + bump, never delete-and-reupload);
 **keep the workflow filename `publish.yml`** — renaming it breaks the OIDC
 Trusted-Publisher match. Local build sanity: `uv build && uvx twine check dist/*`.
-
-## Entry points
-
-Behavior and flags live in README's *CLI Usage* — here are just the mappings
-(`pyproject.toml` → `[project.scripts]`):
-
-- `tide2-runner` → `tide2.runner.cli:main`
-- `tide2-visualizer` → `tide2.cli.main_visualizer:main`

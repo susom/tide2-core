@@ -134,8 +134,8 @@ def disable_whitespace_merging() -> None:
         >>> # Now all anonymizations will process entities individually
     """
     # Module-level globals (not object state): these patches must apply on every
-    # Ray worker process, where re-imported module globals are the reliable shared
-    # state; instance-level patching would not propagate across the actor pool.
+    # worker process, where re-imported module globals are the reliable shared
+    # state; instance-level patching would not propagate across a worker pool.
     global _patch_applied, _original_merge_method, _resolved_merge_method_name  # noqa: PLW0603
     if not _patch_applied:
         _resolved_merge_method_name = _resolve_merge_method_name()
@@ -163,8 +163,8 @@ def enable_whitespace_merging() -> None:
         >>> # Back to default Presidio behavior
     """
     # Module-level globals (not object state): these patches must apply on every
-    # Ray worker process, where re-imported module globals are the reliable shared
-    # state; instance-level patching would not propagate across the actor pool.
+    # worker process, where re-imported module globals are the reliable shared
+    # state; instance-level patching would not propagate across a worker pool.
     global _patch_applied, _original_merge_method, _resolved_merge_method_name  # noqa: PLW0603
     if _patch_applied:
         # disable_whitespace_merging() sets both of these before flipping
@@ -238,7 +238,7 @@ def patch_remove_duplicates() -> None:
 
     This is a global patch that affects all AnalyzerEngine instances.
     """
-    global _remove_duplicates_patched  # noqa: PLW0603  # shared across Ray workers via module globals
+    global _remove_duplicates_patched  # noqa: PLW0603  # shared across worker processes via module globals
     if not _remove_duplicates_patched:
         EntityRecognizer.remove_duplicates = staticmethod(lambda results: results)
         _remove_duplicates_patched = True
@@ -246,7 +246,7 @@ def patch_remove_duplicates() -> None:
 
 def unpatch_remove_duplicates() -> None:
     """Restore Presidio's original remove_duplicates method."""
-    global _remove_duplicates_patched  # noqa: PLW0603  # shared across Ray workers via module globals
+    global _remove_duplicates_patched  # noqa: PLW0603  # shared across worker processes via module globals
     if _remove_duplicates_patched:
         EntityRecognizer.remove_duplicates = _original_remove_duplicates
         _remove_duplicates_patched = False
@@ -276,11 +276,11 @@ def patch_conflict_resolution() -> None:
     Presidio's conflict resolution iterates every entity against every other
     entity twice (merge same-type + check conflicts). With 44K entities this
     takes hours. Conflict resolution is already handled upstream via
-    resolve_recognizer_results() in the anonymizer actor, so we skip it here.
+    resolve_recognizer_results(), so we skip it here.
 
     This is a global patch that affects all AnonymizerEngine instances.
     """
-    global _conflict_resolution_patched  # noqa: PLW0603  # shared across Ray workers via module globals
+    global _conflict_resolution_patched  # noqa: PLW0603  # shared across worker processes via module globals
     if not _conflict_resolution_patched:
         AnonymizerEngine._remove_conflicts_and_get_text_manipulation_data = lambda self, results, conflict_resolution: (  # noqa: ARG005  # lambda must match presidio's method signature positionally
             results
@@ -290,7 +290,7 @@ def patch_conflict_resolution() -> None:
 
 def unpatch_conflict_resolution() -> None:
     """Restore Presidio's original conflict resolution method."""
-    global _conflict_resolution_patched  # noqa: PLW0603  # shared across Ray workers via module globals
+    global _conflict_resolution_patched  # noqa: PLW0603  # shared across worker processes via module globals
     if _conflict_resolution_patched:
         AnonymizerEngine._remove_conflicts_and_get_text_manipulation_data = _original_remove_conflicts
         _conflict_resolution_patched = False

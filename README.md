@@ -70,21 +70,8 @@ View the notebook on GitHub: [TIDE 2.0 Pipeline Tutorial](https://github.com/sus
 
 **Troubleshooting:**
 - **Run from the repo root** — launch Jupyter from the `tide2/` directory so that relative paths resolve correctly.
-- **GCP credentials are not required** — the notebook downloads the transformer model from HuggingFace Hub by default. Set `project_id` and `bucket_name` in the Configuration cell only if you want to use GCS-hosted weights.
+- **No cloud credentials required** — the notebook downloads the transformer model from HuggingFace Hub by default.
 - **Kernel crashes** — if the Jupyter kernel crashes repeatedly, restart Jupyter (`Ctrl+C`, then re-launch) and run the cells from the top.
-
-### Visualizer Preview
-
-TIDE 2.0 includes a Streamlit visualizer for comparing original and de-identified text side by side:
-
-![TIDE 2.0 Visualizer](notebooks/images/visualizer_screenshot.png)
-
-Launch it with:
-```bash
-tide2-visualizer
-```
-
-To stop the visualizer, press `Ctrl+C` in the terminal (works on macOS, Linux, and Windows).
 
 ---
 
@@ -116,117 +103,59 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Deterministic date jitter**: Batch-capable date shift derivation from cryptographic keys
 - **String Selection**: HMAC-based cached string selection
 
-### Ray-based Batch Processing
-- **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
-- **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor`, `ReassemblyActor` for `ray.data.map_batches`
-- **Two-stage GPU/CPU pipeline**: GPU inference returns raw BIO tokens; CPU actors aggregate them concurrently via Ray Data streaming
+### Transformer NER Inference
 - **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with batch tokenize → single GPU forward pass → offset-based extraction
-- **Adaptive GPU batching**: Auto-computes batch size from model config and free GPU memory; adjusts based on text lengths with VRAM-aware budgets (override via `--short-seq-budget`)
+- **Adaptive GPU batching**: Auto-computes batch size from model config and free GPU memory; adjusts based on text lengths with VRAM-aware budgets
 - **OOM recovery**: Automatic batch splitting on CUDA out-of-memory errors
-- **Fault tolerance**: Actor restarts, task retries, graceful shutdown
-- **YAML config**: All CLI arguments can be specified in a YAML config file (`--config`)
+- **Chunking + reassembly**: Long documents are split into overlapping chunks for inference and reassembled into document-level entities
 
 ### Utilities
 - **Text processing**: Text chunking, BIO aggregation, span reconstruction, deduplication
 - **String parsers**: Name parsing/classification, address parsing, format detection
 - **Span metrics**: Gold vs ML evaluation, O(n log n) conflict resolution
-- **GCS cache**: Auto-download models from GCS to `~/.cache/tide2/`
+- **Model cache**: Auto-download transformer models from HuggingFace Hub to `~/.cache/tide2/`
 - **Model compilation**: `torch.compile` with mega-cache support for faster inference startup
 
-### Command Line Tools
-- **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
-- **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
+## Usage
 
+TIDE 2.0 is a library — there is no bundled CLI or batch runner. Wire up a
+Presidio `AnalyzerEngine` with the recognizers you need and an
+`AnonymizerEngine` with the anonymizers you need, then call them directly:
 
-### Cloud Integration
-- **GCS**: input/output I/O and model caching.
-- **BigQuery**: input/output of notes and recognizer/anonymizer results (e.g. via `ARRAY_AGG`-grouped chunk columns) for the runner and visualizer.
-- **Automatic Caching**: Download and cache models from GCS automatically (`$TIDE_CACHE_DIR`).
+```python
+from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
 
-## CLI Usage
+from tide2.anonymizers import HipsNamesAnonymizer
+from tide2.recognizers import PhoneRecognizer, TransformersRecognizer
 
-### Runner CLI (Ray-based processing)
+registry = RecognizerRegistry()
+registry.add_recognizer(TransformersRecognizer(model_name="StanfordAIMI/stanford-deidentifier-v2"))
+registry.add_recognizer(PhoneRecognizer())
+analyzer = AnalyzerEngine(registry=registry)
 
-```bash
-# Run recognition locally
-tide2-runner run recognizer -i ./data/input -o ./data/output
+anonymizer = AnonymizerEngine()
+anonymizer.add_anonymizer(HipsNamesAnonymizer)
 
-# Run with more resources (e.g. on a large VM), reading/writing from GCS
-tide2-runner run recognizer -i gs://bucket/input -o gs://bucket/output \
-    --num-cpus 224 --num-actors 200
-
-# Run transformer NER on GPU
-tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
-    --model StanfordAIMI/stanford-deidentifier-v2 --batch-size 2048
-
-# Run transformer with YAML config
-tide2-runner run transformer --config config.yaml
-
-# Run the full pipeline (transformer -> recognizer -> anonymizer)
-tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
-    --model StanfordAIMI/stanford-deidentifier-v2
-
-# If you are running on Mac, you can use --object-store-gb option to set
-tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
-     --model StanfordAIMI/stanford-deidentifier-v2  --object-store-gb 2
-
-# Run anonymization
-tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
-    --salt /path/to/salt.bin --key /path/to/key.bin
-
-# Run on a small box (e.g. 2-CPU Google Colab) WITHOUT deadlocking. Two fixes
-# are required together (see below): fractional CPUs AND --no-checkpoint.
-# GPU box (T4): the transformer actor is GPU-pinned, so budget read/flat-map/
-# write/agg fractionally; CPU-only box: also give the transformer actor ~C-1.
-tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
-    --model StanfordAIMI/stanford-deidentifier-v2 \
-    --num-actors 1 --cpus-per-actor 0.5 --worker-num-cpus 1.0 \
-    --read-cpus 0.25 --flat-map-cpus 0.25 --write-cpus 0.25 \
-    --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
+results = analyzer.analyze(text="Call Dr. Smith at 555-123-4567.", language="en")
+anonymized = anonymizer.anonymize(
+    text="Call Dr. Smith at 555-123-4567.",
+    analyzer_results=results,
+    operators={"PERSON": OperatorConfig("hips_names", {"salt": salt, "key": key})},
+)
 ```
 
-#### Why small boxes deadlock (and how to size knobs by hardware)
-
-Ray Data runs every operator of a stage concurrently and, under Ray 2.55's
-reservation allocator, must reserve a minimum CPU slice for **every** eligible
-operator at once. When that sum exceeds the cluster's CPUs, nothing schedules and
-the stage hangs forever at `0/1` (`backpressured:tasks(ResourceBudget)`). On a
-2-CPU box there are **two independent causes — both must be fixed together**:
-
-1. **Whole-CPU operator reservations.** Defaults reserve ~1 CPU per operator;
-   read + flat_map + actor + agg + write exceeds 2. Fix with fractional CPUs.
-2. **The checkpoint shuffle.** Row-level resume injects a sort + repartition
-   shuffle (extra operators) that re-triggers the deadlock *even with* fractional
-   CPUs. Fix with `--no-checkpoint` (trades resume capability, not correctness).
-
-The knobs are additive and default to today's whole-CPU reservations + checkpointing
-on, so omitting them preserves large-VM behavior. Size them to fit the sum of a
-stage's *concurrent* operator reservations within the available CPUs (C = total CPUs):
-
-- **Big box (C ≳ 16)**: use defaults (omit all knobs).
-- **Transformer stage**: `--read-cpus`, `--flat-map-cpus`, `--write-cpus`,
-  `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
-  transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
-  caps the actor's torch threads).
-- **Recognizer / anonymizer stages**: `--cpus-per-actor` (supervisor), `--worker-num-cpus`
-  (worker actor), `--read-cpus`, `--write-cpus`. Each pool slot needs supervisor +
-  worker CPUs, so budget both.
-- **All stages on C ≲ 4**: add `--no-checkpoint`.
-
-
-### Interactive Visualizer
-
-```bash
-# Launch the Streamlit PHI visualizer
-tide2-visualizer
-```
+See [`notebooks/tide2_pipeline.ipynb`](notebooks/tide2_pipeline.ipynb) for a
+complete, runnable end-to-end example (regex + transformer recognizers, known
+patient values, and the full HIPS anonymizer operator set).
 
 ## Docker Images
 
 Several targets are built from a single multi-stage `Dockerfile`:
 
-- `production-cpu` — slim CPU-only image (no CUDA). Used by recognizer, anonymizer, and BigQuery tasks.
-- `production-gpu` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`. Used by transformer inference. (The ML stack — `torch`, `transformers`, `spacy` — ships in both images, since it is a required core dependency.)
+- `production-cpu` — slim CPU-only image (no CUDA). Used for recognizer/anonymizer workloads.
+- `production-gpu` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`. Used for transformer inference. (The ML stack — `torch`, `transformers`, `spacy` — ships in both images, since it is a required core dependency.)
 - `development` — Dev Container target with `git`, `gcloud`, build tools, and the full dev environment.
 - `test` — extends `development` and runs the test suite (used by `make test-docker`).
 
@@ -255,33 +184,19 @@ Note: The full ML inference stack (`torch`, `transformers`, `spacy`) ships in th
 ```
 tide2/
 ├── recognizers/              # PII detection (Presidio EntityRecognizer subclasses)
+│   └── nlp_engine.py         # Blank-spaCy NlpEngine for regex-only recognition
 ├── anonymizers/              # PII replacement (Presidio Operator subclasses)
 ├── transformers/             # Core NER inference engine (TransformerCore)
 │   ├── core.py              # Model loading, direct inference, BIO aggregation
-│   └── config.py            # Model configuration management
-├── actors/                   # Ray actors for distributed batch processing
-│   ├── transformer.py       # GPU inference actor + CPU BIO aggregation actor
-│   ├── recognizer.py        # CPU recognizer actor
-│   ├── anonymizer.py        # CPU anonymizer actor
-│   ├── reassembly.py        # Chunk-to-document reassembly actor
-│   └── llm_recognizer.py    # LLM-based recognizer actor
+│   ├── config.py            # Model configuration management
+│   └── reassembly.py        # Chunk-to-document reassembly
 ├── cryptographic/            # FPE, key management, date jitter derivation
 ├── string_parsers/           # Name/address parsing, format detection
-├── runner/                   # Ray-based single-node job runner + CLI
-│   ├── local_runner.py      # LocalJobRunner: transformer/recognizer/anonymizer/reassembly/pipeline/llm
-│   ├── cli.py               # tide2-runner CLI with YAML config support
-│   ├── transformer.py       # Document chunking and reassembly logic
-│   ├── fault_tolerance.py   # Actor restarts, graceful shutdown
-│   └── utils.py             # Runner utilities
-├── cli/                      # Streamlit visualizer
 ├── utils/
-│   ├── gcs_resource_manager.py  # GCS auto-download and caching
-│   ├── gcs_connector.py        # GCS file I/O
 │   ├── span_metrics.py         # Evaluation metrics and conflict resolution
 │   ├── text_processing.py      # Chunking, BIO aggregation, span reconstruction
 │   ├── serialization.py        # RecognizerResult <-> dict conversions
 │   ├── llm_model.py            # LLM client utilities
-│   ├── batch_columns.py        # Batch column constants
 │   ├── constants.py            # Shared constants
 │   └── resource_utils.py       # Resource path helpers
 └── resources/                # Config files (model configs, name lists, etc.)
@@ -345,7 +260,7 @@ Pages artifact.
 - **Python**: 3.12 or 3.13 (required, `>=3.12,<3.14`) — 3.14 is excluded until the `spacy`/`thinc` C-extension stack and other pinned dependencies are tested against cp314 wheels.
 - **Package Manager**: uv (not pip or poetry)
 - **Virtual Environment**: `.venv/` (activated automatically in the Dev Container; must be activated manually for local installs)
-- **Core Dependencies**: Presidio, Ray (`>=2.54`), Cryptography, Faker, Google Cloud libraries, and the ML inference stack (`torch`, `transformers>=5.0`, `spacy`) — all required and shipped in the base install
+- **Core Dependencies**: Presidio, Cryptography, Faker, and the ML inference stack (`torch`, `transformers>=5.0`, `spacy`) — all required and shipped in the base install
 
 ## Security Considerations
 

@@ -2,7 +2,7 @@
 Transformer module for NER inference.
 
 This module provides the core infrastructure for transformer-based Named Entity
-Recognition (NER), used by both the Presidio recognizer and Ray actor wrappers.
+Recognition (NER), used by the Presidio recognizer.
 
 Classes:
     TransformerCore: Core inference engine with model loading and prediction
