@@ -6,7 +6,7 @@ cached transformer results + known patient values) -> anonymization (CPU:
 HIPS) — over a directory of input Parquet files, writing anonymized output
 as Parquet.
 
-Input schema (one row per note): text_hash, note_text, patient_id
+Input schema (one row per note): text_hash, note_text, patient_uid
     (optional: patient_identifiers - JSON object of known PHI values,
      jitter - per-note date jitter override)
 
@@ -324,8 +324,8 @@ def run_cpu_stage(
     for note in notes:
         text_hash = note["text_hash"]
         note_text = note.get("note_text") or ""
-        # None (not "") when absent, so a missing patient_id hashes as the literal string "None" below
-        patient_uid = note.get("patient_id")
+        # None (not "") when absent, so a missing patient_uid hashes as the literal string "None" below
+        patient_uid = note.get("patient_uid")
         patient_uid_str = patient_uid or ""
         patient_identifiers = json.loads(note.get("patient_identifiers") or "{}")
 
