@@ -16,7 +16,7 @@ Usage:
     python -m tide2.runner.pipeline \
         --input ./data/input --output ./data/output \\
         --model StanfordAIMI/stanford-deidentifier-v2 \\
-        --salt-hex 00000000000000000000000000000000000000000000000000000000000000 \\
+        --salt-hex 0000000000000000000000000000000000000000000000000000000000000000 \\
         --key-hex  1111111111111111111111111111111111111111111111111111111111111111
 """
 
