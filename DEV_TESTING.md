@@ -5,6 +5,50 @@ How to test the current branch against a real NVIDIA L4 GPU in
 prefect/ray production pipeline. Everything here is dev/scratch tooling —
 none of it is used by CI or the release process.
 
+## Current session state (2026-09-16, branch `nobody-loves-raymond`)
+
+Picking this back up in a new session? Start here instead of redeploying
+from scratch:
+
+- **Pod is already running**: `tide2-gpu-dev-5c8c7cc6f-2shpr` in namespace
+  `starr` (check with `kubectl get pods -n starr -l
+  app.kubernetes.io/name=tide2-gpu-dev`). Don't `kubectl apply -f
+  dev-pod.yaml` again unless it's gone — reuse it.
+- **Code is committed**: all of `core.py`'s vectorized postprocessing, the
+  process-pool overlap in `examples/gpu_batch_pipeline.py`, and this file are
+  in commit `d4b373e` ("chore: nuked ray, added dev test pod") on
+  `nobody-loves-raymond`. Working tree is clean — nothing further needs to be
+  re-copied to the pod unless you make new local edits (in which case,
+  hot-patch per the *Fast iteration* section below).
+- **Scratch data already staged on the pod** at
+  `/data/scratch/jmesterh-dev/`:
+  - `gpu_batch_pipeline.py` — current copy of the example script (re-`kubectl
+    cp` it if you edit the local copy).
+  - `input/` — the full 3-file set (`part-000000000000/1/2.parquet`, ~46,435
+    rows total).
+  - `input_1file/` — just `part-000000000000.parquet` (~15,368 rows) for fast
+    ~70s iteration instead of the full ~3min run.
+  - `output/` — currently empty (leftover benchmarking outputs were cleaned
+    up); the last full clean run wrote to `output/output_final.parquet`
+    (46,435 rows, since deleted) with no errors.
+- **Benchmarking investigation is closed out** — see the *Benchmarking /
+  GPU-utilization investigation* section below for the full results table.
+  Conclusion: ~50-65% GPU duty cycle is the likely ceiling for this
+  architecture; don't re-try hypotheses 2-4, 6, or 7 without new evidence.
+- **CUDA streams / async pipelining (hypothesis #7) was tried and reverted**
+  this session — single-thread software pipelining (`_launch_forward`/
+  `_collect_results` split) + pinned memory/`non_blocking=True` H2D copy
+  showed no reproducible wall-clock or utilization improvement. `core.py` is
+  back to the hypothesis #4 baseline; see the results table for the full
+  A/B evidence before trying a variant of this again.
+- **Not yet tried** (bigger, untested ideas if resuming perf work):
+  process-based tokenization, or a genuinely separate `torch.cuda.Stream()`
+  with fixed-size buffers + explicit events (see hypothesis #7's write-up for
+  why plain default-stream reordering wasn't enough).
+- **Teardown**: if wrapping up for good, `kubectl delete -f dev-pod.yaml` (see
+  *Cleanup* at the end of this file) — otherwise leave the pod running, it's
+  cheap to reuse across sessions.
+
 ## Why
 
 `tide2-core` is a library: there's no bundled batch runner (see
@@ -163,21 +207,31 @@ re-run these): all changes below except the two marked "kept" were reverted.
 | 4 | `_forward_batch_direct`'s postprocessing loop (pure-Python double loop over batch×padded-seq-len) is the dead CPU time | Vectorized with numpy (mask + `np.nonzero` instead of nested `for`) | Correctness-verified via tests (`tests/test_transformer_core_forward_batch.py`), asymptotically better — **kept** — but a fair single-file A/B showed **no measurable wall-clock/utilization change** (70s vs 72s). This loop was never the real bottleneck either. |
 | 5 | Fine-grained timing of one `_forward_batch_direct` call (tokenize vs to_device vs forward vs softmax vs copy_back, with `torch.cuda.synchronize()` around each) | Direct instrumentation, 300 sub-batches | **Real finding**: tokenize = 33% of time, forward pass = 66%, everything else ≈0%. Tokenize runs entirely before the GPU call with zero overlap. |
 | 6 | Hide tokenize behind the GPU forward pass via a background thread (HF fast tokenizers release the GIL for the Rust tokenization loop) | Prefetch next sub-batch's tokenization while the current forward pass runs | Overlap *mechanism* worked (`tokenize_wait≈0.00s` for 13/15 sample batches) but **total critical-path time was unchanged** (56.34s vs 56.25s) — the background thread's Python-level tensor/`BatchEncoding` construction contends for the GIL with the main thread's own work, canceling the benefit. Reverted. |
+| 7 | Single-thread software pipelining (no background thread, so no GIL contention): split `_forward_and_postprocess` into `_launch_forward` (H2D copy + forward + softmax, enqueues async CUDA work, no `.cpu()`) and `_collect_results` (the `.cpu()` sync point), then reorder `infer_raw_direct`'s loop to depth-2 — tokenize sub-batch i+1 and enqueue its GPU work *before* blocking on sub-batch i's results. Also pinned the tokenizer's output tensors (`.pin_memory()`) and used `non_blocking=True` for the H2D copy, since a plain `.to(device)` on pageable memory is synchronous regardless of pipelining and would silently defeat it. | **No reproducible improvement.** Full 1-file pipeline run: 70s (baseline was 70-72s). Isolated `infer_raw_direct` over all 16,216 chunks: 56.9-57.6s pipelined vs 57.6s baseline — within run-to-run noise. A paired N=30 in-process comparison of "launch+immediate collect" vs "launch+tokenize_next+collect" gave statistically indistinguishable means (160ms vs 158ms, stdev ~40ms). A separate 5-trial CUDA-event probe *did* show partial overlap in isolation (GPU-reported exec time ≈ total wall time including the CPU work gap, i.e. the CPU work looked "free"), but this didn't survive averaging over many real batches — most of the apparent per-batch timing variance turned out to be batch-content variance (variable real sequence length → variable padding → variable true compute time), not an overlap effect. Reverted (`core.py` back to the vectorized-postprocessing baseline from hypothesis #4). |
 
 **Where this leaves it**: ~50-65% GPU duty cycle looks like the natural
 ceiling for this model/tokenizer/batch-size on this GPU given the current
 synchronous, single-stream `TransformerCore` architecture. Every "overlap it
-in Python" lever has been tried and either didn't apply (the thing it
-targeted wasn't actually the bottleneck) or was canceled by the GIL. Further
+in Python" lever has been tried — background thread (#6), single-thread
+reorder + pinned memory + non_blocking H2D (#7) — and each either didn't
+apply (the thing it targeted wasn't actually the bottleneck) or was canceled
+by the GIL or by batch-to-batch variance swamping the effect size. Further
 gains would require either:
 - **Process-based tokenization** (real GIL avoidance, but untested — passing
   tokenized tensors across a process boundary has its own serialization cost
   that could easily eat the gain), or
-- **CUDA streams / async pipelining** at the torch level in `TransformerCore`
-  — a much bigger architectural change, not attempted here.
+- **A genuinely separate `torch.cuda.Stream()` for H2D copies** with
+  fixed-size padded buffers (to remove batch-content variance from the
+  comparison) and explicit `torch.cuda.Event` wait/record pairs — not
+  attempted; #7 only reordered work on the *default* stream, which relies on
+  the CUDA driver already overlapping compute with unrelated CPU work rather
+  than forcing it via a second stream. Given #7's evidence that any real
+  overlap window here is on the order of tens of ms (swamped by ~40ms of
+  inherent per-batch variance), this is a low-confidence next step, not a
+  promising one.
 
-Don't re-try hypotheses 2-4 or 6 without new evidence; they're falsified for
-this workload. If picking this back up, start from #5's breakdown (get a
+Don't re-try hypotheses 2-4, 6, or 7 without new evidence; they're falsified
+for this workload. If picking this back up, start from #5's breakdown (get a
 fresh tokenize/forward split first) rather than guessing again.
 
 ## Cleanup
