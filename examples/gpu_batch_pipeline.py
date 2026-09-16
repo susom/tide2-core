@@ -411,7 +411,19 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=512, help="Chunk size in tokens for long notes")
     parser.add_argument("--chunk-overlap", type=int, default=40, help="Chunk overlap in tokens")
     parser.add_argument("--gpu-batch-size", type=int, default=64, help="Max chunks per GPU forward pass")
-    parser.add_argument("--row-batch-size", type=int, default=256, help="Notes read per input row-batch")
+    parser.add_argument(
+        "--row-batch-size",
+        type=int,
+        default=512,
+        help=(
+            "Notes read per input row-batch. This is also the candidate pool that "
+            "run_transformer_stage's length-bucketing sorts before slicing into "
+            "--gpu-batch-size chunks, so bigger pools bucket more precisely (see "
+            "DEV_TESTING.md hypothesis #11) - unlike --gpu-batch-size, going bigger "
+            "here doesn't reintroduce padding waste since this isn't padded as a "
+            "single unit, so it's safe to raise further for large corpora."
+        ),
+    )
     parser.add_argument(
         "--num-gpu-workers",
         type=int,
