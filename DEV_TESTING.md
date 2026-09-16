@@ -73,21 +73,27 @@ from scratch:
   baseline*. Headline: `main`'s Ray pipeline takes 391.4s vs this branch's
   67s on the same input, **but this is not a clean "Ray adds overhead"
   result** — `main` is missing hypothesis #8's length-bucketing entirely,
-  which also explains a 22% entity-span mismatch rate between the two (a
-  real, reproducible fp16 numerical effect of unsorted/unbucketed batch
-  padding, not a correctness bug — root-caused via an isolated
-  `batch_size=1` repro). The wall-clock gap's own root cause is still
-  unexplained (`--gpu-batch-size` ruled out; Ray orchestration overhead is
-  the leading untested candidate). Read the whole section before quoting
-  the 67s vs 391s number out of context.
+  which also explains part (not all) of a 22% entity-span mismatch rate
+  between the two (a real, reproducible fp16 numerical effect of
+  unsorted/unbucketed batch padding, not a correctness bug — root-caused
+  via an isolated `batch_size=1` repro). **Follow-up tested and disproved
+  all three leading candidates for the timing gap**: reduced CPU-actor
+  count, disabled checkpointing, and porting length-bucketing into `main`'s
+  `TransformerInferenceActor` (a real uncommitted local change on a `main`
+  checkout) — none moved the 391s→245s transformer-phase timing at all,
+  though bucketing did improve the span match rate to 81.4%. The timing
+  gap's root cause is now genuinely open, not just untested — see the *Ray
+  vs no-Ray comparison* section's final subsection before repeating any of
+  these three experiments.
 - **Not yet tried** (bigger, untested ideas if resuming perf work): verify
   the attention backend is `sdpa` not `eager`, process-based tokenization, or
   `torch.compile(mode="reduce-overhead")` with CUDA graphs (needs a
   `scripts/compile_model.py` cache-generation tool that doesn't exist yet).
-  For the Ray comparison specifically: isolate the timing gap's real cause
-  (Ray Data/actor orchestration overhead vs. the 10-actor CPU-stage fan-out),
-  or port length-bucketing into `main`'s `TransformerInferenceActor` for a
-  fair apples-to-apples Ray-overhead measurement.
+  For the Ray comparison specifically: profile Ray Data's per-operator
+  overhead directly (task scheduling, object-store serialization/spilling —
+  `--object-store-gb 4` is quite small) via `py-spy`/`ray.timeline()` rather
+  than more CLI-flag guessing; actor count, checkpointing, and bucketing are
+  all now falsified as the timing cause.
 - **Teardown**: if wrapping up for good, `kubectl delete -f dev-pod.yaml` (see
   *Cleanup* at the end of this file) — otherwise leave the pod running, it's
   cheap to reuse across sessions.
@@ -515,32 +521,79 @@ borderline BIO tag's boundary via fp16 attention numerics. This is a real
 numerical sensitivity to *unsorted* batch composition, not a logic bug in
 either branch's recognition code.
 
-**Still unexplained**: the ~5.8x wall-clock gap itself. `--gpu-batch-size`
-is ruled out (identical timing with and without it matched). Leading
-untested candidates: Ray Data/actor task-scheduling and object-store
-serialization overhead, or the recognizer/anonymizer stage's 10-actor
-fan-out (main) vs this branch's single `ProcessPoolExecutor` worker
-(hypothesis #1). Not isolated in this session — start here if resuming.
+**Still unexplained (before further testing)**: the ~5.8x wall-clock gap
+itself. `--gpu-batch-size` is ruled out (identical timing with and without
+it matched). Leading untested candidates: Ray Data/actor task-scheduling and
+object-store serialization overhead, or the recognizer/anonymizer stage's
+10-actor fan-out (main) vs this branch's single `ProcessPoolExecutor` worker
+(hypothesis #1).
+
+### Testing the leading candidates: actor count, checkpointing, bucketing
+
+Three follow-up experiments, all on `main` (uncommitted local edits on a
+`main` checkout — not part of this branch, not committed anywhere):
+
+**`--num-actors 4` + `--no-checkpoint`** (testing reduced CPU-actor fan-out
+and disabled checkpoint shuffle together): **385.9s total, transformer
+244.3s, recognizer 60.1s, anonymizer 59.1s — no meaningful change from the
+391.4s/389.9s baselines.** But running this surfaced a real, separate
+finding:
+```
+UserWarning: The minimum number of concurrent actors for
+'MapBatches(ConfiguredAnonymizerActor)' is set to 4, but the operator only
+received 1 input(s)... won't fully utilize the available concurrency.
+```
+**The recognizer/anonymizer stages were never actually running on multiple
+actors in the first place** — all 46,435 rows land in a single Ray Data
+block, so only 1 of the requested N actors (10, then 4) ever gets used.
+That's *why* 10→4 changed nothing: there was no real parallelism there to
+reduce. Low-priority to fix, though, since recognizer+anonymizer combined
+(~120s) are dwarfed by the transformer phase (~245s) regardless.
+
+**In-batch length bucketing in `TransformerInferenceActor`** (porting
+hypothesis #8 into `main`'s `__call__`, sorting `valid_texts` by length
+before `_run_inference_raw_with_oom_recovery` and unsorting results after —
+a ~10-line, single-file change, same pattern as the example script's
+bucketing): **245.3s transformer phase, 391.6s total — statistically
+identical to baseline. Bucketing does not explain the timing gap.** It
+*does* have a real but modest effect on the correctness side: span match
+rate vs this branch improved from 77.8% to **81.4%** (22.2%→18.6%
+mismatch, ~16% relative reduction) — but the *specific* row root-caused
+earlier (`row_id=132db386...`, the "LPCH IP" vs "LPCH IP NE" case) is
+**still wrong** even with bucketing applied, so batch-composition
+sensitivity is only *part* of the correctness gap, not the whole story, and
+apparently unrelated to the timing gap entirely.
+
+**Conclusion**: all three of this session's leading hypotheses for the
+5.8x timing gap (actor count, checkpointing, length-bucketing) are now
+individually disproven. The timing gap is not caused by anything this
+session characterized as a batching/padding/parallelism-fan-out problem.
+It remains genuinely open — if picking this back up, the next things worth
+instrumenting are Ray Data's own per-operator overhead (task scheduling,
+object-store serialization/spilling — note `--object-store-gb 4` is quite
+small, forced by the cgroup-memory workaround, and could itself be causing
+spilling under load) or a from-scratch profiling pass (`py-spy`/Ray's own
+timeline/`ray.timeline()` export) rather than guessing at more CLI flags.
 
 ### Why the comparison is confounded (read before quoting the 67s vs 391s number)
 
 This is **not** a clean "Ray adds 5.8x overhead" result:
 
-1. `main`'s Ray pipeline has **no length-bucketing at all** — hypothesis #8
-   (this session's single biggest win, ~46% wall-clock reduction on its
-   own) only exists in this branch's example script. The 22% span mismatch
-   traces directly to that missing optimization's absence, not to Ray
-   itself being wrong.
+1. `main`'s Ray pipeline had no length-bucketing at all when this comparison
+   started; porting it in (above) fixed part of the correctness gap but
+   none of the timing gap, so bucketing's absence is *not* the timing
+   story — though it's still a legitimate, worthwhile fix for `main`
+   independent of this comparison.
 2. This branch has accumulated its own extra optimizations beyond removing
    Ray (hypotheses #8-#11) that `main` has no equivalent of.
-3. The wall-clock gap's actual root cause (Ray orchestration overhead vs.
-   something else) is still open — see above.
+3. The wall-clock gap's actual root cause is still unidentified after
+   testing the three most plausible candidates (actor count, checkpointing,
+   bucketing) — see above.
 
-A fair "does Ray specifically add overhead" experiment would need to port
-hypothesis #8's length-bucketing into `main`'s `TransformerInferenceActor`
-and re-measure, isolating Ray's orchestration cost from this branch's other
-independent wins. Not done here. Take the 67s vs 391s numbers as "current
-state of each branch as found," not as an isolated Ray-overhead measurement.
+Take the 67s vs 391s numbers as "current state of each branch as found,"
+not as an isolated Ray-overhead measurement — and don't re-test actor
+count, checkpointing, or bucketing as explanations for the timing gap
+without new evidence; all three are now falsified for it.
 
 ## Cleanup
 
