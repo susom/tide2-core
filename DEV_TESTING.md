@@ -14,12 +14,10 @@ from scratch:
   `starr` (check with `kubectl get pods -n starr -l
   app.kubernetes.io/name=tide2-gpu-dev`). Don't `kubectl apply -f
   dev-pod.yaml` again unless it's gone — reuse it.
-- **Code is committed**: all of `core.py`'s vectorized postprocessing, the
-  process-pool overlap in `examples/gpu_batch_pipeline.py`, and this file are
-  in commit `d4b373e` ("chore: nuked ray, added dev test pod") on
-  `nobody-loves-raymond`. Working tree is clean — nothing further needs to be
-  re-copied to the pod unless you make new local edits (in which case,
-  hot-patch per the *Fast iteration* section below).
+- **`examples/gpu_batch_pipeline.py` is gitignored/untracked, not part of any
+  commit** — it's pure local scratch on this branch. Re-`kubectl cp` it to
+  the pod (`/data/scratch/jmesterh-dev/gpu_batch_pipeline.py`) after any
+  local edit; nothing about it survives a fresh clone.
 - **Scratch data already staged on the pod** at
   `/data/scratch/jmesterh-dev/`:
   - `gpu_batch_pipeline.py` — current copy of the example script (re-`kubectl
@@ -27,10 +25,11 @@ from scratch:
   - `input/` — the full 3-file set (`part-000000000000/1/2.parquet`, ~46,435
     rows total).
   - `input_1file/` — just `part-000000000000.parquet` (~15,368 rows) for fast
-    ~70s iteration instead of the full ~3min run.
-  - `output/` — currently empty (leftover benchmarking outputs were cleaned
-    up); the last full clean run wrote to `output/output_final.parquet`
-    (46,435 rows, since deleted) with no errors.
+    ~35-40s iteration instead of the full ~67-90s run.
+  - `output/final_baseline/` — the final combined-changes benchmark output
+    (see *Final baseline* at the end of the results section below); other
+    ad-hoc benchmark outputs get cleaned up as they're produced, don't expect
+    anything else to persist here.
 - **Benchmarking investigation is closed out** — see the *Benchmarking /
   GPU-utilization investigation* section below for the full results table.
   Conclusion: ~50-65% GPU duty cycle is the likely ceiling for
@@ -53,6 +52,22 @@ from scratch:
   bigger batches are *still* worse even with bucketing (16=35s, 32=36s,
   64=37s, 96=40s, 128=49s, 256=76s). Keep the default at 64; don't try
   increasing it again without new evidence.
+- **Multi-process `--num-gpu-workers` (hypothesis #10) is a confirmed,
+  smaller-than-expected win, now the default (3)** — running N independent
+  worker processes (each with its own model) on the same GPU fills one
+  worker's GPU-idle CPU time with another's GPU compute: ~8-10% faster,
+  reproducibly, once fairly measured (a naive first test showed a *bigger*
+  win, but that was confounded — see the hypothesis #10 write-up before
+  reading anything into a `--num-gpu-workers` A/B).
+- **`--row-batch-size` default raised 256→512 (hypothesis #11)** — bigger
+  bucketing candidate pools bucket more precisely, with no downside up to at
+  least 2048 (unlike `--gpu-batch-size`, which does have a downside — #9).
+- **Final combined-changes baseline recorded** — 67s / 54.6% avg GPU util
+  (100% peak) / 3.29GB avg GPU memory (4.43GB peak) on the full 3-file input
+  with current defaults (`--gpu-batch-size 64 --row-batch-size 512
+  --num-gpu-workers 3`); ~25% faster than the session's starting point (89s).
+  Full commands + numbers in the *Final baseline* subsection at the end of
+  the results section.
 - **Not yet tried** (bigger, untested ideas if resuming perf work): verify
   the attention backend is `sdpa` not `eager`, process-based tokenization, or
   `torch.compile(mode="reduce-overhead")` with CUDA graphs (needs a
@@ -272,6 +287,52 @@ than guessing again. On the compute-reduction side (the more promising
 direction after #8), the next untried step is verifying the attention
 backend (`attn_implementation`) is `sdpa` not `eager` — cheap to check, and
 distinct from bucketing/batch-size which are both already settled (#8, #9).
+
+### Final baseline (all changes combined)
+
+One clean run with every kept change in place at its current default
+(`--gpu-batch-size 64`, `--row-batch-size 512`, `--num-gpu-workers 3`),
+against the full 3-file input, to have a single reference number for "where
+this branch stands" rather than only per-hypothesis deltas:
+
+```bash
+POD=$(kubectl get pods -n starr -l app.kubernetes.io/name=tide2-gpu-dev -o jsonpath='{.items[0].metadata.name}')
+kubectl cp examples/gpu_batch_pipeline.py "starr/$POD:/data/scratch/jmesterh-dev/gpu_batch_pipeline.py"
+kubectl exec -n starr "$POD" -- rm -rf /data/scratch/jmesterh-dev/output/final_baseline
+
+SALT_HEX=$(cat temp/salt.bin)
+KEY_HEX=$(cat temp/key.bin)
+
+START=$(date +%s)
+: > /tmp/gpu_samples_final.txt
+nohup kubectl exec -n starr "$POD" -- python /data/scratch/jmesterh-dev/gpu_batch_pipeline.py \
+  --input /data/scratch/jmesterh-dev/input \
+  --output /data/scratch/jmesterh-dev/output/final_baseline \
+  --model StanfordAIMI/stanford-deidentifier-v2 \
+  --salt-hex "$SALT_HEX" --key-hex "$KEY_HEX" > /tmp/pipeline-final-baseline.log 2>&1 &
+PID=$!
+while kill -0 "$PID" 2>/dev/null; do
+  kubectl exec -n starr "$POD" -- nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader 2>/dev/null >> /tmp/gpu_samples_final.txt
+  sleep 1
+done
+END=$(date +%s)
+echo "elapsed: $((END-START))s"
+awk -F', ' '{util+=$1; mem+=$2; n++; if($1+0>maxu)maxu=$1+0; if($2+0>maxm)maxm=$2+0}
+    END {print "avg util:", util/n, "% peak util:", maxu, "% avg mem:", mem/n, "MiB peak mem:", maxm, "MiB"}' \
+  /tmp/gpu_samples_final.txt
+```
+
+Result: **67s** wall-clock, **54.6%** avg GPU utilization (100% peak), **3.29GB**
+avg GPU memory (4.43GB peak), output split across `worker{0,1,2}.parquet`
+(15368 + 15559 + 15508 = **46,435 rows**, matching the known-correct total
+from every earlier run in this investigation — verified via a small
+`pyarrow.parquet` row-count script, not shown here).
+
+For context against where this session started (89s, single sequential
+worker, defaults before hypotheses #8/#10/#11): **~25% wall-clock reduction**,
+and GPU memory usage went from ~1.2GB (barely touching the L4's 23GB) to
+~3.3-4.4GB — the hardware is now actually being used instead of sitting
+mostly idle.
 
 ## Cleanup
 
