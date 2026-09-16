@@ -27,11 +27,14 @@ Usage:
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import logging
 import multiprocessing
 import os
 from collections.abc import Iterator
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
@@ -295,7 +298,9 @@ def run_cpu_stage(
     for note in notes:
         text_hash = note["text_hash"]
         note_text = note.get("note_text") or ""
-        patient_id = note.get("patient_id") or ""
+        # None (not "") when absent, to match main's fillna("None") row_id hashing below
+        patient_uid = note.get("patient_id")
+        patient_uid_str = patient_uid or ""
         patient_identifiers = json.loads(note.get("patient_identifiers") or "{}")
 
         cached_recognizer = create_cached_recognizer(results=transformer_results_by_hash.get(text_hash, "[]"))
@@ -309,7 +314,7 @@ def run_cpu_stage(
         )
 
         operators = build_operators(
-            salt, key, args.acc_num_salt, args.acc_num_study_id, patient_id, jitter=note.get("jitter", 30)
+            salt, key, args.acc_num_salt, args.acc_num_study_id, patient_uid_str, jitter=note.get("jitter", 30)
         )
         # presidio-anonymizer defines its own RecognizerResult distinct from presidio-analyzer's;
         # convert explicitly rather than relying on structural compatibility.
@@ -325,18 +330,32 @@ def run_cpu_stage(
             text=note_text, analyzer_results=anonymizer_results, operators=operators
         )
 
+        # row_id/schema below intentionally mirrors main's AnonymizerActor output
+        # (src/tide2/actors/anonymizer.py) so the two branches produce a compatible contract.
+        row_id_key = f"{text_hash}:{patient_uid if patient_uid is not None else 'None'}"
+        row_id = hashlib.sha256(row_id_key.encode()).hexdigest()
         output_rows.append(
             {
                 "text_hash": text_hash,
-                "patient_id": patient_id,
+                "patient_uid": patient_uid,
                 "anonymized_note_text": anonymized.text,
-                "recognizer_results_json": json.dumps(
+                "anonymizer_results_json": json.dumps(
                     [
-                        {"entity_type": r.entity_type, "start": r.start, "end": r.end, "score": r.score}
-                        for r in anonymizer_results
+                        {
+                            "start": item.start,
+                            "end": item.end,
+                            "entity_type": item.entity_type,
+                            "text": item.text,
+                            "operator": item.operator,
+                        }
+                        for item in anonymized.items
                     ]
                 ),
-                "entity_count": len(anonymizer_results),
+                "entity_count": len(anonymized.items),
+                "processing_status": "success",
+                "error_message": None,
+                "row_id": row_id,
+                "processing_timestamp": datetime.now(UTC).isoformat(),
             }
         )
 
