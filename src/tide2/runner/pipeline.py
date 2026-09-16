@@ -8,7 +8,9 @@ as Parquet.
 
 Input schema (one row per note): text_hash, note_text, patient_uid
     (optional: patient_identifiers - JSON object of known PHI values,
-     jitter - per-note date jitter override)
+     jitter - per-note date jitter override,
+     recognizer_results_json - pre-computed NER spans, used only with
+     --no-run-transformer to skip GPU inference)
 
 Usage:
     python -m tide2.runner.pipeline \
@@ -388,17 +390,22 @@ def run_cpu_stage(
 
 
 def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Namespace, device: str) -> int:
-    """Run the full pipeline over one shard of input files, writing one output parquet.
+    """Run the pipeline over one shard of input files, writing one output parquet.
 
-    Loads its own `TransformerCore`, so this is safe to call from independent
-    worker processes each targeting the same GPU (see `--num-gpu-workers`):
-    each worker only uses ~1.2GB of model weights, and any single worker's
-    forward pass leaves the GPU's compute mostly idle while it's busy on the
-    CPU-bound recognizer/anonymizer stage, so multiple workers' GPU calls can
-    genuinely interleave instead of just taking turns.
+    Loads its own `TransformerCore` (unless `args.run_transformer` is False), so
+    this is safe to call from independent worker processes each targeting the
+    same GPU (see `--num-gpu-workers`): each worker only uses ~1.2GB of model
+    weights, and any single worker's forward pass leaves the GPU's compute
+    mostly idle while it's busy on the CPU-bound recognizer/anonymizer stage,
+    so multiple workers' GPU calls can genuinely interleave instead of just
+    taking turns.
     """
-    core = TransformerCore(model_name=args.model, device=device, load_immediately=True)
-    logger.info("Loaded %s on %s (pid %d)", args.model, core.get_device_info(), os.getpid())
+    core: TransformerCore | None = None
+    if args.run_transformer:
+        core = TransformerCore(model_name=args.model, device=device, load_immediately=True)
+        logger.info("Loaded %s on %s (pid %d)", args.model, core.get_device_info(), os.getpid())
+    else:
+        logger.info("--no-run-transformer: reusing recognizer_results_json from --input (pid %d)", os.getpid())
 
     writer: pq.ParquetWriter | None = None
     total_rows = 0
@@ -422,9 +429,14 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
         with concurrent.futures.ProcessPoolExecutor(max_workers=1, initializer=_init_cpu_worker) as cpu_executor:
             pending: concurrent.futures.Future | None = None
             for notes in iter_note_batches(input_files, args.row_batch_size):
-                transformer_results_by_hash = run_transformer_stage(
-                    core, notes, args.chunk_size, args.chunk_overlap, args.gpu_batch_size
-                )
+                if core is not None:
+                    transformer_results_by_hash = run_transformer_stage(
+                        core, notes, args.chunk_size, args.chunk_overlap, args.gpu_batch_size
+                    )
+                else:
+                    transformer_results_by_hash = {
+                        note["text_hash"]: note.get("recognizer_results_json") or "[]" for note in notes
+                    }
                 flush(pending)
                 pending = cpu_executor.submit(run_cpu_stage, notes, transformer_results_by_hash, args)
             flush(pending)
@@ -451,6 +463,17 @@ def main() -> None:
         help="Output directory - one partition parquet file per GPU worker",
     )
     parser.add_argument("--model", default="StanfordAIMI/stanford-deidentifier-v2")
+    parser.add_argument(
+        "--run-transformer",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Run the GPU transformer NER stage. With --no-run-transformer, skip it entirely and "
+            "reuse each row's existing recognizer_results_json column from --input instead "
+            "(defaults to '[]' for rows without one) - for re-running the recognizer/anonymizer "
+            "stages against already-computed NER predictions without paying for GPU inference again."
+        ),
+    )
     parser.add_argument("--salt-hex", required=True, help="64 hex chars (32 bytes)")
     parser.add_argument("--key-hex", required=True, help="64 hex chars (32 bytes)")
     parser.add_argument("--acc-num-salt", default="")
