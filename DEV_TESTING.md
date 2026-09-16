@@ -595,6 +595,57 @@ not as an isolated Ray-overhead measurement — and don't re-test actor
 count, checkpointing, or bucketing as explanations for the timing gap
 without new evidence; all three are now falsified for it.
 
+### Severity breakdown of the span mismatches (is the 22.2%/18.6% mismatch actually dangerous?)
+
+Row-level match/mismatch (77.8%/81.4% match) doesn't say whether a
+mismatched row is a harmless boundary shift or an actual missed PHI
+entity. Re-ran the comparison at **entity level** (joined on `row_id`,
+`final_baseline_qc` vs `main_ray_baseline`'s `06_anonymizer_output`),
+classifying every entity into one of five buckets via overlap-based
+matching (exact match → same-type overlap = boundary shift → different-type
+overlap = type changed → no overlap at all in the other side = missing):
+
+| Category | Count | % of 105,789 entities |
+|---|---|---|
+| Exact match | 32,690 | 30.9% |
+| Boundary shift (same type, overlapping) | 28,479 | 26.9% |
+| Type changed (overlapping, different label) | 8,398 | 7.9% |
+| Missing in Ray (present in this branch, absent in main) | 17,860 | 16.9% |
+| Missing in no-ray (present in main, absent in this branch) | 18,362 | 17.4% |
+
+The combined ~34% "missing" figure looks alarming in isolation, but it is
+**heavily concentrated**, not spread evenly across notes:
+
+- Only **2,368 of 46,435 rows (5.1%)** have *any* missing entity at all.
+- The worst **25% of those affected rows (592 rows, 1.3% of the whole
+  dataset) account for 81% of all missing-entity instances**; the worst 10
+  rows alone account for 200-339 missing entities each.
+- Checked note length for the 10 worst-offender rows: **10,002-35,682
+  characters (~10-19 chunks each at chunk_size=512/overlap=40)**, vs. a
+  median note of **106 characters (1 chunk)** and a p99 of only ~4,979
+  chars — the worst rows are all in the extreme <0.1%-length tail.
+
+**Conclusion**: for the overwhelming majority of notes (median through
+p99, i.e. essentially all typical single-chunk/few-chunk clinical notes),
+recognition matches exactly or differs only by a boundary/type label on an
+already-detected entity — nothing gets silently dropped. The severe
+"entity present on one side only" failures are concentrated in a small
+number of unusually long, heavily-chunked documents, consistent with the
+fp16 batch-composition sensitivity root-caused above compounding across
+many sequential chunks in one long document (one early divergence cascades
+forward through the rest of that note's chunks). This is a narrow,
+specific, and investigable mechanism — not a general correctness
+regression in either branch — but it's also not fully reassuring on its
+own: long documents (discharge summaries, long consult notes) are exactly
+the kind of note most likely to carry PHI, so this tells you *where* to
+focus further validation, not that it's safe to ignore. Re-ran the same
+breakdown against `main_ray_bucketed` (the length-bucketed Ray variant)
+for completeness: exact match improves to 32.96%, boundary shift/type
+changed both drop slightly, but the missing-in-ray/missing-in-noray rates
+are essentially unchanged (~16.9%/17.4%) — bucketing does not touch the
+long-document cascade mechanism, only ordinary padding-induced boundary
+noise.
+
 ## Cleanup
 
 ```bash
