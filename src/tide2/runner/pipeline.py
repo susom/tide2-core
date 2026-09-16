@@ -454,6 +454,13 @@ def _shard(items: list[Path], num_shards: int) -> list[list[Path]]:
     return [s for s in shards if s]
 
 
+def _device_for_worker(worker_index: int, num_gpus: int) -> str:
+    """Round-robin assign a worker to a physical GPU, so workers spread across all visible GPUs."""
+    if num_gpus == 0:
+        return "cpu"
+    return f"cuda:{worker_index % num_gpus}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", required=True, help="Directory of input .parquet files (one row per note)")
@@ -499,20 +506,21 @@ def main() -> None:
         type=int,
         default=3,
         help=(
-            "Number of independent worker processes, each loading its own model onto the "
-            "same GPU and processing a shard of --input's files concurrently. A single "
-            "worker's GPU calls leave the GPU's compute idle much of the time (it's waiting "
-            "on the CPU-bound recognizer/anonymizer stage) while using very little of its "
-            "memory, so multiple workers can share the GPU productively instead of each "
-            "one taking turns. Each worker always writes its own worker{N}.parquet inside "
-            "--output, even when this is 1 - --output is always a directory."
+            "Number of independent worker processes, each loading its own model and "
+            "processing a shard of --input's files concurrently. Workers are assigned to "
+            "physical GPUs round-robin (worker i -> cuda:{i % num_gpus}), so on a pod with "
+            "multiple GPUs this both spreads work across all of them and lets several "
+            "workers share a single GPU's otherwise-idle compute (it's waiting on the "
+            "CPU-bound recognizer/anonymizer stage) while using very little of its memory. "
+            "Each worker always writes its own worker{N}.parquet inside --output, even when "
+            "this is 1 - --output is always a directory."
         ),
     )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
     input_files = sorted(Path(args.input).glob("*.parquet"))
     if not input_files:
@@ -522,18 +530,26 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.num_gpu_workers <= 1:
-        run_pipeline(input_files, output_dir / "worker0.parquet", args, device)
+        run_pipeline(input_files, output_dir / "worker0.parquet", args, _device_for_worker(0, num_gpus))
         return
 
     shards = _shard(input_files, args.num_gpu_workers)
-    logger.info("Sharding %d input files across %d GPU workers -> %s/", len(input_files), len(shards), output_dir)
+    logger.info(
+        "Sharding %d input files across %d GPU workers on %d GPU(s) -> %s/",
+        len(input_files),
+        len(shards),
+        max(num_gpus, 1),
+        output_dir,
+    )
 
     # CUDA is unsafe after fork() once a context has been initialized, and each worker
     # initializes its own context (via TransformerCore) - "spawn" avoids that entirely
     # by starting fresh interpreters instead of forking this (CUDA-free) parent.
     ctx = multiprocessing.get_context("spawn")
     processes = [
-        ctx.Process(target=run_pipeline, args=(shard, output_dir / f"worker{i}.parquet", args, device))
+        ctx.Process(
+            target=run_pipeline, args=(shard, output_dir / f"worker{i}.parquet", args, _device_for_worker(i, num_gpus))
+        )
         for i, shard in enumerate(shards)
     ]
     for p in processes:
