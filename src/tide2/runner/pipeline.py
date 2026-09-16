@@ -75,6 +75,14 @@ from tide2.utils.text_processing import aggregate_bio_tokens
 
 logger = logging.getLogger(__name__)
 
+
+def _configure_logging() -> None:
+    """Configure logging in this process. Each spawned worker is a fresh interpreter
+    that never runs main(), so this must be called again in run_pipeline() too -
+    otherwise worker logger.info() calls have no handler and are silently dropped.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [pid %(process)d] %(message)s")
+
 # analyzer.analyze(entities=None) only auto-expands to entities supported by the
 # static registry - it silently drops entity types that only ad_hoc_recognizers
 # (the cached transformer results + per-patient known values) produce, such as
@@ -393,13 +401,15 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
     """Run the pipeline over one shard of input files, writing one output parquet.
 
     Loads its own `TransformerCore` (unless `args.run_transformer` is False), so
-    this is safe to call from independent worker processes each targeting the
-    same GPU (see `--num-gpu-workers`): each worker only uses ~1.2GB of model
+    this is safe to call from independent worker processes each targeting a GPU
+    (see `--num-workers-per-gpu`): each worker only uses ~1.2GB of model
     weights, and any single worker's forward pass leaves the GPU's compute
     mostly idle while it's busy on the CPU-bound recognizer/anonymizer stage,
     so multiple workers' GPU calls can genuinely interleave instead of just
     taking turns.
     """
+    _configure_logging()
+
     core: TransformerCore | None = None
     if args.run_transformer:
         core = TransformerCore(model_name=args.model, device=device, load_immediately=True)
@@ -502,25 +512,26 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--num-gpu-workers",
+        "--num-workers-per-gpu",
         type=int,
         default=3,
         help=(
-            "Number of independent worker processes, each loading its own model and "
-            "processing a shard of --input's files concurrently. Workers are assigned to "
-            "physical GPUs round-robin (worker i -> cuda:{i % num_gpus}), so on a pod with "
-            "multiple GPUs this both spreads work across all of them and lets several "
-            "workers share a single GPU's otherwise-idle compute (it's waiting on the "
-            "CPU-bound recognizer/anonymizer stage) while using very little of its memory. "
-            "Each worker always writes its own worker{N}.parquet inside --output, even when "
-            "this is 1 - --output is always a directory."
+            "Number of independent worker processes per GPU, each loading its own model and "
+            "processing a shard of --input's files concurrently. Total workers = this value "
+            "times the number of GPUs visible on this pod (or just this value, on a GPU-less "
+            "pod), assigned to physical GPUs round-robin (worker i -> cuda:{i %% num_gpus}). "
+            "Several workers sharing one GPU keeps it busy during the CPU-bound "
+            "recognizer/anonymizer stage (it's otherwise idle then) while using very little "
+            "of its memory. Each worker always writes its own worker{N}.parquet inside "
+            "--output, even when there's only 1 - --output is always a directory."
         ),
     )
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO)
+    _configure_logging()
 
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    num_workers = args.num_workers_per_gpu * max(num_gpus, 1)
 
     input_files = sorted(Path(args.input).glob("*.parquet"))
     if not input_files:
@@ -529,15 +540,16 @@ def main() -> None:
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.num_gpu_workers <= 1:
+    if num_workers <= 1:
         run_pipeline(input_files, output_dir / "worker0.parquet", args, _device_for_worker(0, num_gpus))
         return
 
-    shards = _shard(input_files, args.num_gpu_workers)
+    shards = _shard(input_files, num_workers)
     logger.info(
-        "Sharding %d input files across %d GPU workers on %d GPU(s) -> %s/",
+        "Sharding %d input files across %d workers (%d per GPU) on %d GPU(s) -> %s/",
         len(input_files),
         len(shards),
+        args.num_workers_per_gpu,
         max(num_gpus, 1),
         output_dir,
     )

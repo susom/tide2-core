@@ -1,0 +1,63 @@
+# Scratch manifest for interactive GPU testing of the current branch on
+# onc-central-dev-gke (namespace: starr, node pool: onc-central-dev-l4-dual,
+# g2-standard-24, 2x L4 each). For testing multi-GPU support in this branch's
+# runner (--num-gpu-workers round-robin across torch.cuda.device_count()).
+# Not part of the prefect/ray deployment path in pod.yaml - just a long-lived
+# pod you can `kubectl exec` into. Not committed / not part of the release process.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tide2-gpu-dev-dual
+  namespace: starr
+  labels:
+    app.kubernetes.io/name: tide2-gpu-dev-dual
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tide2-gpu-dev-dual
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tide2-gpu-dev-dual
+    spec:
+      serviceAccountName: tide-sa
+      nodeSelector:
+        cloud.google.com/gke-nodepool: onc-central-dev-l4-dual
+      tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+      restartPolicy: Always
+      containers:
+        - name: tide2-gpu-dev-dual
+          image: us-west1-docker.pkg.dev/som-rit-infrastructure-prod/starr/tide2-gpu-dev:dev
+          imagePullPolicy: Always
+          command: ["sleep", "infinity"]
+          env:
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: expandable_segments:True
+          resources:
+            requests:
+              # g2-standard-24 has 24 vCPU / 96Gi RAM; leave headroom for
+              # GKE system daemonsets/driver components, same pattern as dev-pod.yaml.
+              cpu: "20"
+              memory: 80Gi
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "20"
+              memory: 80Gi
+              nvidia.com/gpu: "2"
+          volumeMounts:
+            - mountPath: /data
+              name: tide-volume
+            - mountPath: /dev/shm
+              name: dshm
+      volumes:
+        - name: tide-volume
+          persistentVolumeClaim:
+            claimName: tide-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
