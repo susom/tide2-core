@@ -427,7 +427,7 @@ def main() -> None:
     parser.add_argument(
         "--num-gpu-workers",
         type=int,
-        default=1,
+        default=3,
         help=(
             "Number of independent worker processes, each loading its own model onto the "
             "same GPU and processing a shard of --input's files concurrently. A single "
