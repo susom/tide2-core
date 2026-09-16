@@ -243,7 +243,7 @@ force-single-line = true
     "E402",   # Module level import not at top of file
     "ERA001", # Commented-out code used as usage examples
 ]
-"src/tide2/runner/cli.py" = [
+"src/tide2/runner/pipeline.py" = [
     "PLR0915", # Too many statements — CLI dispatch and argparse setup are inherently verbose
 ]
 

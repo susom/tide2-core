@@ -1,25 +1,18 @@
 """
-Example: GPU batch de-identification pipeline built on tide2-core.
+GPU batch de-identification pipeline runner.
 
-This demonstrates how an EXTERNAL project would use tide2 (installed as a
-regular dependency, e.g. `uv add tide2`) to run the full pipeline —
-transformer NER (GPU) -> recognition (CPU: regex + cached transformer
-results + known patient values) -> anonymization (CPU: HIPS) — over a
-directory of input Parquet files, writing anonymized output as Parquet.
-
-It intentionally lives outside src/tide2: batch/GPU orchestration is not
-part of the library (tide2-core only supplies the recognizers, anonymizers,
-and TransformerCore inference engine). This script is the reference
-implementation of that orchestration for a single-GPU VM (e.g. one NVIDIA
-L4), not a supported tide2 API.
+Runs the full pipeline — transformer NER (GPU) -> recognition (CPU: regex +
+cached transformer results + known patient values) -> anonymization (CPU:
+HIPS) — over a directory of input Parquet files, writing anonymized output
+as Parquet.
 
 Input schema (one row per note): text_hash, note_text, patient_id
     (optional: patient_identifiers - JSON object of known PHI values,
      jitter - per-note date jitter override)
 
 Usage:
-    python examples/gpu_batch_pipeline.py \\
-        --input ./data/input --output ./data/output.parquet \\
+    python -m tide2.runner.pipeline \
+        --input ./data/input --output ./data/output \\
         --model StanfordAIMI/stanford-deidentifier-v2 \\
         --salt-hex 00000000000000000000000000000000000000000000000000000000000000 \\
         --key-hex  1111111111111111111111111111111111111111111111111111111111111111
@@ -43,6 +36,10 @@ import torch
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer import EntityRecognizer
 from presidio_analyzer import RecognizerRegistry
+from presidio_analyzer import RecognizerResult as AnalyzerRecognizerResult
+from presidio_analyzer.context_aware_enhancers import ContextAwareEnhancer
+from presidio_analyzer.nlp_engine import NlpArtifacts
+from presidio_analyzer.predefined_recognizers import DateRecognizer
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_anonymizer.entities import RecognizerResult
@@ -112,6 +109,30 @@ ALL_SUPPORTED_ENTITIES = [
 ]
 
 
+class NoOpContextEnhancer(ContextAwareEnhancer):
+    """No-op context enhancer that returns results unchanged for maximum batch throughput."""
+
+    def __init__(self) -> None:
+        """Initialize with dummy parameters since we won't use them."""
+        super().__init__(
+            context_similarity_factor=0.0,
+            min_score_with_context_similarity=0.0,
+            context_prefix_count=0,
+            context_suffix_count=0,
+        )
+
+    def enhance_using_context(
+        self,
+        text: str,
+        raw_results: list[AnalyzerRecognizerResult],
+        nlp_artifacts: NlpArtifacts,
+        recognizers: list[EntityRecognizer],
+        context: list[str] | None = None,
+    ) -> list[AnalyzerRecognizerResult]:
+        """Return results unchanged without any context enhancement, skipping the parent class's context similarity computations."""
+        return raw_results
+
+
 def infer_with_oom_retry(core: TransformerCore, texts: list[str], batch_size: int) -> list[list[dict]]:
     """Run GPU inference, halving the batch on CUDA OOM until it fits.
 
@@ -174,6 +195,7 @@ def run_transformer_stage(
 def build_analyzer() -> AnalyzerEngine:
     """Assemble the regex + known-values recognizer registry (transformer results are ad-hoc, per-note)."""
     registry = RecognizerRegistry()
+    registry.add_recognizer(DateRecognizer())
     registry.add_recognizer(EmailRecognizer())
     registry.add_recognizer(PhoneRecognizer())
     registry.add_recognizer(SsnRecognizer())
@@ -192,7 +214,12 @@ def build_analyzer() -> AnalyzerEngine:
     blank_nlp.max_length = 2_000_000
     nlp_engine = _BlankSpacyNlpEngine(loaded_spacy_model=blank_nlp)
 
-    return AnalyzerEngine(registry=registry, nlp_engine=nlp_engine, supported_languages=["en"])
+    return AnalyzerEngine(
+        registry=registry,
+        nlp_engine=nlp_engine,
+        supported_languages=["en"],
+        context_aware_enhancer=NoOpContextEnhancer(),
+    )
 
 
 def build_anonymizer() -> AnonymizerEngine:
@@ -285,9 +312,8 @@ def run_cpu_stage(
 
     Runs inside a CPU worker process (see _init_cpu_worker): the regex
     recognizers spend most of their time in CPython's `re` engine, which does
-    not release the GIL, so a background thread barely overlaps with GPU
-    inference in the main process - a separate process is needed for real
-    overlap.
+    not release the GIL, so this stage runs in a separate process to overlap
+    with GPU inference in the main process.
     """
     analyzer = _worker_analyzer[0]
     anonymizer_engine = _worker_anonymizer_engine[0]
@@ -298,7 +324,7 @@ def run_cpu_stage(
     for note in notes:
         text_hash = note["text_hash"]
         note_text = note.get("note_text") or ""
-        # None (not "") when absent, to match main's fillna("None") row_id hashing below
+        # None (not "") when absent, so a missing patient_id hashes as the literal string "None" below
         patient_uid = note.get("patient_id")
         patient_uid_str = patient_uid or ""
         patient_identifiers = json.loads(note.get("patient_identifiers") or "{}")
@@ -330,8 +356,7 @@ def run_cpu_stage(
             text=note_text, analyzer_results=anonymizer_results, operators=operators
         )
 
-        # row_id/schema below intentionally mirrors main's AnonymizerActor output
-        # (src/tide2/actors/anonymizer.py) so the two branches produce a compatible contract.
+        # Stable row identifier for downstream joins/checkpointing.
         row_id_key = f"{text_hash}:{patient_uid if patient_uid is not None else 'None'}"
         row_id = hashlib.sha256(row_id_key.encode()).hexdigest()
         output_rows.append(
@@ -389,11 +414,10 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
         total_rows += out_table.num_rows
         logger.info("  wrote %d rows (%d total)", out_table.num_rows, total_rows)
 
-    # The recognizer/anonymizer stage (run_cpu_stage) is regex- and pure-Python-heavy
-    # and holds the GIL almost continuously, so a background thread barely overlaps
-    # with GPU inference (measured ~50% duty cycle). A separate process sidesteps the
-    # GIL: this process keeps driving GPU inference for batch N while the worker
-    # process runs the CPU stage for batch N-1.
+    # run_cpu_stage is regex- and pure-Python-heavy and holds the GIL almost
+    # continuously, so it runs in a separate process: this process keeps driving
+    # GPU inference for batch N while the worker process runs the CPU stage for
+    # batch N-1.
     try:
         with concurrent.futures.ProcessPoolExecutor(max_workers=1, initializer=_init_cpu_worker) as cpu_executor:
             pending: concurrent.futures.Future | None = None
@@ -413,7 +437,7 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
 
 
 def _shard(items: list[Path], num_shards: int) -> list[list[Path]]:
-    """Split `items` into `num_shards` contiguous, roughly equal groups (empty groups dropped)."""
+    """Split `items` into `num_shards` round-robin, roughly equal groups (empty groups dropped)."""
     shards = [items[i::num_shards] for i in range(num_shards)]
     return [s for s in shards if s]
 
@@ -421,7 +445,11 @@ def _shard(items: list[Path], num_shards: int) -> list[list[Path]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", required=True, help="Directory of input .parquet files (one row per note)")
-    parser.add_argument("--output", required=True, help="Output .parquet file path")
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Output directory - one partition parquet file per GPU worker",
+    )
     parser.add_argument("--model", default="StanfordAIMI/stanford-deidentifier-v2")
     parser.add_argument("--salt-hex", required=True, help="64 hex chars (32 bytes)")
     parser.add_argument("--key-hex", required=True, help="64 hex chars (32 bytes)")
@@ -453,8 +481,8 @@ def main() -> None:
             "worker's GPU calls leave the GPU's compute idle much of the time (it's waiting "
             "on the CPU-bound recognizer/anonymizer stage) while using very little of its "
             "memory, so multiple workers can share the GPU productively instead of each "
-            "one taking turns. When >1, --output is treated as a directory: each worker "
-            "writes its own worker{N}.parquet inside it instead of one combined file."
+            "one taking turns. Each worker always writes its own worker{N}.parquet inside "
+            "--output, even when this is 1 - --output is always a directory."
         ),
     )
     args = parser.parse_args()
@@ -467,13 +495,14 @@ def main() -> None:
     if not input_files:
         raise FileNotFoundError(f"No .parquet files found in {args.input}")
 
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.num_gpu_workers <= 1:
-        run_pipeline(input_files, Path(args.output), args, device)
+        run_pipeline(input_files, output_dir / "worker0.parquet", args, device)
         return
 
     shards = _shard(input_files, args.num_gpu_workers)
-    output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Sharding %d input files across %d GPU workers -> %s/", len(input_files), len(shards), output_dir)
 
     # CUDA is unsafe after fork() once a context has been initialized, and each worker
