@@ -10,10 +10,11 @@ import json
 import logging
 import re
 import threading
+from typing import ClassVar
 
 import httpx
 import openai
-from anthropic import AnthropicVertex
+from anthropic.lib.vertex import AnthropicVertex
 from google import auth
 from google import genai
 from google.auth.transport.requests import Request
@@ -47,8 +48,8 @@ class LlmModel:
     # Class-level locks for different providers
     _auth_lock = threading.Lock()
     _aiplatform_lock = threading.Lock()
-    _credentials_cache = {}
-    _aiplatform_initialized = {}
+    _credentials_cache: ClassVar[dict] = {}
+    _aiplatform_initialized: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -176,13 +177,13 @@ class LlmModel:
             token_limit = getattr(model_info, "input_token_limit", None)
             if token_limit is not None and token_limit > 0:
                 return token_limit
-            logger.info(f"Model {self.model_name} does not have input_token_limit parameter or it is zero/null")
-            return None
 
         except Exception as e:
             logger.warning(f"Failed to get model input token limit for {self.model_name}: {e}")
-
-        return None
+            return None
+        else:
+            logger.info(f"Model {self.model_name} does not have input_token_limit parameter or it is zero/null")
+            return None
 
     def _get_effective_max_tokens_for_non_google_providers(self) -> int:
         """
@@ -223,217 +224,229 @@ class LlmModel:
         logger.error("Response is not a string. Expected a string response.")
         raise TypeError("Response is not a string. Expected a string response.")
 
+    def _get_response_google(self, prompt: str) -> str | None:
+        """Call the Google GenAI provider and return the raw response text."""
+        client = genai.Client(
+            vertexai=True,
+            project=str(self.project_id),
+            location=self.region,
+        )
+
+        generate_content_config = genai_types.GenerateContentConfig(
+            temperature=self.temperature,
+            top_p=0.95,
+            seed=0,
+            max_output_tokens=self.max_output_tokens,
+            safety_settings=[
+                genai_types.SafetySetting(
+                    category=genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=genai_types.HarmBlockThreshold.OFF,
+                ),
+                genai_types.SafetySetting(
+                    category=genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=genai_types.HarmBlockThreshold.OFF,
+                ),
+                genai_types.SafetySetting(
+                    category=genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=genai_types.HarmBlockThreshold.OFF,
+                ),
+                genai_types.SafetySetting(
+                    category=genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=genai_types.HarmBlockThreshold.OFF,
+                ),
+            ],
+            thinking_config=genai_types.ThinkingConfig(
+                thinking_budget=-1,
+            ),
+        )
+
+        if not self.model_name:
+            raise ValueError("model_name is required for Google provider")
+
+        response = client.models.generate_content(
+            model=self.model_name,
+            contents=[prompt],  # Simplified content format
+            config=generate_content_config,
+        )
+
+        return response.text
+
+    def _get_response_llama(self, prompt: str) -> str | None:
+        """Call the LLAMA (Vertex MaaS, OpenAI-compatible) provider and return the response text."""
+        maas_endpoint = f"{self.region}-aiplatform.googleapis.com"
+        base_url = (
+            f"https://{maas_endpoint}/v1beta1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi"
+        )
+
+        # Thread-safe credential acquisition
+        _creds, access_token = self._get_authenticated_credentials()
+
+        client = openai.OpenAI(
+            base_url=base_url,
+            api_key=access_token,
+        )
+
+        if not self.model_name:
+            raise ValueError("model_name is required for LLAMA provider")
+
+        response = client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"text": prompt, "type": "text"},
+                    ],
+                }
+            ],
+            max_tokens=self._get_effective_max_tokens_for_non_google_providers(),
+        )
+
+        return response.choices[0].message.content
+
+    def _get_response_openai(self, prompt: str) -> str | None:
+        """Call the Vertex OpenAI-compatible endpoint and return the response text."""
+        # Vertex's OpenAI-compatible endpoint uses a per-region host
+        # ({region}-aiplatform.googleapis.com), except for region="global"
+        # which is served from the unprefixed aiplatform.googleapis.com host.
+        endpoint = (
+            "aiplatform.googleapis.com" if self.region == "global" else f"{self.region}-aiplatform.googleapis.com"
+        )
+        base_url = f"https://{endpoint}/v1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi/chat/completions"
+
+        # Thread-safe credential acquisition
+        _creds, access_token = self._get_authenticated_credentials()
+
+        # Prepare headers
+        headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+
+        # Prepare request payload
+        payload = {"model": self.model_name, "stream": False, "messages": [{"role": "user", "content": prompt}]}
+
+        # Make the request
+        try:
+            with httpx.Client() as client:
+                response = client.post(base_url, headers=headers, json=payload, timeout=30.0)
+                response.raise_for_status()
+                response_json = response.json()
+                return response_json["choices"][0]["message"]["content"]
+
+        except httpx.RequestError:
+            logger.exception("Request error")
+            raise
+
+        except httpx.HTTPStatusError as e:
+            logger.exception(f"HTTP error {e.response.status_code}: {e.response.text}")
+            raise
+
+    def _get_response_anthropic(self, prompt: str) -> str | None:
+        """Call the Anthropic (Vertex) provider and return the response text."""
+        if not self.model_name:
+            raise ValueError("model_name is required for Anthropic provider")
+
+        client = AnthropicVertex(region=self.region, project_id=str(self.project_id))
+
+        response = client.messages.create(
+            max_tokens=self._get_effective_max_tokens_for_non_google_providers(),
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model=self.model_name,
+        )
+
+        # Handle different content types safely
+        response_text = ""
+        for content_block in response.content:
+            # Check for TextBlock type specifically or any object with text attribute
+            if hasattr(content_block, "text"):
+                # Check if it has a type attribute and is text type, or just use the text
+                if hasattr(content_block, "type"):
+                    if getattr(content_block, "type", None) == "text":
+                        response_text = getattr(content_block, "text", "")
+                        break
+                else:
+                    # For mock objects or other content that just has text attribute
+                    response_text = getattr(content_block, "text", "")
+                    break
+            # Fallback for other text-like content
+            elif str(type(content_block)).find("TextBlock") != -1:
+                response_text = getattr(content_block, "text", str(content_block))
+                break
+
+        return response_text
+
+    def _get_response_medgemma(self, prompt: str) -> str | None:
+        """Call the MedGemma (Vertex endpoint) provider and return the response text."""
+        if not self.endpoint_id:
+            raise ValueError("endpoint_id is required for MedGemma provider")
+
+        # Thread-safe aiplatform initialization
+        self._initialize_aiplatform_safely()
+
+        endpoint = aiplatform.Endpoint(
+            endpoint_name=str(self.endpoint_id),
+            project=str(self.project_id),
+            location=self.region,
+        )
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+
+        instances = [
+            {
+                "@requestFormat": "chatCompletions",
+                "messages": messages,
+                "max_tokens": self._get_effective_max_tokens_for_non_google_providers(),
+                "temperature": self.temperature,
+            },
+        ]
+
+        response = endpoint.predict(instances=instances, use_dedicated_endpoint=True)
+
+        # Safe response parsing for medgemma
+        try:
+            if hasattr(response, "predictions") and response.predictions:
+                prediction = response.predictions[0] if isinstance(response.predictions, list) else response.predictions
+                if isinstance(prediction, dict) and "choices" in prediction:
+                    return prediction["choices"][0]["message"]["content"]
+                return str(prediction)
+            return str(response)
+        except (KeyError, IndexError, AttributeError):
+            logger.exception("Error parsing medgemma response")
+            return str(response)
+
     def get_response(self, prompt: str, parse_json=True) -> list[dict] | str | None:
         """
         Get a response from the model based on the provider type.
 
         Args:
             prompt: The input prompt for the model
+            parse_json: Whether to parse the response as JSON (default: True)
 
         Returns:
             The response from the model
         """
-
-        # Initialize provider and model based on provider_type
-        if self.provider_type.lower() == "google":
-            client = genai.Client(
-                vertexai=True,
-                project=str(self.project_id),
-                location=self.region,
-            )
-
-            generate_content_config = genai_types.GenerateContentConfig(
-                temperature=self.temperature,
-                top_p=0.95,
-                seed=0,
-                max_output_tokens=self.max_output_tokens,
-                safety_settings=[
-                    genai_types.SafetySetting(
-                        category=genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                        threshold=genai_types.HarmBlockThreshold.OFF,
-                    ),
-                    genai_types.SafetySetting(
-                        category=genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                        threshold=genai_types.HarmBlockThreshold.OFF,
-                    ),
-                    genai_types.SafetySetting(
-                        category=genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                        threshold=genai_types.HarmBlockThreshold.OFF,
-                    ),
-                    genai_types.SafetySetting(
-                        category=genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-                        threshold=genai_types.HarmBlockThreshold.OFF,
-                    ),
-                ],
-                thinking_config=genai_types.ThinkingConfig(
-                    thinking_budget=-1,
-                ),
-            )
-
-            if not self.model_name:
-                raise ValueError("model_name is required for Google provider")
-
-            response = client.models.generate_content(
-                model=self.model_name,
-                contents=[prompt],  # Simplified content format
-                config=generate_content_config,
-            )
-
-            response_text = response.text
-
-        elif self.provider_type.lower() == "llama":
-            MAAS_ENDPOINT = f"{self.region}-aiplatform.googleapis.com"
-            base_url = (
-                f"https://{MAAS_ENDPOINT}/v1beta1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi"
-            )
-
-            # Thread-safe credential acquisition
-            creds, access_token = self._get_authenticated_credentials()
-
-            client = openai.OpenAI(
-                base_url=base_url,
-                api_key=access_token,
-            )
-
-            if not self.model_name:
-                raise ValueError("model_name is required for LLAMA provider")
-
-            response = client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"text": prompt, "type": "text"},
-                        ],
-                    }
-                ],
-                max_tokens=self._get_effective_max_tokens_for_non_google_providers(),
-            )
-
-            response_text = response.choices[0].message.content
-
-        elif self.provider_type.lower() == "openai":
-            # Vertex's OpenAI-compatible endpoint uses a per-region host
-            # ({region}-aiplatform.googleapis.com), except for region="global"
-            # which is served from the unprefixed aiplatform.googleapis.com host.
-            ENDPOINT = (
-                "aiplatform.googleapis.com" if self.region == "global" else f"{self.region}-aiplatform.googleapis.com"
-            )
-            BASE_URL = f"https://{ENDPOINT}/v1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi/chat/completions"
-
-            # Thread-safe credential acquisition
-            creds, access_token = self._get_authenticated_credentials()
-
-            # Prepare headers
-            headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-
-            # Prepare request payload
-            payload = {"model": self.model_name, "stream": False, "messages": [{"role": "user", "content": prompt}]}
-
-            # Make the request
-            try:
-                with httpx.Client() as client:
-                    response = client.post(BASE_URL, headers=headers, json=payload, timeout=30.0)
-                    response.raise_for_status()
-                    response = response.json()
-                    response_text = response["choices"][0]["message"]["content"]
-
-            except httpx.RequestError as e:
-                logger.error(f"Request error: {e}")
-                raise e
-
-            except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
-                raise e
-
-        elif self.provider_type.lower() == "anthropic":
-            if not self.model_name:
-                raise ValueError("model_name is required for Anthropic provider")
-
-            client = AnthropicVertex(region=self.region, project_id=str(self.project_id))
-
-            response = client.messages.create(
-                max_tokens=self._get_effective_max_tokens_for_non_google_providers(),
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-                model=self.model_name,
-            )
-
-            # Handle different content types safely
-            response_text = ""
-            for content_block in response.content:
-                # Check for TextBlock type specifically or any object with text attribute
-                if hasattr(content_block, "text"):
-                    # Check if it has a type attribute and is text type, or just use the text
-                    if hasattr(content_block, "type"):
-                        if getattr(content_block, "type", None) == "text":
-                            response_text = getattr(content_block, "text", "")
-                            break
-                    else:
-                        # For mock objects or other content that just has text attribute
-                        response_text = getattr(content_block, "text", "")
-                        break
-                # Fallback for other text-like content
-                elif str(type(content_block)).find("TextBlock") != -1:
-                    response_text = getattr(content_block, "text", str(content_block))
-                    break
-
-        elif self.provider_type.lower() == "medgemma":
-            if not self.endpoint_id:
-                raise ValueError("endpoint_id is required for MedGemma provider")
-
-            # Thread-safe aiplatform initialization
-            self._initialize_aiplatform_safely()
-
-            endpoints = {}
-            endpoints["endpoint"] = aiplatform.Endpoint(
-                endpoint_name=str(self.endpoint_id),
-                project=str(self.project_id),
-                location=self.region,
-            )
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ]
-
-            instances = [
-                {
-                    "@requestFormat": "chatCompletions",
-                    "messages": messages,
-                    "max_tokens": self._get_effective_max_tokens_for_non_google_providers(),
-                    "temperature": self.temperature,
-                },
-            ]
-
-            response = endpoints["endpoint"].predict(instances=instances, use_dedicated_endpoint=True)
-
-            # Safe response parsing for medgemma
-            try:
-                if hasattr(response, "predictions") and response.predictions:
-                    prediction = (
-                        response.predictions[0] if isinstance(response.predictions, list) else response.predictions
-                    )
-                    if isinstance(prediction, dict) and "choices" in prediction:
-                        response_text = prediction["choices"][0]["message"]["content"]
-                    else:
-                        response_text = str(prediction)
-                else:
-                    response_text = str(response)
-            except (KeyError, IndexError, AttributeError) as e:
-                logger.error(f"Error parsing medgemma response: {e}")
-                response_text = str(response)
-        else:
+        providers = {
+            "google": self._get_response_google,
+            "llama": self._get_response_llama,
+            "openai": self._get_response_openai,
+            "anthropic": self._get_response_anthropic,
+            "medgemma": self._get_response_medgemma,
+        }
+        handler = providers.get(self.provider_type.lower())
+        if handler is None:
             raise ValueError(f"Unsupported provider type: {self.provider_type}. Supported providers are 'google'.")
+
+        response_text = handler(prompt)
 
         if not parse_json:
             return response_text
@@ -486,6 +499,4 @@ class LlmModel:
             return 0
 
         char_count = len(text)
-        estimated_tokens = max(1, round(char_count / chars_per_token))
-
-        return estimated_tokens
+        return max(1, round(char_count / chars_per_token))
