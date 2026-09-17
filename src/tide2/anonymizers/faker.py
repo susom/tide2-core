@@ -63,8 +63,8 @@ class FakerAnonymizer(Operator):
             "EMAIL_ADDRESS": lambda _: self.fake.email(),
             "NRP": lambda _: str(self.fake.random_number(digits=8, fix_len=True)),
             "MEDICAL_LICENSE": lambda _: self.fake.bothify(text="??######").upper(),
-            "PHONE": lambda text: self._generate_phone_number(text),
-            "PHONE_NUMBER": lambda text: self._generate_phone_number(text),
+            "PHONE": self._generate_phone_number,
+            "PHONE_NUMBER": self._generate_phone_number,
             # US-specific entities
             "US_BANK_NUMBER": lambda _: self.fake.bban(),
             "US_DRIVER_LICENSE": lambda _: str(self.fake.random_number(digits=9, fix_len=True)),
@@ -142,7 +142,7 @@ class FakerAnonymizer(Operator):
         # Fallback to faker default
         return self.fake.phone_number()
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Anonymize the input text by replacing it with realistic fake data.
 
         Args:
@@ -157,10 +157,11 @@ class FakerAnonymizer(Operator):
             A fake replacement string appropriate for the entity type.
         """
 
+        params = params or {}
         # type of entity to anonymize
         entity_type = params.get("entity_type")
         # get the faker seed
-        faker_seed = params.get("faker_seed", random.randint(0, 100000))
+        faker_seed = params.get("faker_seed", random.randint(0, 100000))  # noqa: S311 # nosec B311
 
         # If entity type is WEB, try to detect the specific format
         if entity_type in ["WEB", "URL"]:
@@ -175,9 +176,9 @@ class FakerAnonymizer(Operator):
         self.fake.seed_instance(faker_seed)
         return f_map(text)
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters."""
-
+        params = params or {}
         entity_type = params.get("entity_type")
 
         if entity_type not in self.entities_supported:

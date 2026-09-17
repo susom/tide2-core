@@ -14,7 +14,7 @@ class MaskingAnonymizer(Operator):
         """Initialize the masking anonymizer."""
         super().__init__()
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Replace the entity text with its type label.
 
         Args:
@@ -24,10 +24,11 @@ class MaskingAnonymizer(Operator):
         Returns:
             String in the format [<entity_type>], e.g. [PERSON].
         """
+        params = params or {}
         entity_type = params.get("entity_type", "UNKNOWN")
         return f"[{entity_type}]"
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters. Accepts all entity types."""
         pass
 

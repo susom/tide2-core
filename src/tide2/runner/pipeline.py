@@ -83,6 +83,7 @@ def _configure_logging() -> None:
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [pid %(process)d] %(message)s")
 
+
 # analyzer.analyze(entities=None) only auto-expands to entities supported by the
 # static registry - it silently drops entity types that only ad_hoc_recognizers
 # (the cached transformer results + per-patient known values) produce, such as

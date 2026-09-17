@@ -19,6 +19,9 @@ class AgeGroupAnonymizer(Operator):
     Ages above the specified limit are set to the limit value, maintaining the input format.
     """
 
+    _TEENS_LIMIT = 20
+    _HUNDRED = 100
+
     def __init__(self):
         """Initialize the age grouping anonymizer."""
         super().__init__()
@@ -66,7 +69,7 @@ class AgeGroupAnonymizer(Operator):
 
         return has_number and has_age_keyword
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Anonymize the input text by applying age grouping.
 
         Args:
@@ -81,6 +84,7 @@ class AgeGroupAnonymizer(Operator):
             no age format is detected.
         """
 
+        params = params or {}
         upper_limit = params.get("upper_limit", 80)
 
         # Detect the age format
@@ -124,16 +128,9 @@ class AgeGroupAnonymizer(Operator):
             return None
 
         if format_type == FormatType.AGE_GESTATIONAL:
-            # For gestational age, extract weeks and convert to approximate age
-            # This is a special case - we'll preserve the format but limit the weeks
+            # For gestational age, extract weeks; typical range is 20-42 weeks
             weeks_match = re.search(r"(\d+)w", text.lower())
-            if weeks_match:
-                weeks = int(weeks_match.group(1))
-                # Convert gestational weeks to approximate months (rough approximation)
-                # Gestational age typically ranges from 20-42 weeks
-                # We'll treat this differently and limit weeks instead of converting to years
-                return weeks
-            return None
+            return int(weeks_match.group(1)) if weeks_match else None
 
         if format_type == FormatType.AGE_WRITTEN_NUMBERS:
             # Handle written numbers like "twenty-seven year old" or "ninety year old"
@@ -260,9 +257,9 @@ class AgeGroupAnonymizer(Operator):
 
         tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
 
-        if number < 20:
+        if number < self._TEENS_LIMIT:
             word_number = ones[number]
-        elif number < 100:
+        elif number < self._HUNDRED:
             tens_digit = number // 10
             ones_digit = number % 10
             if ones_digit == 0:
@@ -312,18 +309,17 @@ class AgeGroupAnonymizer(Operator):
         # If no pattern matched, return original text
         return original_text
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters."""
-
+        params = params or {}
         entity_type = params.get("entity_type")
         if entity_type not in self.supported_entity_types:
             raise ValueError(f"Entity type '{entity_type}' is not supported for AgeGroupAnonymizer.")
 
         # Validate upper_limit parameter
         upper_limit = params.get("upper_limit")
-        if upper_limit is not None:
-            if not isinstance(upper_limit, int) or upper_limit <= 0:
-                raise ValueError("Parameter 'upper_limit' must be a positive integer.")
+        if upper_limit is not None and (not isinstance(upper_limit, int) or upper_limit <= 0):
+            raise ValueError("Parameter 'upper_limit' must be a positive integer.")
 
     def operator_name(self) -> str:
         """Return the operator name."""

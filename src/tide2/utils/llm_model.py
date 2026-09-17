@@ -105,7 +105,7 @@ class LlmModel:
                 try:
                     if hasattr(creds, "valid") and creds.valid:
                         return creds, token
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     # If validation fails, refresh credentials
                     logger.debug("Credential validation check failed, will refresh: %s", e)
 
