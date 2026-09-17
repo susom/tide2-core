@@ -5,7 +5,7 @@ How to test the current branch against a real NVIDIA L4 GPU in
 prefect/ray production pipeline. Everything here is dev/scratch tooling —
 none of it is used by CI or the release process.
 
-## Current session state (2026-09-16, branch `nobody-loves-raymond`)
+## Current session state (2026-09-16, branch `git-ray-gret`)
 
 Picking this back up in a new session? Start here instead of redeploying
 from scratch:
@@ -397,7 +397,7 @@ To run `main`'s code on the same pod without a full image rebuild:
   kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
   kubectl cp /tmp/main_src/src/tide2 "starr/$POD:/opt/tide2/src/tide2"
   # To go back to running examples/gpu_batch_pipeline.py on this branch:
-  git archive nobody-loves-raymond -- src/tide2 | tar -x -C /tmp/nlr_src
+  git archive git-ray-gret -- src/tide2 | tar -x -C /tmp/nlr_src
   kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
   kubectl cp /tmp/nlr_src/src/tide2 "starr/$POD:/opt/tide2/src/tide2"
   ```
@@ -669,7 +669,7 @@ usage sampled every 3s for the duration of each run (system-wide CPU% from
 `/proc/stat`, memory from `/proc/meminfo`, per-GPU utilization/memory from
 `nvidia-smi`).
 
-| Metric | This branch (nobody-loves-raymond) | main (Ray) |
+| Metric | This branch (git-ray-gret) | main (Ray) |
 |---|---|---|
 | Wall-clock | **341s** | 1663s |
 | Speedup | **4.9x** | 1x (baseline) |
