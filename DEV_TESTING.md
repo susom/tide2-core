@@ -917,6 +917,44 @@ kubectl exec -n starr "$POD" -- bash -c "cd /opt/tide2 && uv sync --locked --no-
 **10. Clean up outputs** (`/data/scratch/jmesterh-dev/output/*`) and local
 `/tmp/*monitor*`/`*_full` scratch before finishing.
 
+## Stopping a running job (Ctrl-C doesn't do what you'd expect over `kubectl exec`)
+
+**Hitting Ctrl-C on a `kubectl exec` command (without `-it`) only kills your
+local `kubectl` client - it does not deliver any signal to the remote
+process at all.** The pipeline keeps running on the pod, fully invisible to
+your now-dead terminal, still holding GPU memory and burning compute. This
+bit us directly: a benchmark run's driver process died (or its exec session
+was dropped) while its `multiprocessing`-spawned GPU worker processes kept
+running as orphans (reparented to PID 1), each still ~80-90% CPU / holding
+model weights on GPU - the only way to find and stop them was `kubectl exec
+... -- ps -ef` on the pod, then `kill -9` the worker PIDs by hand.
+
+`src/tide2/runner/pipeline.py`'s multi-worker `main()` now installs a
+SIGTERM handler and wraps the worker `p.join()` loop so **a real signal
+delivered to the driver process** (Ctrl-C via an interactive `-it` session,
+or a plain `kill <pid>`/SIGTERM) terminates every spawned worker instead of
+leaving them orphaned. `run_pipeline()` (which runs *inside* each spawned
+worker) installs the same handler for itself too - a `spawn`ed process
+doesn't inherit the parent's signal handlers, so without this, a worker
+receiving SIGTERM from `_terminate_workers()`'s `p.terminate()` would die
+outright and orphan *its own* CPU-stage `ProcessPoolExecutor` child one
+level deeper. Verified live on the dual-GPU pod: a plain `kill -TERM` on
+the driver PID first left exactly this second-level orphan behind (6 CPU
+worker processes reparented to PID 1, still ~80-90% CPU) until the
+`run_pipeline()`-side handler was added, after which the same test cleanly
+tore down every process. This does **not** help a `kubectl exec` invoked
+without `-it` whose connection just drops - nothing is ever delivered to
+the remote process in that case. To actually be able to stop a run:
+- Use `kubectl exec -it ... -- python -m tide2.runner.pipeline ...` (real
+  TTY) so Ctrl-C is forwarded, letting the new signal handling above do its
+  job, or
+- Record the remote PID up front (`kubectl exec ... -- python -m
+  tide2.runner.pipeline ... & echo $! > /tmp/pipeline.pid`, run via a
+  detached shell as in the benchmark scripts above) so you can
+  `kubectl exec ... -- kill $(cat /tmp/pipeline.pid)` later, or
+- As a last resort, `kubectl exec ... -- ps -ef | grep spawn_main` to find
+  orphaned worker PIDs directly and `kill -9` them (what we did above).
+
 ## Cleanup
 
 ```bash

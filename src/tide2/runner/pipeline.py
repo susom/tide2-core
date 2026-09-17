@@ -31,9 +31,12 @@ import logging
 import multiprocessing
 import os
 import shutil
+import signal
 from collections.abc import Iterator
+from collections.abc import Sequence
 from datetime import UTC
 from datetime import datetime
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 
 import pyarrow as pa
@@ -81,12 +84,39 @@ from tide2.utils.text_processing import aggregate_bio_tokens
 logger = logging.getLogger(__name__)
 
 
+class _DeduplicateLogFilter(logging.Filter):
+    """Suppress a log record if an identical message was already emitted once by this
+    logger in this process - presidio_analyzer's recognizer_registry logs "Entity X
+    doesn't have a corresponding recognizer" on every analyze() call (i.e. once per
+    note), which floods the console over a multi-million-row run for the same handful
+    of always-missing entities (e.g. CSN_ID, MEDICAL_LICENSE with no static recognizer).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._seen: set[str] = set()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if message in self._seen:
+            return False
+        self._seen.add(message)
+        # Mutate in place rather than logging a separate notice - a second logger call
+        # from inside filter() would recurse back through this same filter/logger.
+        record.msg = f"{message} (further occurrences of this warning will be suppressed for this process)"
+        record.args = ()
+        return True
+
+
 def _configure_logging() -> None:
     """Configure logging in this process. Each spawned worker is a fresh interpreter
     that never runs main(), so this must be called again in run_pipeline() too -
     otherwise worker logger.info() calls have no handler and are silently dropped.
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [pid %(process)d] %(message)s")
+    presidio_logger = logging.getLogger("presidio-analyzer")
+    if not any(isinstance(f, _DeduplicateLogFilter) for f in presidio_logger.filters):
+        presidio_logger.addFilter(_DeduplicateLogFilter())
 
 
 # analyzer.analyze(entities=None) only auto-expands to entities supported by the
@@ -506,6 +536,10 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
     taking turns.
     """
     _configure_logging()
+    # Spawned worker processes (the multi-worker path in main()) don't inherit the
+    # parent's signal handlers, so without this, p.terminate() (SIGTERM) kills this
+    # process outright and orphans its own CPU-stage ProcessPoolExecutor child below.
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     core: TransformerCore | None = None
     if args.run_transformer:
@@ -571,6 +605,32 @@ def _device_for_worker(worker_index: int, num_gpus: int) -> str:
     if num_gpus == 0:
         return "cpu"
     return f"cuda:{worker_index % num_gpus}"
+
+
+def _terminate_workers(processes: Sequence[BaseProcess]) -> None:
+    """Terminate every still-running worker on Ctrl-C/SIGTERM, escalating to SIGKILL if a
+    worker doesn't exit promptly - otherwise an interrupted run leaves GPU worker processes
+    (each holding a loaded model) running as orphans that only a manual `ps`/`kill -9` on the
+    pod can stop, since a plain Ctrl-C on a `kubectl exec` command only kills the local client
+    and never reaches the remote process at all (see DEV_TESTING.md).
+    """
+    for p in processes:
+        if p.is_alive():
+            p.terminate()
+    for p in processes:
+        p.join(timeout=10)
+    for p in processes:
+        if p.is_alive():
+            p.kill()
+            p.join()
+
+
+def _handle_sigterm(_signum: int, _frame: object) -> None:
+    """Route SIGTERM through the same KeyboardInterrupt-based cleanup path as Ctrl-C
+    (SIGINT), which already raises KeyboardInterrupt by default - SIGTERM otherwise has
+    no such handler and would kill this process without a chance to clean up workers.
+    """
+    raise KeyboardInterrupt
 
 
 def _check_no_input_output_overlap(input_dir: Path, output_dir: Path) -> None:
@@ -695,6 +755,10 @@ def main() -> None:
         parser.error("--key-hex is required (or set a non-empty $TIDE_KEY_HEX)")
 
     _configure_logging()
+    # Installed before anything is spawned (both the single-worker path below and the
+    # multi-worker branch's p.start() loop) so there's no window where an early SIGTERM
+    # still falls back to the default disposition and orphans a just-started worker.
+    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     num_workers = args.num_workers_per_gpu * max(num_gpus, 1)
@@ -733,8 +797,14 @@ def main() -> None:
     ]
     for p in processes:
         p.start()
-    for p in processes:
-        p.join()
+
+    try:
+        for p in processes:
+            p.join()
+    except (KeyboardInterrupt, SystemExit):
+        logger.warning("Interrupted - terminating %d worker process(es)", len(processes))
+        _terminate_workers(processes)
+        raise
 
     failed = [p.pid for p in processes if p.exitcode != 0]
     if failed:
