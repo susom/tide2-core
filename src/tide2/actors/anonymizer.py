@@ -254,14 +254,13 @@ class AnonymizerWorker:
             }
         )
 
-        # ACC_NUM uses the accession_number_hash anonymizer with per-note patient_uid
-        # The entity parameter is the patient_uid which varies per note
+        # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
         operators["ACC_NUM"] = OperatorConfig(
             "accession_number_hash",
             {
                 "salt": self.acc_num_salt,
                 "study_id": self.acc_num_study_id,
-                "entity_type": patient_uid,  # Per-note: patient_uid as entity
+                "patient_uid": patient_uid,
             },
         )
 

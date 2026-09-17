@@ -33,8 +33,10 @@ class AccessionNumberHashAnonymizer(Operator):
     Parameters:
         salt (str, optional): Salt value for hashing. Defaults to '[S]' if None.
         study_id (str, optional): Study identifier. Defaults to '[U]' if None.
-        entity_type (str): The entity type being anonymized (e.g., 'ACC_NUM').
+        patient_uid (str, optional): Patient identifier (SQL entity parameter).
             Defaults to '[E]' if None.
+        entity_type (str, optional): The Presidio entity type being anonymized
+            (e.g., 'ACC_NUM'). Provided by Presidio; defaults to 'DEFAULT'.
     """
 
     # Default values matching the SQL COALESCE behavior
@@ -74,20 +76,22 @@ class AccessionNumberHashAnonymizer(Operator):
         """
         Anonymize the accession number using deterministic hashing.
 
-        The algorithm concatenates salt, study_id, entity, and identifier with '|'
-        separator, applies SHA256, and returns the first 16 characters of the
+        The algorithm concatenates salt, study_id, entity (patient_uid), and identifier
+        with '|' separator, applies SHA256, and returns the first 16 characters of the
         uppercase hex digest.
 
         Args:
             text: The accession number to anonymize
-            params: Dictionary containing optional 'salt', 'study_id', and 'entity_type'
+            params: Dictionary containing optional 'salt', 'study_id', 'patient_uid',
+                and 'entity_type'
 
         Returns:
             16-character uppercase hexadecimal hash
         """
         salt = params.get("salt")
         study_id = params.get("study_id")
-        entity = params.get("entity_type")
+        # Read patient_uid for SQL entity component; entity_type is reserved by Presidio
+        entity = params.get("patient_uid")
 
         # Apply COALESCE logic matching the SQL function
         salt_part = self._coalesce_param(salt, self.DEFAULT_SALT)
