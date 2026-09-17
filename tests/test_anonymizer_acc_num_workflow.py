@@ -157,6 +157,56 @@ class TestAnonymizerWorkerAccNumDirect:
         items = orjson.loads(res["anonymizer_results_json"])
         assert items[0]["text"] == expected_hash
 
+    def test_nan_patient_uid_uses_default(self):
+        """NaN patient_uid from nullable float column resolves to default [E] token."""
+        salt = "salt_x"
+        study_id = "study_y"
+        worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
+
+        note = "Accession: ACC55555."
+        start = note.index("ACC55555")
+        end = start + len("ACC55555")
+        recognizer_json = orjson.dumps([{"entity_type": "ACC_NUM", "start": start, "end": end, "score": 1.0}]).decode(
+            "utf-8"
+        )
+
+        res = worker.process_note(
+            note_text=note,
+            original_text_hash="h_nan",
+            recognizer_results_json=recognizer_json,
+            patient_uid=float("nan"),
+            jitter=10,
+        )
+
+        expected_hash = _compute_expected_hash(salt, study_id, None, "ACC55555")
+        items = orjson.loads(res["anonymizer_results_json"])
+        assert items[0]["text"] == expected_hash
+
+    def test_numeric_patient_uid_worker(self):
+        """Numeric patient_uid from integer column is converted to string for hashing."""
+        salt = "salt_x"
+        study_id = "study_y"
+        worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
+
+        note = "Accession: ACC55555."
+        start = note.index("ACC55555")
+        end = start + len("ACC55555")
+        recognizer_json = orjson.dumps([{"entity_type": "ACC_NUM", "start": start, "end": end, "score": 1.0}]).decode(
+            "utf-8"
+        )
+
+        res = worker.process_note(
+            note_text=note,
+            original_text_hash="h_int",
+            recognizer_results_json=recognizer_json,
+            patient_uid=123456,
+            jitter=10,
+        )
+
+        expected_hash = _compute_expected_hash(salt, study_id, "123456", "ACC55555")
+        items = orjson.loads(res["anonymizer_results_json"])
+        assert items[0]["text"] == expected_hash
+
     def test_chunked_path_per_patient_uniqueness(self):
         """Chunked processing branch (> MAX_ANON_CHUNK_SIZE) scopes hash by patient_uid."""
         worker = _get_worker_instance()

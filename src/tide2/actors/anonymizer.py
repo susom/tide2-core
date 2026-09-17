@@ -229,7 +229,7 @@ class AnonymizerWorker:
     def _create_operators_for_note(
         self,
         date_jitter: int | None = None,
-        patient_uid: str | None = None,
+        patient_uid: Any = None,
     ) -> dict[str, OperatorConfig]:
         """
         Create operators including per-note parameters.
@@ -254,13 +254,18 @@ class AnonymizerWorker:
             }
         )
 
+        # Convert numeric patient_uid to string, map NaN to None
+        clean_patient_uid: str | None = None
+        if patient_uid is not None and not (isinstance(patient_uid, float) and math.isnan(patient_uid)):
+            clean_patient_uid = str(patient_uid)
+
         # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
         operators["ACC_NUM"] = OperatorConfig(
             "accession_number_hash",
             {
                 "salt": self.acc_num_salt,
                 "study_id": self.acc_num_study_id,
-                "patient_uid": patient_uid,
+                "patient_uid": clean_patient_uid,
             },
         )
 
@@ -294,7 +299,7 @@ class AnonymizerWorker:
             logger.warning(f"Failed to parse recognizer results: {e}")
             return []
 
-    def _compute_jitter_for_patient(self, patient_uid: str | None) -> int:
+    def _compute_jitter_for_patient(self, patient_uid: Any) -> int:
         """
         Compute deterministic jitter for a patient when not provided.
 
@@ -302,18 +307,22 @@ class AnonymizerWorker:
         consistent jitter for the same patient across runs.
 
         Args:
-            patient_uid: Patient identifier. If None or empty,
+            patient_uid: Patient identifier. If None, NaN, or empty,
                 generates a random jitter.
 
         Returns:
             Integer jitter value in days.
         """
-        if not patient_uid:
+        if (
+            patient_uid is None
+            or (isinstance(patient_uid, float) and math.isnan(patient_uid))
+            or str(patient_uid).strip() == ""
+        ):
             # Fallback to random jitter if no patient ID
             return secrets.randbelow(357) - 178  # Random between -178 and +178
 
         return derive_date_jitter(
-            patient_id=patient_uid,
+            patient_id=str(patient_uid),
             salt=self.salt,
             key=self.key,
             max_jitter_days=180,

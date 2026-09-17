@@ -86,6 +86,24 @@ class TestAccessionNumberHashAnonymizer:
         actual_defaults = self.anonymizer.operate("ACC99", {})
         assert actual_defaults == expected_defaults
 
+    def test_nan_patient_uid_resolves_to_default(self):
+        """Float NaN resolves to default token [E] matching SQL COALESCE."""
+        expected = _expected_bq_hash("salt", "study", None, "ACC99")
+        actual = self.anonymizer.operate(
+            "ACC99",
+            {"salt": "salt", "study_id": "study", "patient_uid": float("nan")},
+        )
+        assert actual == expected
+
+    def test_numeric_patient_uid(self):
+        """Numeric patient_uid is converted to string for hashing."""
+        expected = _expected_bq_hash("salt", "study", "12345", "ACC99")
+        actual = self.anonymizer.operate(
+            "ACC99",
+            {"salt": "salt", "study_id": "study", "patient_uid": 12345},
+        )
+        assert actual == expected
+
     def test_coalesce_empty_string_not_replaced(self):
         """Empty string is not None and remains empty string per SQL COALESCE."""
         actual = self.anonymizer.operate(

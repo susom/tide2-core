@@ -14,7 +14,9 @@ This implements the identifier_hashing_algorithm compatible with the BigQuery fu
     );
 """
 
+import math
 from hashlib import sha256
+from typing import Any
 
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
@@ -54,7 +56,7 @@ class AccessionNumberHashAnonymizer(Operator):
             "ACCESSION_NUMBER",
         }
 
-    def _coalesce_param(self, value: str | None, default: str) -> str:
+    def _coalesce_param(self, value: Any, default: str) -> str:
         """
         Mimic SQL COALESCE(UPPER(TRIM(value)), default) behavior.
 
@@ -62,15 +64,17 @@ class AccessionNumberHashAnonymizer(Operator):
         So COALESCE(UPPER(TRIM('')), '[S]') returns '' (empty string), not '[S]'.
 
         Args:
-            value: The input value (may be None)
-            default: The default value to use if value is None
+            value: The input value (may be None, NaN, numeric, or string)
+            default: The default value to use if value is None or NaN
 
         Returns:
-            Uppercase trimmed value, or default if value is None
+            Uppercase trimmed value, or default if value is None or NaN
         """
         if value is None:
             return default
-        return value.strip().upper()
+        if isinstance(value, float) and math.isnan(value):
+            return default
+        return str(value).strip().upper()
 
     def operate(self, text: str, params: dict) -> str:
         """
