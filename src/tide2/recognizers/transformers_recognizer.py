@@ -41,16 +41,11 @@ class TransformersRecognizer(EntityRecognizer):
     Thread Safety: Pipeline initialization is locked, but inference runs in parallel.
     PyTorch models in eval mode are thread-safe for concurrent inference.
 
-    Batch Processing: For large-scale processing, use the Ray-based TransformerInferenceActor
-    which provides efficient batch inference with GPU support.
-
     Args:
         model_name: Name of the model configuration to load from
             ``bert_transformer_configuration.json``.
         model_path: Custom path to the model directory, overrides
             the default from configuration.
-        bucket_name: GCS bucket name for model loading.
-        project_id: GCP project ID for model loading.
 
     Example::
 
@@ -82,8 +77,6 @@ class TransformersRecognizer(EntityRecognizer):
         self,
         model_name: str,
         model_path: str | None = None,
-        bucket_name: str | None = None,
-        project_id: str | None = None,
         allow_huggingface_download: bool = True,
     ):
         """Initialize the recognizer with a named transformer model.
@@ -91,10 +84,8 @@ class TransformersRecognizer(EntityRecognizer):
         Args:
             model_name: Key in ``bert_transformer_configuration.json``.
             model_path: Local path override for the model directory.
-            bucket_name: GCS bucket for model download (if model_path is None).
-            project_id: GCP project for GCS access.
             allow_huggingface_download: If True, fall back to HuggingFace Hub
-                when local cache and GCS both miss.
+                when the model is not in the local cache.
         """
         # Load configuration from the resource file
         config = load_model_config(model_name)
@@ -113,8 +104,6 @@ class TransformersRecognizer(EntityRecognizer):
         self._core = TransformerCore(
             model_name=model_name,
             model_path=model_path,
-            bucket_name=bucket_name,
-            project_id=project_id,
             device="auto",  # Use accelerate's device_map for automatic placement
             load_immediately=False,  # Lazy load on first use
             allow_huggingface_download=allow_huggingface_download,

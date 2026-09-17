@@ -12,8 +12,8 @@ import spacy
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer import RecognizerRegistry
 
-from tide2.actors.recognizer import _BlankSpacyNlpEngine
 from tide2.recognizers import PhoneRecognizer
+from tide2.recognizers.nlp_engine import _BlankSpacyNlpEngine
 
 
 class TestBlankSpacyNlpEngine:

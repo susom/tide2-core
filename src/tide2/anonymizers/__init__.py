@@ -14,8 +14,6 @@ Available anonymizers:
 - HipsNamesAnonymizer: HIPS-based name anonymization
 
 All anonymizers use class-level caching for optimal performance.
-For Ray-based batch processing, use the runner module:
-    from tide2.runner import AnonymizerActor, run_anonymization_simple
 """
 
 from .accession_number_hash import AccessionNumberHashAnonymizer

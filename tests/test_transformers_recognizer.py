@@ -60,7 +60,7 @@ class TestTransformersRecognizer:
             finally:
                 Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_initialization(self, mock_get_path, mock_resolve_model):
         """Test TransformersRecognizer initialization."""
@@ -82,7 +82,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_live_and_cached_recognizer_name_agree(self, mock_get_path, mock_resolve_model):
         """Both producers must emit an identical recognizer_name for the same model_name.
@@ -94,7 +94,7 @@ class TestTransformersRecognizer:
         """
         import json
 
-        from tide2.runner.transformer import reassemble_chunks_for_document
+        from tide2.transformers.reassembly import reassemble_chunks_for_document
 
         mock_resolve_model.return_value = "/fake/model/path"
         config_path = create_temp_config(self.mock_config)
@@ -166,7 +166,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_bare_repo_id_model_path_skips_check(self, mock_get_path, mock_resolve_model):
         """A bare HF repo-id model_path is not absolute, so it skips the existence check."""
@@ -183,7 +183,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     @patch("tide2.transformers.core.pipeline")
     @patch("tide2.transformers.core.AutoModelForTokenClassification")
@@ -238,7 +238,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_get_supported_entities(self, mock_get_path, mock_resolve_model):
         """Test getting supported entities."""
@@ -254,7 +254,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_analyze_without_pipeline_loaded(self, mock_get_path, mock_resolve_model):
         """Test analyze method when pipeline is not loaded."""
@@ -280,7 +280,7 @@ class TestTransformersRecognizer:
     @patch("tide2.transformers.core.AutoModelForTokenClassification")
     @patch("tide2.transformers.core.pipeline")
     @patch("tide2.transformers.config.get_resource_path")
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     def test_analyze_with_predictions(
         self, mock_resolve_model, mock_get_path, mock_pipeline, mock_model, mock_tokenizer
     ):
@@ -330,7 +330,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_thread_safety(self, mock_get_path, mock_resolve_model):
         """Test that TransformerCore uses thread-safe locking."""
@@ -347,7 +347,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_configuration_parameters(self, mock_get_path, mock_resolve_model):
         """Test that configuration parameters are loaded correctly."""
@@ -369,7 +369,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_analyze_empty_text(self, mock_get_path, mock_resolve_model):
         """Test analysis of empty text."""
@@ -391,7 +391,7 @@ class TestTransformersRecognizer:
         finally:
             Path(config_path).unlink()
 
-    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.core._resolve_model_path")
     @patch("tide2.transformers.config.get_resource_path")
     def test_unsupported_entity_filtering(self, mock_get_path, mock_resolve_model):
         """Test that unsupported entities are filtered out."""

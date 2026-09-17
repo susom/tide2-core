@@ -2,7 +2,8 @@
 Secure String Selector - Cryptographically secure deterministic string selection
 
 Optimized version using SHA256 for fast, deterministic string selection.
-Uses LRU caching for performance with worker-local cache safety for Ray.
+Uses LRU caching for performance; the cache is process-local, which is
+safe when each worker process holds its own cache.
 """
 
 import hashlib

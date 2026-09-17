@@ -19,6 +19,8 @@ Updated: January 2026
 from __future__ import annotations
 
 import hashlib
+from typing import Literal
+from typing import overload
 
 
 def compute_text_hash(text: str) -> str:
@@ -41,6 +43,14 @@ def compute_text_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+@overload
+def split_text_to_word_chunks(
+    input_length: int, chunk_length: int, overlap_length: int, return_metadata: Literal[False] = False
+) -> list[list[int]]: ...
+@overload
+def split_text_to_word_chunks(
+    input_length: int, chunk_length: int, overlap_length: int, return_metadata: Literal[True]
+) -> list[dict[str, int]]: ...
 def split_text_to_word_chunks(
     input_length: int, chunk_length: int, overlap_length: int, return_metadata: bool = False
 ) -> list[list[int]] | list[dict[str, int]]:
@@ -111,23 +121,20 @@ def split_text_to_word_chunks(
         overlap_length = chunk_length // 2
         overlap_length_chars = overlap_length * 4
 
-    chunks = []
-
     # Calculate step size in characters (chunk_length - overlap_length) in token space → chars
     step_size_chars = (chunk_length - overlap_length) * 4
 
-    for chunk_id, i in enumerate(range(0, input_length - overlap_length_chars, step_size_chars)):
-        start = i
-        end = min(i + chunk_length_chars, input_length)
+    chunk_bounds = [
+        (i, min(i + chunk_length_chars, input_length))
+        for i in range(0, input_length - overlap_length_chars, step_size_chars)
+    ]
 
-        if return_metadata:
-            chunks.append(
-                {"start": start, "end": end, "chunk_id": chunk_id, "char_offset_start": start, "char_offset_end": end}
-            )
-        else:
-            chunks.append([start, end])
-
-    return chunks
+    if return_metadata:
+        return [
+            {"start": start, "end": end, "chunk_id": chunk_id, "char_offset_start": start, "char_offset_end": end}
+            for chunk_id, (start, end) in enumerate(chunk_bounds)
+        ]
+    return [[start, end] for start, end in chunk_bounds]
 
 
 def sort_tokens_by_position(tokens: list[dict]) -> list[dict]:
@@ -197,6 +204,106 @@ def _is_word_start_token(token: dict) -> bool:
     return False  # Conservative default for continuation tokens
 
 
+def _group_tokens_by_word(
+    tokens: list[dict],
+    original_text: str,
+    max_gap: int,
+) -> list[list[dict]]:
+    """
+    Group tokens into near-contiguous clusters that fall within the same word.
+
+    A new group starts whenever the gap between consecutive tokens exceeds
+    ``max_gap``, the gap text crosses a word boundary, or the next token is
+    itself a word-start token.
+    """
+    word_boundary_chars = {" ", "\n", "\t", "\r"}
+
+    groups = []
+    current_group = [tokens[0]]
+
+    for i in range(1, len(tokens)):
+        prev_token = tokens[i - 1]
+        curr_token = tokens[i]
+        gap = curr_token["start"] - prev_token["end"]
+
+        should_merge = gap <= max_gap
+
+        if should_merge and gap > 0:
+            gap_text = original_text[prev_token["end"] : curr_token["start"]]
+            if any(c in word_boundary_chars for c in gap_text):
+                should_merge = False
+
+        if should_merge and _is_word_start_token(curr_token):
+            should_merge = False
+
+        if should_merge:
+            current_group.append(curr_token)
+        else:
+            groups.append(current_group)
+            current_group = [curr_token]
+
+    groups.append(current_group)
+    return groups
+
+
+def _pick_best_entity_type(group: list[dict], high_confidence_threshold: float) -> tuple[str, dict]:
+    """Determine the winning entity type for a token group via score voting."""
+    entity_types: dict[str, dict] = {}
+    has_high_confidence = False
+    high_confidence_type = None
+
+    for token in group:
+        entity_type = _get_entity_type(token["entity"])
+        if entity_type not in entity_types:
+            entity_types[entity_type] = {"score": 0.0, "count": 0, "max_score": 0.0}
+        entity_types[entity_type]["score"] += token["score"]
+        entity_types[entity_type]["count"] += 1
+        entity_types[entity_type]["max_score"] = max(entity_types[entity_type]["max_score"], token["score"])
+
+        if token["score"] >= high_confidence_threshold:
+            has_high_confidence = True
+            high_confidence_type = entity_type
+
+    if has_high_confidence and high_confidence_type:
+        best_type = high_confidence_type
+    else:
+        best_type = max(
+            entity_types.keys(),
+            key=lambda t: entity_types[t]["score"] / entity_types[t]["count"],
+        )
+
+    return best_type, entity_types
+
+
+def _normalize_group_labels(group: list[dict], high_confidence_threshold: float) -> list[dict]:
+    """Normalize a single token group to its winning entity type, if needed."""
+    if len(group) == 1:
+        return [group[0]]
+
+    best_type, entity_types = _pick_best_entity_type(group, high_confidence_threshold)
+    if len(entity_types) == 1:
+        return list(group)
+
+    normalized_group = []
+    for token in group:
+        current_type = _get_entity_type(token["entity"])
+        if current_type == best_type:
+            normalized_group.append(token)
+            continue
+
+        # Create a copy with normalized entity type, preserving B-/I- prefix
+        new_token = token.copy()
+        if token["entity"].startswith("B-"):
+            new_token["entity"] = f"B-{best_type}"
+        elif token["entity"].startswith("I-"):
+            new_token["entity"] = f"I-{best_type}"
+        else:
+            new_token["entity"] = best_type
+        normalized_group.append(new_token)
+
+    return normalized_group
+
+
 def _normalize_token_labels(
     tokens: list[dict],
     original_text: str,
@@ -228,100 +335,11 @@ def _normalize_token_labels(
     if not tokens:
         return []
 
-    # Word boundary characters - if gap contains these, don't merge
-    word_boundary_chars = {" ", "\n", "\t", "\r"}
+    groups = _group_tokens_by_word(tokens, original_text, max_gap)
 
-    # Group tokens by near-contiguity within word boundaries
-    groups = []
-    current_group = [tokens[0]]
-
-    for i in range(1, len(tokens)):
-        prev_token = tokens[i - 1]
-        curr_token = tokens[i]
-        gap = curr_token["start"] - prev_token["end"]
-
-        # Check if gap is small enough and doesn't cross word boundary
-        should_merge = gap <= max_gap
-
-        # Check for word boundary in gap text
-        if should_merge and gap > 0:
-            gap_text = original_text[prev_token["end"] : curr_token["start"]]
-            if any(c in word_boundary_chars for c in gap_text):
-                should_merge = False
-
-        # Check for word-start token (indicates new word even if contiguous)
-        if should_merge and _is_word_start_token(curr_token):
-            should_merge = False
-
-        if should_merge:
-            # Near-contiguous within same word, add to current group
-            current_group.append(curr_token)
-        else:
-            # Gap too large, crosses word boundary, or new word starts
-            groups.append(current_group)
-            current_group = [curr_token]
-
-    # Don't forget the last group
-    groups.append(current_group)
-
-    # Normalize labels within each group
     normalized_tokens = []
     for group in groups:
-        if len(group) == 1:
-            # Single token, no normalization needed
-            normalized_tokens.append(group[0])
-            continue
-
-        # Check if all tokens have the same entity type
-        entity_types = {}
-        has_high_confidence = False
-        high_confidence_type = None
-
-        for token in group:
-            entity_type = _get_entity_type(token["entity"])
-            if entity_type not in entity_types:
-                entity_types[entity_type] = {"score": 0.0, "count": 0, "max_score": 0.0}
-            entity_types[entity_type]["score"] += token["score"]
-            entity_types[entity_type]["count"] += 1
-            entity_types[entity_type]["max_score"] = max(entity_types[entity_type]["max_score"], token["score"])
-
-            # Track if any token has high confidence
-            if token["score"] >= high_confidence_threshold:
-                has_high_confidence = True
-                high_confidence_type = entity_type
-
-        if len(entity_types) == 1:
-            # All same type, no normalization needed
-            normalized_tokens.extend(group)
-            continue
-
-        # Multiple entity types - determine winning type
-        if has_high_confidence and high_confidence_type:
-            # If there's a high-confidence token, use its type
-            best_type = high_confidence_type
-        else:
-            # Otherwise, use highest average score to pick winner
-            best_type = max(
-                entity_types.keys(),
-                key=lambda t: entity_types[t]["score"] / entity_types[t]["count"],
-            )
-
-        # Normalize all tokens in the group to the winning type
-        for j, token in enumerate(group):
-            current_type = _get_entity_type(token["entity"])
-            if current_type != best_type:
-                # Create a copy with normalized entity type
-                new_token = token.copy()
-                # Preserve B-/I- prefix pattern
-                if token["entity"].startswith("B-"):
-                    new_token["entity"] = f"B-{best_type}"
-                elif token["entity"].startswith("I-"):
-                    new_token["entity"] = f"I-{best_type}"
-                else:
-                    new_token["entity"] = best_type
-                normalized_tokens.append(new_token)
-            else:
-                normalized_tokens.append(token)
+        normalized_tokens.extend(_normalize_group_labels(group, high_confidence_threshold))
 
     return normalized_tokens
 

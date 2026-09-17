@@ -106,7 +106,7 @@ class HipsNamesAnonymizer(Operator):
         # Check if the cleaned text is a stopword
         return cleaned_text in self.stopwords
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Anonymize a person name using deterministic replacement from a unified name list.
 
         Args:
@@ -125,6 +125,7 @@ class HipsNamesAnonymizer(Operator):
         if self.is_spurious_value(text):
             return text
 
+        params = params or {}
         salt = params["salt"]
         key = params["key"]
         entity_type = params.get("entity_type")
@@ -169,8 +170,9 @@ class HipsNamesAnonymizer(Operator):
         # All name tokens use the unified list
         return secure_string_selector(salt, key, self.unified_names_list, token.text.lower())
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters."""
+        params = params or {}
         entity_type = params.get("entity_type", "PERSON")
         if entity_type not in self.supported_entity_types:
             raise ValueError(f"Entity type '{entity_type}' is not supported for HipsNamesAnonymizer.")

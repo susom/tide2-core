@@ -70,7 +70,7 @@ class AccessionNumberHashAnonymizer(Operator):
             return default
         return value.strip().upper()
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """
         Anonymize the accession number using deterministic hashing.
 
@@ -85,6 +85,7 @@ class AccessionNumberHashAnonymizer(Operator):
         Returns:
             16-character uppercase hexadecimal hash
         """
+        params = params or {}
         salt = params.get("salt")
         study_id = params.get("study_id")
         entity = params.get("entity_type")
@@ -103,7 +104,7 @@ class AccessionNumberHashAnonymizer(Operator):
 
         return hash_digest[:16]
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """
         Validate operator parameters.
 
@@ -113,6 +114,7 @@ class AccessionNumberHashAnonymizer(Operator):
         Raises:
             ValueError: If entity_type is provided but not supported
         """
+        params = params or {}
         entity_type = params.get("entity_type", "DEFAULT")
         if entity_type not in self.entities_supported:
             raise ValueError(

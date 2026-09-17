@@ -6,7 +6,9 @@ substitutes selected via HMAC-based secure string selection from census data.
 
 import re
 import string
+from pathlib import Path
 from typing import ClassVar
+from typing import cast
 
 import pandas as pd
 from presidio_anonymizer.operators import Operator
@@ -45,6 +47,11 @@ class HipsLocationAnonymizer(Operator):
     _hospitals: ClassVar[list | None] = None
     _hospitals_by_length: ClassVar[dict | None] = None
     _address_parser: ClassVar[AddressParser | None] = None
+
+    # Hospital name length buckets, in characters
+    _TINY_MAX_LEN = 5
+    _SHORT_MAX_LEN = 15
+    _MEDIUM_MAX_LEN = 30
 
     @classmethod
     def _load_location_data(cls):
@@ -88,7 +95,7 @@ class HipsLocationAnonymizer(Operator):
 
         if cls._hospitals is None:
             # load the list for hospitals
-            with open(get_resource_path(HOSPITALS_FILE), encoding="utf-8") as f:
+            with Path(get_resource_path(HOSPITALS_FILE)).open(encoding="utf-8") as f:
                 cls._hospitals = [line.strip().lower() for line in f.readlines() if line.strip()]
 
         if cls._hospitals_by_length is None:
@@ -102,11 +109,11 @@ class HipsLocationAnonymizer(Operator):
             }
             for h in cls._hospitals:
                 length = len(h)
-                if length <= 5:
+                if length <= cls._TINY_MAX_LEN:
                     cls._hospitals_by_length["tiny"].append(h)
-                elif length <= 15:
+                elif length <= cls._SHORT_MAX_LEN:
                     cls._hospitals_by_length["short"].append(h)
-                elif length <= 30:
+                elif length <= cls._MEDIUM_MAX_LEN:
                     cls._hospitals_by_length["medium"].append(h)
                 else:
                     cls._hospitals_by_length["long"].append(h)
@@ -121,22 +128,21 @@ class HipsLocationAnonymizer(Operator):
         # Load data once at class level
         self._load_location_data()
 
-        # Use class-level cached AddressParser
-        self.address_parser = self._address_parser
-
-        # Use class-level cached data
-        self.street_names = self._street_names
-        self.zipcodes = self._zipcodes
-        self.cities = self._cities
-        self.states = self._states
-        self.state2city = self._state2city
-        self.states_full = self._states_full
-        self.states_abbr = self._states_abbr
-        self.countries = self._countries
-        self.countries_abbr = self._countries_abbr
-        self.street_numbers = self._street_numbers
-        self.hospitals = self._hospitals
-        self.hospitals_by_length = self._hospitals_by_length
+        # Use class-level cached data. _load_location_data() guarantees these are
+        # populated, so narrow away the Optional typing of the ClassVar caches.
+        self.address_parser = cast(AddressParser, self._address_parser)
+        self.street_names = cast("list[str]", self._street_names)
+        self.zipcodes = cast("list[str]", self._zipcodes)
+        self.cities = cast("list[str]", self._cities)
+        self.states = cast("list[str]", self._states)
+        self.state2city = cast(dict, self._state2city)
+        self.states_full = cast("list[str]", self._states_full)
+        self.states_abbr = cast("list[str]", self._states_abbr)
+        self.countries = cast("list[str]", self._countries)
+        self.countries_abbr = cast("list[str]", self._countries_abbr)
+        self.street_numbers = cast("list[str]", self._street_numbers)
+        self.hospitals = cast("list[str]", self._hospitals)
+        self.hospitals_by_length = cast("dict[str, list[str]]", self._hospitals_by_length)
 
         self.supported_entity_types = ["LOCATION", "HOSPITAL", "VENDOR"]
 
@@ -153,11 +159,11 @@ class HipsLocationAnonymizer(Operator):
         Returns:
             List of hospitals with similar length, or full list as fallback
         """
-        if text_length <= 5:
+        if text_length <= self._TINY_MAX_LEN:
             bucket = self.hospitals_by_length["tiny"]
-        elif text_length <= 15:
+        elif text_length <= self._SHORT_MAX_LEN:
             bucket = self.hospitals_by_length["short"]
-        elif text_length <= 30:
+        elif text_length <= self._MEDIUM_MAX_LEN:
             bucket = self.hospitals_by_length["medium"]
         else:
             bucket = self.hospitals_by_length["long"]
@@ -202,10 +208,7 @@ class HipsLocationAnonymizer(Operator):
             return True
 
         # Check if it's a single letter with punctuation (e.g., "A.", "B,")
-        if len(cleaned_text) == 1 and cleaned_text.isalpha():
-            return True
-
-        return False
+        return len(cleaned_text) == 1 and cleaned_text.isalpha()
 
     def _component_cleaning(self, components: dict[str, str]) -> dict[str, str]:
         """Clean address components by stripping whitespace, lowercasing, and removing common punctuation."""
@@ -217,7 +220,7 @@ class HipsLocationAnonymizer(Operator):
                 new_dict[k] = v
         return new_dict
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Anonymize a location string using deterministic replacement.
 
         Parses the address into components (street, city, zip, state) and
@@ -240,6 +243,7 @@ class HipsLocationAnonymizer(Operator):
         if self._is_spurious_value(text):
             return text
 
+        params = params or {}
         salt = params["salt"]
         key = params["key"]
 
@@ -296,9 +300,9 @@ class HipsLocationAnonymizer(Operator):
 
         return new_text
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters."""
-
+        params = params or {}
         entity_type = params.get("entity_type", "DEFAULT")
         if entity_type not in self.supported_entity_types:
             raise ValueError(f"Entity type '{entity_type}' is not supported for HipsLocationAnonimizer.")

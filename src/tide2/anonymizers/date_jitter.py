@@ -353,7 +353,7 @@ class DateJitterAnonymizer(Operator):
         new_date = date_of_service + timedelta(days=jitter)
         return {"day": new_date.day, "month": new_date.month, "year": new_date.year}
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Anonymize a date string by shifting it by a deterministic jitter.
 
         Args:
@@ -374,6 +374,7 @@ class DateJitterAnonymizer(Operator):
             years, gestational ages, single characters).
         """
 
+        params = params or {}
         entity_type = params.get("entity_type", "DEFAULT")
 
         try:
@@ -528,8 +529,9 @@ class DateJitterAnonymizer(Operator):
                 return candidate
         return "/"
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters."""
+        params = params or {}
         try:
             # Always convert to Python int (handles str, numpy.int64, etc.)
             jitter = int(params["jitter"])

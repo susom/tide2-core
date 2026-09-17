@@ -18,7 +18,8 @@ def _get_cached_fpe(salt: bytes, key: bytes) -> FormatPreservingEncryption:
     Get a cached FormatPreservingEncryption instance.
 
     Cache is bounded to maxsize=16 to match typical core count.
-    This is process-local, which is appropriate for Ray worker-local usage.
+    This is process-local, which is appropriate when each worker process
+    holds its own cache.
 
     Args:
         salt: 32-byte salt
@@ -35,29 +36,27 @@ class HipsAlphaNumericAnonymizer(Operator):
     Anonymizer that replaces alphanumeric identifiers with format-preserving encryption.
 
     Uses cached FPE instances for performance. The cache is process-local,
-    which is appropriate for Ray worker-local usage patterns.
+    which is appropriate when each worker process holds its own cache.
     """
 
     def __init__(self):
         """Initialize the HIPS alphanumeric anonymizer."""
         super().__init__()
 
-        self.entities_supported = set(
-            [
-                "DEFAULT",
-                "PHONE",
-                "PHONE_NUMBER",
-                "US_SSN",
-                "MEDICAL_LICENSE",
-                "MRN",
-                "HAR",
-                "ACC_NUM",
-                "ID",
-                "CSN_ID",
-            ]
-        )
+        self.entities_supported = {
+            "DEFAULT",
+            "PHONE",
+            "PHONE_NUMBER",
+            "US_SSN",
+            "MEDICAL_LICENSE",
+            "MRN",
+            "HAR",
+            "ACC_NUM",
+            "ID",
+            "CSN_ID",
+        }
 
-    def operate(self, text: str, params: dict) -> str:
+    def operate(self, text: str, params: dict | None = None) -> str:
         """Anonymize the input text using format-preserving encryption.
 
         Args:
@@ -70,6 +69,7 @@ class HipsAlphaNumericAnonymizer(Operator):
             The encrypted text preserving the original character format.
         """
 
+        params = params or {}
         salt = params["salt"]
         key = params["key"]
 
@@ -80,8 +80,9 @@ class HipsAlphaNumericAnonymizer(Operator):
 
         return new_text
 
-    def validate(self, params: dict) -> None:
+    def validate(self, params: dict | None = None) -> None:
         """Validate operator parameters."""
+        params = params or {}
 
         entity_type = params.get("entity_type", "DEFAULT")
         if entity_type not in self.entities_supported:
