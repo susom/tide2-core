@@ -6,8 +6,11 @@ cached transformer results + known patient values) -> anonymization (CPU:
 HIPS) — over a directory of input Parquet files, writing anonymized output
 as Parquet.
 
-Input schema (one row per note): text_hash, note_text, patient_uid
-    (optional: patient_identifiers - JSON object of known PHI values,
+Input schema (one row per note): text_hash, note_text
+    (optional: patient_uid - real per-patient identifier, e.g. "<MRN> | <DOB>";
+     falls back to patient_id, then text_hash, if the patient_uid column is
+     absent entirely - matches main's local_runner.py fallback;
+     patient_identifiers - JSON object of known PHI values,
      jitter - per-note date jitter override,
      recognizer_results_json - pre-computed NER spans, used only with
      --no-run-transformer to skip GPU inference)
@@ -374,8 +377,8 @@ def _parse_patient_identifiers(value: str | bytes | dict | None) -> dict:
 
 
 def _normalize_patient_uid(value: str | float | int | None) -> str | None:
-    """Collapse every null-ish form patient_uid can arrive in (None, and NaN/pd.NA when
-    the source column happens to be numeric or nullable-typed rather than the documented
+    """Collapse every null-ish form patient_uid/patient_id can arrive in (None, and NaN/pd.NA
+    when the source column happens to be numeric or nullable-typed rather than the documented
     string) to a single None sentinel, so row_id hashing and the output schema's string
     column always see either a real string or None - never a stray float NaN.
     """
@@ -410,8 +413,18 @@ def run_cpu_stage(
     for note in notes:
         text_hash = note["text_hash"]
         note_text = note.get("note_text") or ""
-        # None (not "") when absent, so a missing patient_uid hashes as the literal string "None" below
-        patient_uid = _normalize_patient_uid(note.get("patient_uid"))
+        # Prefer a genuine patient_uid column when the input schema has one (real "<MRN> |
+        # DOB>" data); only fall back to patient_id, then text_hash, when that *column* is
+        # entirely absent - matches main's local_runner.py column-level fallback exactly
+        # (`if "patient_uid" not in df_rec.columns: df_rec["patient_uid"] = df_rec.get(
+        # "patient_id", df_rec["text_hash"])`), rather than substituting text_hash for
+        # individual null values within an already-present column.
+        if "patient_uid" in note:
+            patient_uid = _normalize_patient_uid(note.get("patient_uid"))
+        elif "patient_id" in note:
+            patient_uid = _normalize_patient_uid(note.get("patient_id"))
+        else:
+            patient_uid = text_hash
         patient_uid_str = patient_uid or ""
         patient_identifiers = _parse_patient_identifiers(note.get("patient_identifiers"))
 
@@ -442,7 +455,8 @@ def run_cpu_stage(
             text=note_text, analyzer_results=anonymizer_results, operators=operators
         )
 
-        # Stable row identifier for downstream joins/checkpointing.
+        # Stable row identifier for downstream joins/checkpointing. "None" (not "") when
+        # patient_uid is null, matching main's fillna("None") before hashing.
         row_id_key = f"{text_hash}:{patient_uid if patient_uid is not None else 'None'}"
         row_id = hashlib.sha256(row_id_key.encode()).hexdigest()
         output_rows.append(

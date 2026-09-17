@@ -384,8 +384,17 @@ def resolve_recognizer_results(
     if not unique_spans:
         return []
 
-    # Sort by start ascending, then by length descending
-    unique_spans.sort(key=lambda x: (x[0]["start"], -(x[0]["end"] - x[0]["start"])))
+    # Sort by start ascending, then length descending, so the overlap-resolution loops
+    # below (which keep the *first* span among ties) see a fully deterministic ordering.
+    # Without this, spans tied on (start, length) - e.g. a regex recognizer and the cached
+    # transformer result both flagging the same date span as DATE_TIME vs DATE - would be
+    # resolved by whatever incidental order analyzer.analyze() happened to return them in
+    # (recognizer registration order), which isn't a documented or stable contract.
+    # Explicit, reproducible tie-break: higher score wins, then alphabetically first
+    # entity_type (arbitrary but deterministic, so the same input always resolves the same way).
+    unique_spans.sort(
+        key=lambda x: (x[0]["start"], -(x[0]["end"] - x[0]["start"]), -x[0]["score"], x[0]["entity_type"])
+    )
 
     # Apply resolution strategy
     if strategy == "merge_contained":
