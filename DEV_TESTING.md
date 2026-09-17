@@ -702,6 +702,221 @@ Takeaways:
   for that methodology); it's purely a performance/resource comparison at
   larger scale and on genuinely parallel GPU hardware.
 
+### Full-scale run: all 99 files in `/data/scratch/benchmark/` (this branch only)
+
+`/data/scratch/benchmark/` (separate from `/data/scratch/jmesterh-dev/input`)
+holds 99 parquet files, ~2.1GB total, ~3.9M rows — a much more realistic
+corpus size than the 3-file/46K-row and 6-file/236K-row benchmarks above.
+Ran this branch's defaults directly against it (`--input
+/data/scratch/benchmark` — no need to stage/symlink a subset, the directory
+contains only the 99 `part-*.parquet` files):
+
+| Metric | This branch, 99 files (3,898,088 rows) |
+|---|---|
+| Wall-clock | **5207s (~86.8 min)** |
+| CPU avg / peak | 45.7% / 50.2% |
+| Memory avg / peak | 18.3GB / 20.1GB |
+| GPU0 util avg / peak | 93.7% / 100% |
+| GPU0 mem avg / peak | 5.67GB / 5.83GB |
+| GPU1 util avg / peak | 93.3% / 100% |
+| GPU1 mem avg / peak | 3.51GB / 3.61GB |
+| Output rows | 3,898,088 (verified, 6 worker files) |
+| Per-GPU row split | GPU0 (workers 0/2/4): 1,970,158 — GPU1 (workers 1/3/5): 1,927,930 (2.1% diff) |
+
+**Main (Ray) was not re-run at this scale** — extrapolating from the 6-file
+ratio (4.9x) would put main at **~7.6 hours** for the same 99 files, judged
+not worth the wall-clock cost for this session (see the "Reproducing this
+benchmark" runbook below if this needs re-doing later, e.g. once the actual
+5.8-8x-ish gap is worth re-confirming at full scale). GPU utilization is
+noticeably *higher and steadier* than the 6-file run (93.7%/93.3% avg vs
+82.9%/81.9%) — makes sense, a longer run amortizes the fixed model-load/
+startup cost that's proportionally bigger in a 341s run than an 86-minute
+one.
+
+### Reproducing this benchmark
+
+Everything needed to redo either the 6-file or 99-file version of this
+comparison, end to end, without re-deriving any of it:
+
+**1. Deploy the dual-GPU pod (if not already running):**
+```bash
+kubectl apply -f dev-pod-dual.yaml
+kubectl get pods -n starr -l app.kubernetes.io/name=tide2-gpu-dev-dual -w   # Ctrl-C once Running
+POD=$(kubectl get pods -n starr -l app.kubernetes.io/name=tide2-gpu-dev-dual -o jsonpath='{.items[0].metadata.name}')
+kubectl exec -n starr "$POD" -- python -c "import torch; print(torch.cuda.device_count())"  # expect 2
+```
+
+**2. Sync this branch's current code to the pod** (same hot-patch pattern as
+`dev-pod.yaml`, see *Fast iteration* above):
+```bash
+kubectl cp src/tide2 "starr/$POD:/opt/tide2/src/tide2"
+```
+
+**3. Stage input.** For the 6-file version, symlink instead of copy (saves
+~130MB and time):
+```bash
+kubectl exec -n starr "$POD" -- mkdir -p /data/scratch/jmesterh-dev/benchmark_6file
+kubectl exec -n starr "$POD" -- bash -c '
+for i in 1 2 3 4 5 6; do
+  n=$(printf "%012d" $i)
+  ln -sf /data/scratch/benchmark/part-${n}.parquet /data/scratch/jmesterh-dev/benchmark_6file/part-${n}.parquet
+done'
+```
+For the 99-file version, just point `--input` straight at
+`/data/scratch/benchmark` — it contains only the 99 `part-*.parquet` files,
+no staging needed.
+
+**4. The monitor script** (samples system CPU/mem + per-GPU util/mem every
+N seconds until killed — save as `/tmp/monitor.py` locally, `kubectl cp` to
+the pod):
+```python
+import csv
+import subprocess
+import sys
+import time
+
+
+def read_proc_stat():
+    with open("/proc/stat") as f:
+        parts = f.readline().split()[1:]
+    return [int(x) for x in parts]
+
+
+def cpu_pct(prev, cur):
+    prev_idle = prev[3] + prev[4]
+    cur_idle = cur[3] + cur[4]
+    prev_total = sum(prev)
+    cur_total = sum(cur)
+    totald = cur_total - prev_total
+    idled = cur_idle - prev_idle
+    if totald <= 0:
+        return 0.0
+    return 100.0 * (totald - idled) / totald
+
+
+def mem_used_mb():
+    info = {}
+    with open("/proc/meminfo") as f:
+        for line in f:
+            k, v = line.split(":")
+            info[k.strip()] = int(v.strip().split()[0])
+    total = info["MemTotal"] / 1024
+    avail = info.get("MemAvailable", info["MemFree"]) / 1024
+    return total - avail
+
+
+def gpu_stats():
+    out = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    rows = []
+    for line in out.splitlines():
+        idx, util, mem = (x.strip() for x in line.split(","))
+        rows.append((int(idx), float(util), float(mem)))
+    return rows
+
+
+out_path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/monitor.csv"
+interval = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0
+
+prev = read_proc_stat()
+with open(out_path, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(["ts", "cpu_pct", "mem_used_mb", "gpu0_util", "gpu0_mem_mb", "gpu1_util", "gpu1_mem_mb"])
+    f.flush()
+    while True:
+        time.sleep(interval)
+        cur = read_proc_stat()
+        cpu = cpu_pct(prev, cur)
+        prev = cur
+        mem = mem_used_mb()
+        gpus = gpu_stats()
+        g0 = gpus[0] if len(gpus) > 0 else (0, 0.0, 0.0)
+        g1 = gpus[1] if len(gpus) > 1 else (0, 0.0, 0.0)
+        writer.writerow([time.time(), f"{cpu:.1f}", f"{mem:.0f}", g0[1], g0[2], g1[1], g1[2]])
+        f.flush()
+```
+
+**5. Run this branch's benchmark with monitoring** (swap `benchmark_6file`
+for `benchmark` and the interval/output names as needed for the 99-file
+version):
+```bash
+kubectl cp /tmp/monitor.py "starr/$POD:/tmp/monitor.py"
+kubectl exec -n starr "$POD" -- bash -c "nohup python3 /tmp/monitor.py /tmp/branch_monitor.csv 3 > /tmp/monitor.log 2>&1 & echo \$!" > /tmp/monitor_pid.txt
+
+SALT_HEX=$(cat temp/salt.bin)
+KEY_HEX=$(cat temp/key.bin)
+kubectl exec -n starr "$POD" -- python -m tide2.runner.pipeline \
+  --input /data/scratch/jmesterh-dev/benchmark_6file \
+  --output /data/scratch/jmesterh-dev/output/branch_benchmark \
+  --model StanfordAIMI/stanford-deidentifier-v2 \
+  --salt-hex "$SALT_HEX" --key-hex "$KEY_HEX"   # defaults: --num-workers-per-gpu 3 -> 6 total workers
+
+kubectl exec -n starr "$POD" -- kill -9 $(cat /tmp/monitor_pid.txt)
+kubectl cp "starr/$POD:/tmp/branch_monitor.csv" /tmp/branch_monitor.csv
+```
+
+**6. Compute avg/peak stats from the CSV:**
+```bash
+python3 -c "
+import csv
+rows = list(csv.DictReader(open('/tmp/branch_monitor.csv')))
+def stats(key):
+    vals = [float(r[key]) for r in rows]
+    return sum(vals)/len(vals), max(vals)
+for key in ['cpu_pct','mem_used_mb','gpu0_util','gpu0_mem_mb','gpu1_util','gpu1_mem_mb']:
+    avg, peak = stats(key)
+    print(f'{key:15s} avg={avg:8.1f}  peak={peak:8.1f}')
+"
+```
+
+**7. Switch the pod to main branch** (same procedure as the single-GPU *Ray
+vs no-Ray comparison* section above, just against this pod): `kubectl cp`
+main's `pyproject.toml`/`uv.lock`, `uv sync --locked --no-dev` inside the
+pod, then wholesale-swap `src/tide2`:
+```bash
+git archive main | tar -x -C /tmp/main_full
+kubectl cp /tmp/main_full/pyproject.toml "starr/$POD:/opt/tide2/pyproject.toml"
+kubectl cp /tmp/main_full/uv.lock "starr/$POD:/opt/tide2/uv.lock"
+kubectl exec -n starr "$POD" -- bash -c "cd /opt/tide2 && uv sync --locked --no-dev"
+kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
+kubectl cp /tmp/main_full/src/tide2 "starr/$POD:/opt/tide2/src/tide2"
+```
+
+**8. Run main's benchmark with monitoring** (`--num-gpus 2` is the key flag
+for this dual-GPU pod; CPU/object-store sized the same way as the
+single-GPU Ray section above, just scaled to this pod's 20 allocatable
+CPUs):
+```bash
+kubectl exec -n starr "$POD" -- bash -c "nohup python3 /tmp/monitor.py /tmp/main_monitor.csv 3 > /tmp/main_monitor.log 2>&1 & echo \$!" > /tmp/main_monitor_pid.txt
+
+kubectl exec -n starr "$POD" -- tide2-runner run pipeline \
+  --input /data/scratch/jmesterh-dev/benchmark_6file \
+  --output /data/scratch/jmesterh-dev/output/main_benchmark \
+  --model StanfordAIMI/stanford-deidentifier-v2 \
+  --num-cpus 20 --num-gpus 2 --object-store-gb 4 \
+  --salt-hex "$SALT_HEX" --key-hex "$KEY_HEX"
+
+kubectl exec -n starr "$POD" -- kill -9 $(cat /tmp/main_monitor_pid.txt)
+kubectl cp "starr/$POD:/tmp/main_monitor.csv" /tmp/main_monitor.csv
+```
+Then re-run step 6's stats script against `/tmp/main_monitor.csv`.
+
+**9. Restore the pod to this branch** (mirror of step 2, undoing step 7):
+```bash
+kubectl cp pyproject.toml "starr/$POD:/opt/tide2/pyproject.toml"
+kubectl cp uv.lock "starr/$POD:/opt/tide2/uv.lock"
+kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
+kubectl cp src/tide2 "starr/$POD:/opt/tide2/src/tide2"
+kubectl exec -n starr "$POD" -- bash -c "cd /opt/tide2 && uv sync --locked --no-dev"
+```
+
+**10. Clean up outputs** (`/data/scratch/jmesterh-dev/output/*`) and local
+`/tmp/*monitor*`/`*_full` scratch before finishing.
+
 ## Cleanup
 
 ```bash
