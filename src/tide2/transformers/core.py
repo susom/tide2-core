@@ -15,19 +15,15 @@ from typing import Any
 
 import numpy as np
 import torch
-from transformers import AutoModelForTokenClassification
-from transformers import AutoTokenizer
-from transformers import pipeline
 
-from tide2.utils.text_processing import aggregate_bio_tokens
+# transformers exposes these via a lazy module __getattr__, which ty can't resolve statically.
+from transformers import AutoModelForTokenClassification  # ty: ignore[unresolved-import]
+from transformers import AutoTokenizer  # ty: ignore[unresolved-import]
+from transformers import pipeline  # ty: ignore[unresolved-import]
 
 from .config import load_model_config
 
 logger = logging.getLogger(__name__)
-
-# Fixed schema of a raw BIO token prediction (see infer_raw). Used to build a
-# stable dedupe key that does not depend on dict insertion order.
-_RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
 
 # Weight file names that indicate a complete, usable model directory.
 _WEIGHT_FILES = (
@@ -104,19 +100,6 @@ def _resolve_model_path(model_name: str, allow_huggingface_download: bool) -> st
         )
     logger.info(f"Successfully downloaded model to: {local_model_path}")
     return str(local_model_path)
-
-
-def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
-    """Remove duplicate raw BIO predictions (can occur from chunking).
-
-    The dedupe key is built from the fixed prediction schema in a stable order
-    so it does not depend on dict insertion order (O(k) per dict, no per-key
-    sort).
-    """
-    return [
-        dict(zip(_RAW_PRED_KEYS, key, strict=True))
-        for key in {tuple(d[k] for k in _RAW_PRED_KEYS) for d in raw_predictions}
-    ]
 
 
 class TransformerCore:
@@ -430,44 +413,6 @@ class TransformerCore:
         # compile_model is None (auto-detect) and file not found — skip
         return None
 
-    def infer_raw(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run raw inference on texts, returning BIO tokens.
-
-        This method runs the transformer pipeline on a batch of texts and returns
-        the raw predictions without BIO aggregation.
-
-        Args:
-            texts: List of text strings to process
-            batch_size: Optional batch size for pipeline (default: process all at once)
-
-        Returns:
-            List of prediction lists, one per input text. Each prediction is a dict:
-            {
-                "entity": "B-PERSON",
-                "score": 0.95,
-                "start": 0,
-                "end": 4,
-                "word": "John",
-                "index": 1,
-            }
-        """
-        pipeline_instance = self._ensure_pipeline_loaded()
-
-        if not texts:
-            return []
-
-        # Run pipeline
-        if batch_size is not None:
-            results = pipeline_instance(texts, batch_size=batch_size)
-        else:
-            results = pipeline_instance(texts)
-
-        # Handle single-text case (pipeline returns list of dicts, not list of lists)
-        if len(texts) == 1 and results and isinstance(results[0], dict):
-            return [results]
-
-        return results
-
     def infer_raw_direct(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
         """Run inference bypassing the HF pipeline dispatch loop.
 
@@ -476,8 +421,8 @@ class TransformerCore:
         raw token predictions using offset_mapping. This avoids the per-text
         preprocess/postprocess Python loops in HuggingFace's ChunkPipeline.
 
-        Output format matches infer_raw(): list of lists of dicts with keys
-        {entity, score, start, end, word, index}.
+        Output format: list of lists of dicts with keys
+        {entity, score, start, end, word, index}, one list per input text.
 
         Args:
             texts: List of text strings to process.
@@ -593,63 +538,6 @@ class TransformerCore:
 
         return pipeline_instance(text)
 
-    def infer_aggregated(self, text: str) -> list[dict]:
-        """Run inference on a single text with BIO aggregation.
-
-        This method runs inference and aggregates consecutive BIO tokens into
-        entity spans.
-
-        Args:
-            text: Text to process
-
-        Returns:
-            List of aggregated entity predictions:
-            {
-                "entity_group": "PERSON",
-                "score": 0.95,
-                "start": 0,
-                "end": 10,
-                "word": "John Smith",
-            }
-        """
-        raw_predictions = self.infer_single_raw(text)
-
-        if not raw_predictions:
-            return []
-
-        # Remove duplicates (can occur from chunking at caller level)
-        raw_predictions = _dedupe_raw_predictions(raw_predictions)
-
-        # Aggregate BIO tokens
-        return aggregate_bio_tokens(raw_predictions, text)
-
-    def infer_batch_aggregated(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run inference on a batch of texts with BIO aggregation.
-
-        Args:
-            texts: List of texts to process
-            batch_size: Optional batch size for pipeline
-
-        Returns:
-            List of aggregated entity prediction lists, one per input text
-        """
-        raw_results = self.infer_raw(texts, batch_size=batch_size)
-
-        aggregated_results = []
-        for text, raw_preds in zip(texts, raw_results, strict=True):
-            if not raw_preds:
-                aggregated_results.append([])
-                continue
-
-            # Remove duplicates (can occur from chunking at caller level)
-            deduped_preds = _dedupe_raw_predictions(raw_preds)
-
-            # Aggregate BIO tokens
-            aggregated = aggregate_bio_tokens(deduped_preds, text)
-            aggregated_results.append(aggregated)
-
-        return aggregated_results
-
     @property
     def model_max_length(self) -> int:
         """Maximum input length for the tokenizer."""
@@ -658,11 +546,12 @@ class TransformerCore:
 
     def get_device_info(self) -> str:
         """Get current device information."""
-        if not self.is_loaded:
+        pipeline_instance = self._pipeline
+        if pipeline_instance is None:
             return "not loaded"
 
         try:
-            model = self._pipeline.model
+            model = pipeline_instance.model
             device = next(model.parameters()).device
             if device.type == "cuda":
                 device_name = torch.cuda.get_device_name(device.index)

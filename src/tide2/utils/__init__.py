@@ -5,7 +5,6 @@ This module provides helper utilities and data management tools for
 supporting the main anonymization and recognition functionality.
 
 Available utilities:
-- Serialization utilities
 - Span metrics for evaluation
 - Text processing for chunking and BIO aggregation
 """

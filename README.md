@@ -118,9 +118,9 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ## Usage
 
-TIDE 2.0 is a library — there is no bundled CLI or batch runner. Wire up a
-Presidio `AnalyzerEngine` with the recognizers you need and an
-`AnonymizerEngine` with the anonymizers you need, then call them directly:
+TIDE 2.0 is primarily a library: wire up a Presidio `AnalyzerEngine` with the
+recognizers you need and an `AnonymizerEngine` with the anonymizers you need,
+then call them directly:
 
 ```python
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
@@ -149,6 +149,23 @@ anonymized = anonymizer.anonymize(
 See [`notebooks/tide2_pipeline.ipynb`](notebooks/tide2_pipeline.ipynb) for a
 complete, runnable end-to-end example (regex + transformer recognizers, known
 patient values, and the full HIPS anonymizer operator set).
+
+### Batch Runner
+
+For batch de-identification of Parquet files, `tide2.runner.pipeline` provides
+a self-contained GPU pipeline (transformer NER -> regex/known-values recognition
+-> HIPS anonymization) with multi-process, multi-GPU support — no external
+orchestration (e.g. Ray) required:
+
+```bash
+python -m tide2.runner.pipeline \
+    --input ./data/input --output ./data/output \
+    --model StanfordAIMI/stanford-deidentifier-v2 \
+    --salt-hex <64 hex chars> --key-hex <64 hex chars>
+```
+
+See the module docstring in [`src/tide2/runner/pipeline.py`](src/tide2/runner/pipeline.py)
+for the full input schema and CLI options.
 
 ## Docker Images
 
@@ -192,10 +209,11 @@ tide2/
 │   └── reassembly.py        # Chunk-to-document reassembly
 ├── cryptographic/            # FPE, key management, date jitter derivation
 ├── string_parsers/           # Name/address parsing, format detection
+├── runner/
+│   └── pipeline.py          # Batch GPU pipeline: transformer NER -> recognition -> anonymization
 ├── utils/
 │   ├── span_metrics.py         # Evaluation metrics and conflict resolution
 │   ├── text_processing.py      # Chunking, BIO aggregation, span reconstruction
-│   ├── serialization.py        # RecognizerResult <-> dict conversions
 │   ├── llm_model.py            # LLM client utilities
 │   ├── constants.py            # Shared constants
 │   └── resource_utils.py       # Resource path helpers

@@ -7,11 +7,12 @@ instead of copying them, because copied content drifts.
 ## Orientation
 
 TIDE 2.0 is a healthcare PII/PHI de-identification and anonymization toolkit built
-on **Microsoft Presidio**. It is a library, not a service: a two-stage pipeline —
+on **Microsoft Presidio**. It is primarily a library: a two-stage pipeline —
 entity recognition (regex + transformer NER) → anonymization (HIPS crypto, FPE,
 faker, date jitter) — that callers wire up directly via Presidio's
-`AnalyzerEngine`/`AnonymizerEngine`. There is no bundled CLI, batch runner, or
-orchestration layer in this repo; that lives in a separate consuming project.
+`AnalyzerEngine`/`AnonymizerEngine`. It also ships one bundled batch runner,
+`tide2.runner.pipeline` (multi-process/multi-GPU Parquet-in, Parquet-out), with
+no external orchestration (e.g. Ray) required.
 
 - Full overview + feature list + **module/architecture map**: [`README.md`](README.md).
   For the package layout, read README's *Architecture* section — **do not** keep a

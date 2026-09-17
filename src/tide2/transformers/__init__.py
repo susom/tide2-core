@@ -16,11 +16,11 @@ Functions:
 Example:
     from tide2.transformers import TransformerCore
 
-    # Create core with auto device placement
-    core = TransformerCore(model_name="StanfordAIMI/stanford-deidentifier-v2")
+    # Create core with explicit device placement for batch inference
+    core = TransformerCore(model_name="StanfordAIMI/stanford-deidentifier-v2", device="cuda:0", load_immediately=True)
 
-    # Run inference with BIO aggregation
-    entities = core.infer_aggregated("John Smith is a patient.")
+    # Run inference, returning raw BIO tokens per text
+    raw_predictions = core.infer_raw_direct(["John Smith is a patient."])
 """
 
 from .config import format_transformer_recognizer_name
