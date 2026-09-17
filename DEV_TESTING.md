@@ -733,6 +733,31 @@ noticeably *higher and steadier* than the 6-file run (93.7%/93.3% avg vs
 startup cost that's proportionally bigger in a 341s run than an 86-minute
 one.
 
+**Re-run 2026-09-17** (regression check after this session's pipeline.py
+changes: SIGTERM/orphan-cleanup handling, `--clean`/output-overlap checks,
+`patient_uid`/`patient_id`/text_hash fallback, deterministic span tie-break,
+`_DeduplicateLogFilter` for repeated presidio warnings) — same pod, same
+`/data/scratch/benchmark` 99-file input, defaults:
+
+| Metric | 2026-09-17 re-run | Original (above) |
+|---|---|---|
+| Wall-clock | 5562s (~92.7 min) | 5207s (~86.8 min) |
+| Output rows | 3,898,088 (verified) | 3,898,088 |
+| CPU avg / peak | 41.9% / 55.9% | 45.7% / 50.2% |
+| Memory avg / peak | 18.0GB / 20.6GB | 18.3GB / 20.1GB |
+| GPU0 util avg / peak | 91.5% / 100% | 93.7% / 100% |
+| GPU0 mem avg / peak | 5.43GB / 5.83GB | 5.67GB / 5.83GB |
+| GPU1 util avg / peak | 86.7% / 100% | 93.3% / 100% |
+| GPU1 mem avg / peak | 3.26GB / 3.61GB | 3.51GB / 3.61GB |
+
+Row count matches exactly (no correctness regression). Wall-clock is ~6.8%
+slower and GPU util ~2-6pts lower than the original run. Not attributed to
+any specific change here — none of this session's edits touch the hot
+GPU/CPU-stage path, and this pod had several shorter benchmark runs,
+SIGTERM-kill tests, and code re-syncs immediately beforehand, which is a
+more likely source of the delta than a real regression. Re-run again before
+trusting this as a real perf regression if it matters for a decision.
+
 ### Reproducing this benchmark
 
 Everything needed to redo either the 6-file or 99-file version of this
