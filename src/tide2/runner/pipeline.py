@@ -371,7 +371,14 @@ def _parse_patient_identifiers(value: str | bytes | dict | None) -> dict:
     try:
         parsed = json.loads(value)
     except (json.JSONDecodeError, TypeError) as e:
-        logger.warning("Malformed patient_identifiers %r, ignoring: %s", value, e)
+        # Never log `value` itself - patient_identifiers carries real PHI (names, MRNs,
+        # DOBs), so even a malformed/unparseable payload must not reach the logs verbatim.
+        logger.warning(
+            "Malformed patient_identifiers (type=%s, len=%s), ignoring: %s",
+            type(value).__name__,
+            len(value) if hasattr(value, "__len__") else "n/a",
+            e,
+        )
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
@@ -566,6 +573,22 @@ def _device_for_worker(worker_index: int, num_gpus: int) -> str:
     return f"cuda:{worker_index % num_gpus}"
 
 
+def _check_no_input_output_overlap(input_dir: Path, output_dir: Path) -> None:
+    """Reject --input/--output paths that are the same directory or nested inside one
+    another. _prepare_output_dir()'s --clean deletes output_dir's contents outright, and
+    input_files is globbed from --input before that runs - if output_dir is --input itself
+    (or an ancestor of it), --clean would delete the very source parquet files this run is
+    about to read.
+    """
+    input_resolved = input_dir.resolve()
+    output_resolved = output_dir.resolve()
+    if input_resolved.is_relative_to(output_resolved) or output_resolved.is_relative_to(input_resolved):
+        raise ValueError(
+            f"--input ({input_resolved}) and --output ({output_resolved}) overlap; "
+            "--output must not be the same directory as --input, nor an ancestor or descendant of it."
+        )
+
+
 def _prepare_output_dir(output_dir: Path, clean: bool) -> None:
     """Create output_dir if needed, requiring it start empty so a differently-shaped
     previous run (e.g. more workers) can't leave stale worker{N}.parquet partitions
@@ -681,6 +704,7 @@ def main() -> None:
         raise FileNotFoundError(f"No .parquet files found in {args.input}")
 
     output_dir = Path(args.output)
+    _check_no_input_output_overlap(Path(args.input), output_dir)
     _prepare_output_dir(output_dir, args.clean)
 
     if num_workers <= 1:

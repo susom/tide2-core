@@ -925,3 +925,116 @@ kubectl delete -f dev-pod-dual.yaml  # dual-GPU dev pod (onc-central-dev-l4-dual
 ```
 
 Either node pool scales back down automatically once nothing needs it.
+
+## Re-validating correctness after a pipeline.py change (`input_1file`, full fresh run both sides)
+
+Quick end-to-end main-vs-branch check on `input_1file` (15,368 rows) —
+smaller/faster than the 46,435-row `main_ray_baseline` set, and unlike the
+`--no-run-transformer` comparisons elsewhere in this doc, both sides run
+their **own** transformer inference from scratch (no reused
+`recognizer_results_json`), so this also re-validates the transformer stage,
+not just recognizer/anonymizer. Last run 2026-09-17 after the
+`patient_id`/`patient_uid` fallback fix and the deterministic tie-break fix
+in `resolve_recognizer_results`: **100% row_id join, 91.8% exact span-set
+match** (mismatches: 1,130 rows pure entity-type relabeling on identical
+spans e.g. `DATE`/`DATE_TIME`, `ID`/`HOSPITAL`/`ACC_NUM`; 135 rows genuinely
+different spans, consistent with the already-characterized fp16
+batch-composition sensitivity elsewhere in this doc). Wall-clock: branch 57s
+vs main 180.7s (~3.2x, 2 GPUs).
+
+**1. Swap the pod to main** (same pattern as the dual-GPU section above):
+```bash
+POD=$(kubectl get pods -n starr -l app.kubernetes.io/name=tide2-gpu-dev-dual -o jsonpath='{.items[0].metadata.name}')
+rm -rf /tmp/main_full && mkdir -p /tmp/main_full && git archive origin/main | tar -x -C /tmp/main_full
+kubectl cp /tmp/main_full/pyproject.toml "starr/$POD:/opt/tide2/pyproject.toml"
+kubectl cp /tmp/main_full/uv.lock "starr/$POD:/opt/tide2/uv.lock"
+kubectl exec -n starr "$POD" -- bash -c "cd /opt/tide2 && uv sync --locked --no-dev"
+kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
+kubectl cp /tmp/main_full/src/tide2 "starr/$POD:/opt/tide2/src/tide2_incoming"
+kubectl exec -n starr "$POD" -- bash -c '
+mv /opt/tide2/src/tide2_incoming /opt/tide2/src/tide2
+find /opt/tide2/src -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+find /opt/tide2/.venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+'
+# verify: python -c "import tide2; print(tide2.__file__)" should print .../src/tide2/__init__.py, not a nested tide2/tide2 path
+```
+
+**2. Run main on `input_1file`** (salt/key reused from `main_ray_baseline` for consistency across sessions):
+```bash
+SALT_HEX=$(kubectl exec -n starr "$POD" -- cat /data/scratch/jmesterh-dev/output/main_ray_baseline/salt.bin)
+KEY_HEX=$(kubectl exec -n starr "$POD" -- cat /data/scratch/jmesterh-dev/output/main_ray_baseline/key.bin)
+kubectl exec -n starr "$POD" -- rm -rf /data/scratch/jmesterh-dev/output/main_input1file
+kubectl exec -n starr "$POD" -- tide2-runner run pipeline \
+  --input /data/scratch/jmesterh-dev/input_1file \
+  --output /data/scratch/jmesterh-dev/output/main_input1file \
+  --model StanfordAIMI/stanford-deidentifier-v2 \
+  --num-cpus 20 --num-gpus 2 --object-store-gb 4 \
+  --salt-hex "$SALT_HEX" --key-hex "$KEY_HEX"
+```
+Anonymizer output lands at
+`output/main_input1file/06_anonymizer_output/*.parquet` (main's stage-by-stage
+checkpoint layout, same as `main_ray_baseline`).
+
+**3. Swap the pod back to this branch and run it on the same input:**
+```bash
+kubectl cp pyproject.toml "starr/$POD:/opt/tide2/pyproject.toml"
+kubectl cp uv.lock "starr/$POD:/opt/tide2/uv.lock"
+kubectl exec -n starr "$POD" -- bash -c "cd /opt/tide2 && uv sync --all-extras"
+kubectl exec -n starr "$POD" -- rm -rf /opt/tide2/src/tide2
+kubectl cp src/tide2 "starr/$POD:/opt/tide2/src/tide2_incoming"
+kubectl exec -n starr "$POD" -- bash -c '
+mv /opt/tide2/src/tide2_incoming /opt/tide2/src/tide2
+find /opt/tide2/src -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+find /opt/tide2/.venv -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+'
+
+kubectl exec -n starr "$POD" -- rm -rf /data/scratch/jmesterh-dev/output/branch_input1file
+kubectl exec -n starr "$POD" -- python -m tide2.runner.pipeline \
+  --input /data/scratch/jmesterh-dev/input_1file \
+  --output /data/scratch/jmesterh-dev/output/branch_input1file \
+  --model StanfordAIMI/stanford-deidentifier-v2 \
+  --salt-hex "$SALT_HEX" --key-hex "$KEY_HEX" \
+  --clean
+```
+Output: `output/branch_input1file/worker0.parquet` (single input file -> 1 shard).
+
+**4. Compare** (row_id join + entity-level span-set match, classifying
+mismatches as pure same-span relabeling vs genuinely different spans):
+```bash
+kubectl exec -n starr "$POD" -- python -c "
+import json
+import pyarrow.parquet as pq
+
+branch = pq.read_table('/data/scratch/jmesterh-dev/output/branch_input1file/worker0.parquet').to_pylist()
+main_file = pq.ParquetDataset('/data/scratch/jmesterh-dev/output/main_input1file/06_anonymizer_output').files[0]
+main = pq.read_table(main_file).to_pylist()
+
+branch_by_id = {r['row_id']: r for r in branch}
+main_by_id = {r['row_id']: r for r in main}
+branch_ids, main_ids = set(branch_by_id), set(main_by_id)
+print('rows:', len(branch), len(main), 'overlap:', len(branch_ids & main_ids))
+
+exact = mismatch = pure_relabel = other = 0
+for rid in (branch_ids & main_ids):
+    b = json.loads(branch_by_id[rid]['anonymizer_results_json'])
+    m = json.loads(main_by_id[rid]['anonymizer_results_json'])
+    bset = frozenset((e['entity_type'], e['start'], e['end']) for e in b)
+    mset = frozenset((e['entity_type'], e['start'], e['end']) for e in m)
+    if bset == mset:
+        exact += 1
+        continue
+    mismatch += 1
+    bspans = frozenset((e['start'], e['end']) for e in b)
+    mspans = frozenset((e['start'], e['end']) for e in m)
+    pure_relabel += bspans == mspans
+    other += bspans != mspans
+
+n = len(branch_ids & main_ids)
+print(f'exact match: {exact}/{n} ({100*exact/n:.1f}%)  pure relabel: {pure_relabel}  other: {other}')
+"
+```
+
+**5. Restore the pod to this branch's HEAD** (repeat step 3 if the pod was
+left on an older commit) and clean up `/data/scratch/jmesterh-dev/output/
+{main,branch}_input1file` when done.
+
