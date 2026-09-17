@@ -646,10 +646,67 @@ are essentially unchanged (~16.9%/17.4%) — bucketing does not touch the
 long-document cascade mechanism, only ordinary padding-induced boundary
 noise.
 
+## Multi-GPU support + dual-L4 benchmark comparison
+
+This branch's runner (`src/tide2/runner/pipeline.py`) gained multi-GPU
+support this session: `--num-workers-per-gpu` (default 3) is multiplied by
+`torch.cuda.device_count()` to get the total worker count, and each spawned
+worker is assigned to a physical GPU round-robin (`worker i -> cuda:{i %
+num_gpus}`) via a new `_device_for_worker()` helper. On a single-GPU pod
+this is a no-op (all workers still land on `cuda:0`); on a multi-GPU pod it
+spreads workers across all visible GPUs automatically, no new flag needed
+beyond the existing worker-count knob.
+
+Tested on a new node pool, **`onc-central-dev-l4-dual`** (`g2-standard-24`,
+2x NVIDIA L4, 24 vCPU, 96GB RAM), via a new `dev-pod-dual.yaml` manifest
+(nodeSelector `cloud.google.com/gke-nodepool: onc-central-dev-l4-dual`,
+`nvidia.com/gpu: "2"`, otherwise identical pattern to `dev-pod.yaml`).
+Benchmarked both branches against the same 6 input files (236,500 rows
+total, from `/data/scratch/benchmark/part-00000000000{1..6}.parquet`),
+defaults on both sides (this branch: `--num-workers-per-gpu 3` → 6 workers
+total; main: `--num-cpus 20 --num-gpus 2 --object-store-gb 4`). Resource
+usage sampled every 3s for the duration of each run (system-wide CPU% from
+`/proc/stat`, memory from `/proc/meminfo`, per-GPU utilization/memory from
+`nvidia-smi`).
+
+| Metric | This branch (nobody-loves-raymond) | main (Ray) |
+|---|---|---|
+| Wall-clock | **341s** | 1663s |
+| Speedup | **4.9x** | 1x (baseline) |
+| Output rows | 236,500 (verified) | 236,500 (verified) |
+| CPU avg / peak | 42.5% / 52.3% | 12.3% / 71.9% |
+| Memory avg / peak | 15.5GB / 17.2GB | 14.5GB / 26.6GB |
+| GPU0 util avg / peak | 82.9% / 100% | 42.0% / 100% |
+| GPU0 mem avg / peak | 5.2GB / 5.8GB | 5.4GB / 7.9GB |
+| GPU1 util avg / peak | 81.9% / 100% | 23.2% / 100% |
+| GPU1 mem avg / peak | 3.3GB / 3.6GB | 2.2GB / 6.4GB |
+| Output files | 6 (`worker0..5.parquet`, 1:1 with worker count) | 9 (Ray Data block count — no longer collapses to 1 file at this larger 236K-row scale, unlike the single-GPU/46K-row runs earlier in this doc) |
+
+Takeaways:
+- The ~4.9x speedup on 2 GPUs is consistent with the ~5.9x speedup seen
+  earlier in this doc on 1 GPU (3-file/46,435-row input) — the advantage
+  isn't an artifact of the smaller single-GPU test, it holds at 2x the
+  hardware and ~5x the data.
+- This branch keeps both GPUs busy and roughly evenly loaded the whole run
+  (~82% avg util on both, matching the row-count-based work distribution
+  verified earlier: 118,400 vs 118,100 rows per GPU). Main's Ray pipeline
+  shows both lower *and* more uneven GPU utilization (42.0% vs 23.2% avg) —
+  consistent with the per-GPU actor scheduling being driven by Ray Data's
+  block/task assignment rather than an even, deterministic split.
+- Main's peak memory (26.6GB system, 7.9GB/6.4GB GPU) is notably higher than
+  this branch's (17.2GB system, 5.8GB/3.6GB GPU) despite doing the same
+  work — consistent with Ray's object store, actor pool, and checkpoint
+  materialization overhead.
+- Row counts matched exactly (236,500 both sides) — this run wasn't used
+  for a span-level correctness comparison (see the dedicated section above
+  for that methodology); it's purely a performance/resource comparison at
+  larger scale and on genuinely parallel GPU hardware.
+
 ## Cleanup
 
 ```bash
-kubectl delete -f dev-pod.yaml
+kubectl delete -f dev-pod.yaml       # single-GPU dev pod
+kubectl delete -f dev-pod-dual.yaml  # dual-GPU dev pod (onc-central-dev-l4-dual)
 ```
 
-The L4 node pool scales back down automatically once nothing needs it.
+Either node pool scales back down automatically once nothing needs it.
