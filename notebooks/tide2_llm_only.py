@@ -94,8 +94,7 @@ for note_id, note_text in notes.items():
     # presidio-anonymizer defines its own RecognizerResult distinct from presidio-analyzer's;
     # convert explicitly rather than relying on structural compatibility.
     anonymizer_results = [
-        RecognizerResult(entity_type=r.entity_type, start=r.start, end=r.end, score=r.score)
-        for r in recognizer_results
+        RecognizerResult(entity_type=r.entity_type, start=r.start, end=r.end, score=r.score) for r in recognizer_results
     ]
     anonymized = engine.anonymize(
         text=note_text,

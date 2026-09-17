@@ -59,7 +59,7 @@ def load_llm_spans_from_dir(llm_dir: str | Path) -> pd.DataFrame:
 
     for json_file in json_files:
         try:
-            with open(json_file) as f:
+            with json_file.open() as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"Failed to load {json_file}: {e}")
@@ -181,8 +181,7 @@ def resolve_conflicts(
     if not spans:
         return []
 
-    # Step 1: Remove exact duplicates by (start, end), keeping first occurrence
-    # This is O(n)
+    # Step 1: Remove exact duplicates by (start, end), keeping first occurrence, in linear time
     seen: dict[tuple[int, int], dict[str, Any]] = {}
     for span in spans:
         key = (span["start"], span["end"])
@@ -777,7 +776,7 @@ def find_matches(
     #   only the first counts as TP; subsequent overlapping predictions for
     #   that already-matched gold span are ignored (neither TP nor FP).
     #   Rationale: avoid penalizing (no FP) but also avoid inflating TP.
-    for note_id, tag, ml_start, ml_end, ml_idx in ml_collection.iterate_spans():
+    for note_id, tag, ml_start, ml_end, _ml_idx in ml_collection.iterate_spans():
         # Skip if note not in gold data
         if note_id not in gold_collection.get_note_ids():
             continue
@@ -789,7 +788,7 @@ def find_matches(
         gold_spans = gold_collection.get_spans(note_id, tag)
         found_match = False
 
-        for gold_start, gold_end, gold_idx in gold_spans:
+        for gold_start, gold_end, _gold_idx in gold_spans:
             overlap = span_overlap((ml_start, ml_end), (gold_start, gold_end), exact_match=exact_match)
             if overlap >= overlap_threshold:
                 if (note_id, tag, gold_start, gold_end) in matched_gold_spans:
@@ -828,7 +827,7 @@ def find_matches(
             )
 
     # Process remaining unmatched gold spans as FNs
-    for note_id, tag, gold_start, gold_end, gold_idx in gold_collection.iterate_spans():
+    for note_id, tag, gold_start, gold_end, _gold_idx in gold_collection.iterate_spans():
         if (note_id, tag, gold_start, gold_end) not in matched_gold_spans:
             # False negative
             metrics_per_label[tag]["fn"] += 1
@@ -1079,7 +1078,7 @@ def resolve_dataframe_conflicts(df: pd.DataFrame, model_name: str) -> pd.DataFra
 
     # Resolve conflicts for each group and collect all resolved records
     all_resolved = []
-    for note_id, group_spans in groups.items():
+    for _note_id, group_spans in groups.items():
         resolved_spans = resolve_overlapping_spans(group_spans)
         # Remove temporary start/end keys
         for span in resolved_spans:
@@ -1088,10 +1087,7 @@ def resolve_dataframe_conflicts(df: pd.DataFrame, model_name: str) -> pd.DataFra
         all_resolved.extend(resolved_spans)
 
     # Build final DataFrame from all resolved records (single DataFrame creation)
-    if all_resolved:
-        result_df = pd.DataFrame(all_resolved)
-    else:
-        result_df = pd.DataFrame(columns=df.columns)
+    result_df = pd.DataFrame(all_resolved) if all_resolved else pd.DataFrame(columns=df.columns)
 
     # Add model_name column
     result_df["model_name"] = model_name
