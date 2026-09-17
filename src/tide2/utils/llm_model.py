@@ -444,7 +444,10 @@ class LlmModel:
         }
         handler = providers.get(self.provider_type.lower())
         if handler is None:
-            raise ValueError(f"Unsupported provider type: {self.provider_type}. Supported providers are 'google'.")
+            raise ValueError(
+                f"Unsupported provider type: {self.provider_type}. Supported providers are: "
+                f"{', '.join(sorted(providers))}."
+            )
 
         response_text = handler(prompt)
 

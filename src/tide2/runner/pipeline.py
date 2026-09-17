@@ -27,6 +27,7 @@ import json
 import logging
 import multiprocessing
 import os
+import shutil
 from collections.abc import Iterator
 from datetime import UTC
 from datetime import datetime
@@ -35,6 +36,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from pandas import isna as pd_isna
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer import EntityRecognizer
 from presidio_analyzer import RecognizerRegistry
@@ -119,6 +121,25 @@ ALL_SUPPORTED_ENTITIES = [
     "MEDICAL_LICENSE",
 ]
 
+# pa.Table.from_pylist() infers a type per column from that batch's own values, so an
+# all-None batch (e.g. every note in it lacking patient_uid, or error_message which is
+# always None on the success path) infers Arrow's null type instead of string - which
+# then mismatches the schema ParquetWriter fixed from an earlier, non-null batch and
+# raises. Fixing the schema up front avoids that entirely.
+OUTPUT_SCHEMA = pa.schema(
+    [
+        ("text_hash", pa.string()),
+        ("patient_uid", pa.string()),
+        ("anonymized_note_text", pa.string()),
+        ("anonymizer_results_json", pa.string()),
+        ("entity_count", pa.int64()),
+        ("processing_status", pa.string()),
+        ("error_message", pa.string()),
+        ("row_id", pa.string()),
+        ("processing_timestamp", pa.string()),
+    ]
+)
+
 
 class NoOpContextEnhancer(ContextAwareEnhancer):
     """No-op context enhancer that returns results unchanged for maximum batch throughput."""
@@ -188,6 +209,10 @@ def run_transformer_stage(
 
     # reassemble_chunks_for_document expects aggregated entities (entity_group
     # key), not the raw per-token BIO predictions infer_raw_direct returns.
+    # Note: unlike TransformersRecognizer.analyze(), this never applies
+    # MODEL_TO_PRESIDIO_MAPPING/ID_SCORE_MULTIPLIER (_check_label_transformer) -
+    # kept as-is to match main's batch path (same gap there), but may be worth
+    # revisiting for models with non-identity label mappings (e.g. obi/deid_roberta_i2b2).
     for chunk_row, preds in zip(chunk_rows, raw_predictions, strict=True):
         aggregated = aggregate_bio_tokens(preds, chunk_row["chunk_text"])
         chunk_row["predictions_json"] = json.dumps(aggregated)
@@ -278,6 +303,12 @@ def build_operators(
         "HAR": OperatorConfig("hips_alphanumeric", {"salt": salt, "key": key}),
         "ACC_NUM": OperatorConfig(
             "accession_number_hash",
+            # Inherited from main (actors/anonymizer.py): presidio_anonymizer's engine
+            # overwrites params["entity_type"] with the recognized Presidio entity type
+            # ("ACC_NUM") right before validate()/operate(), so patient_uid never actually
+            # reaches AccessionNumberHashAnonymizer - this is a no-op, not per-patient
+            # hashing, on both branches. Not fixing here to stay main-compatible but
+            # absolutely can not go into production in this state.
             {"salt": acc_num_salt, "study_id": acc_num_study_id, "entity_type": patient_uid},
         ),
         "ID": OperatorConfig("hips_alphanumeric", {"salt": salt, "key": key}),
@@ -307,11 +338,55 @@ _worker_anonymizer_engine: list[AnonymizerEngine] = []
 
 
 def _init_cpu_worker() -> None:
-    """ProcessPoolExecutor initializer: build this worker's analyzer/anonymizer once."""
+    """ProcessPoolExecutor initializer: build this worker's analyzer/anonymizer once.
+
+    Runs in a freshly spawned interpreter (see mp_context="spawn" below), which
+    never inherits the parent's logging.basicConfig() - reconfigure it here too,
+    or this worker's logger calls silently go nowhere (same issue as the
+    spawned GPU workers, see _configure_logging's docstring).
+    """
+    _configure_logging()
+    # Patch Presidio's O(n^2) remove_duplicates with a no-op passthrough - matches main's
+    # RecognizerWorker (deduplication across recognizers is handled downstream via
+    # resolve_recognizer_results()/patch_conflict_resolution() before anonymizing instead).
+    presidio_patches.patch_remove_duplicates()
     presidio_patches.disable_whitespace_merging()
     presidio_patches.patch_conflict_resolution()
     _worker_analyzer.append(build_analyzer())
     _worker_anonymizer_engine.append(build_anonymizer())
+
+
+def _parse_patient_identifiers(value: str | bytes | dict | None) -> dict:
+    """Parse a note's patient_identifiers column, accepting a JSON string (the documented
+    format) as well as an already-decoded mapping (e.g. a Parquet map/struct column comes
+    through pandas as a dict already, not a string) - json.loads() would TypeError on that.
+    """
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning("Malformed patient_identifiers %r, ignoring: %s", value, e)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _normalize_patient_uid(value: str | float | int | None) -> str | None:
+    """Collapse every null-ish form patient_uid can arrive in (None, and NaN/pd.NA when
+    the source column happens to be numeric or nullable-typed rather than the documented
+    string) to a single None sentinel, so row_id hashing and the output schema's string
+    column always see either a real string or None - never a stray float NaN.
+    """
+    if value is None:
+        return None
+    try:
+        if pd_isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value if isinstance(value, str) else str(value)
 
 
 def run_cpu_stage(
@@ -336,9 +411,9 @@ def run_cpu_stage(
         text_hash = note["text_hash"]
         note_text = note.get("note_text") or ""
         # None (not "") when absent, so a missing patient_uid hashes as the literal string "None" below
-        patient_uid = note.get("patient_uid")
+        patient_uid = _normalize_patient_uid(note.get("patient_uid"))
         patient_uid_str = patient_uid or ""
-        patient_identifiers = json.loads(note.get("patient_identifiers") or "{}")
+        patient_identifiers = _parse_patient_identifiers(note.get("patient_identifiers"))
 
         cached_recognizer = create_cached_recognizer(results=transformer_results_by_hash.get(text_hash, "[]"))
         ad_hoc_recognizers: list[EntityRecognizer] = [
@@ -425,9 +500,9 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
         nonlocal writer, total_rows
         if pending is None:
             return
-        out_table = pa.Table.from_pylist(pending.result())
+        out_table = pa.Table.from_pylist(pending.result(), schema=OUTPUT_SCHEMA)
         if writer is None:
-            writer = pq.ParquetWriter(output_path, out_table.schema)
+            writer = pq.ParquetWriter(output_path, OUTPUT_SCHEMA)
         writer.write_table(out_table)
         total_rows += out_table.num_rows
         logger.info("  wrote %d rows (%d total)", out_table.num_rows, total_rows)
@@ -436,8 +511,13 @@ def run_pipeline(input_files: list[Path], output_path: Path, args: argparse.Name
     # continuously, so it runs in a separate process: this process keeps driving
     # GPU inference for batch N while the worker process runs the CPU stage for
     # batch N-1.
+    # mp_context must be "spawn": by the time we get here, TransformerCore may have
+    # already initialized CUDA in this process, and forking a CUDA-initialized
+    # process (the default on Linux) is unsupported by PyTorch and can deadlock/crash.
     try:
-        with concurrent.futures.ProcessPoolExecutor(max_workers=1, initializer=_init_cpu_worker) as cpu_executor:
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn"), initializer=_init_cpu_worker
+        ) as cpu_executor:
             pending: concurrent.futures.Future | None = None
             for notes in iter_note_batches(input_files, args.row_batch_size):
                 if core is not None:
@@ -472,6 +552,27 @@ def _device_for_worker(worker_index: int, num_gpus: int) -> str:
     return f"cuda:{worker_index % num_gpus}"
 
 
+def _prepare_output_dir(output_dir: Path, clean: bool) -> None:
+    """Create output_dir if needed, requiring it start empty so a differently-shaped
+    previous run (e.g. more workers) can't leave stale worker{N}.parquet partitions
+    that a downstream directory read would silently include alongside this run's output.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing = list(output_dir.iterdir())
+    if not existing:
+        return
+    if not clean:
+        raise FileExistsError(
+            f"--output {output_dir} is not empty (found {len(existing)} existing entries); "
+            "pass --clean to delete its contents first, or use an empty directory."
+        )
+    for entry in existing:
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input", required=True, help="Directory of input .parquet files (one row per note)")
@@ -492,8 +593,16 @@ def main() -> None:
             "stages against already-computed NER predictions without paying for GPU inference again."
         ),
     )
-    parser.add_argument("--salt-hex", required=True, help="64 hex chars (32 bytes)")
-    parser.add_argument("--key-hex", required=True, help="64 hex chars (32 bytes)")
+    parser.add_argument(
+        "--salt-hex",
+        default=None,
+        help="64 hex chars (32 bytes). Falls back to $TIDE_SALT_HEX if set and non-empty.",
+    )
+    parser.add_argument(
+        "--key-hex",
+        default=None,
+        help="64 hex chars (32 bytes). Falls back to $TIDE_KEY_HEX if set and non-empty.",
+    )
     parser.add_argument("--acc-num-salt", default="")
     parser.add_argument("--acc-num-study-id", default="")
     parser.add_argument("--chunk-size", type=int, default=512, help="Chunk size in tokens for long notes")
@@ -527,7 +636,26 @@ def main() -> None:
             "--output, even when there's only 1 - --output is always a directory."
         ),
     )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "Delete --output's existing contents before running. Without this flag, a "
+            "non-empty --output is rejected, since leftover worker{N}.parquet partitions "
+            "from a previous run (e.g. with more workers) would otherwise silently mix "
+            "into this run's output."
+        ),
+    )
     args = parser.parse_args()
+
+    # --salt-hex/--key-hex aren't marked required=True above so the env var fallback can
+    # apply first - enforce the "one of flag/env var" requirement explicitly here instead.
+    args.salt_hex = args.salt_hex or os.environ.get("TIDE_SALT_HEX") or None
+    args.key_hex = args.key_hex or os.environ.get("TIDE_KEY_HEX") or None
+    if not args.salt_hex:
+        parser.error("--salt-hex is required (or set a non-empty $TIDE_SALT_HEX)")
+    if not args.key_hex:
+        parser.error("--key-hex is required (or set a non-empty $TIDE_KEY_HEX)")
 
     _configure_logging()
 
@@ -539,7 +667,7 @@ def main() -> None:
         raise FileNotFoundError(f"No .parquet files found in {args.input}")
 
     output_dir = Path(args.output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_output_dir(output_dir, args.clean)
 
     if num_workers <= 1:
         run_pipeline(input_files, output_dir / "worker0.parquet", args, _device_for_worker(0, num_gpus))

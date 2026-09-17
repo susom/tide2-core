@@ -53,6 +53,7 @@ dependencies = [
     "spacy>=3.8,<4",
     "torch>=2.13,<3", # >=2.13 for CVE-2025-3000
     "transformers>=5.0,<6",
+    "filelock>=3.16,<4", # inter-process lock for concurrent model cache resolution/download
     # Data processing
     "numpy>=2,<3", # ABI-coupled to torch/spacy/pyarrow
     "intervaltree>=3.1,<4",

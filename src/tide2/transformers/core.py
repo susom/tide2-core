@@ -15,6 +15,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from filelock import FileLock
 
 # transformers exposes these via a lazy module __getattr__, which ty can't resolve statically.
 from transformers import AutoModelForTokenClassification  # ty: ignore[unresolved-import]
@@ -49,12 +50,27 @@ def _validate_model_directory(model_dir: Path) -> bool:
     return any((model_dir / f).is_file() for f in _WEIGHT_FILES)
 
 
+def _model_resolution_lock(model_name: str) -> FileLock:
+    """Per-model inter-process lock file, separate from the model directory itself
+    (which gets deleted/recreated under the lock) so the lock file always survives.
+    """
+    lock_dir = _get_cache_dir() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(lock_dir / f"{model_name.replace('/', '__')}.lock"))
+
+
 def _resolve_model_path(model_name: str, allow_huggingface_download: bool) -> str:
     """
     Resolve a model name to a local directory.
 
     Checks the local TIDE cache first, then falls back to downloading from
     HuggingFace Hub (using model_name as the repo id) when allowed.
+
+    Guarded by an inter-process file lock keyed on model_name: independent
+    processes (e.g. the pipeline runner's spawned GPU workers) can call this
+    concurrently for the same model, and without a lock one process can see
+    another's still-downloading directory as invalid (incomplete) and
+    shutil.rmtree() it out from under the in-progress download.
 
     Args:
         model_name: HuggingFace repo id or cached model directory name.
@@ -70,36 +86,37 @@ def _resolve_model_path(model_name: str, allow_huggingface_download: bool) -> st
     """
     local_model_path = _get_cache_dir() / "resources" / "models" / model_name
 
-    if local_model_path.exists() and local_model_path.is_dir():
-        if _validate_model_directory(local_model_path):
-            logger.info(f"Found model locally: {local_model_path}")
-            return str(local_model_path)
-        logger.warning(
-            f"Cached model directory {local_model_path} is incomplete "
-            f"(missing weight files or config.json). Re-downloading..."
-        )
-        shutil.rmtree(local_model_path)
+    with _model_resolution_lock(model_name):
+        if local_model_path.exists() and local_model_path.is_dir():
+            if _validate_model_directory(local_model_path):
+                logger.info(f"Found model locally: {local_model_path}")
+                return str(local_model_path)
+            logger.warning(
+                f"Cached model directory {local_model_path} is incomplete "
+                f"(missing weight files or config.json). Re-downloading..."
+            )
+            shutil.rmtree(local_model_path)
 
-    if not allow_huggingface_download:
-        raise ValueError(
-            f"Model '{model_name}' not found locally at {local_model_path} and "
-            f"HuggingFace Hub downloads are disabled (allow_huggingface_download=False)."
-        )
+        if not allow_huggingface_download:
+            raise ValueError(
+                f"Model '{model_name}' not found locally at {local_model_path} and "
+                f"HuggingFace Hub downloads are disabled (allow_huggingface_download=False)."
+            )
 
-    logger.info(f"Downloading model '{model_name}' from HuggingFace Hub...")
-    from huggingface_hub import snapshot_download
+        logger.info(f"Downloading model '{model_name}' from HuggingFace Hub...")
+        from huggingface_hub import snapshot_download
 
-    local_model_path.mkdir(parents=True, exist_ok=True)
-    snapshot_download(repo_id=model_name, local_dir=str(local_model_path))
-    if not _validate_model_directory(local_model_path):
-        raise ValueError(
-            f"Downloaded model '{model_name}' from HuggingFace Hub is incomplete at "
-            f"{local_model_path}. Missing weight files (model.safetensors or "
-            f"pytorch_model.bin) or config.json. Check your network connection or "
-            f"try: huggingface-cli login"
-        )
-    logger.info(f"Successfully downloaded model to: {local_model_path}")
-    return str(local_model_path)
+        local_model_path.mkdir(parents=True, exist_ok=True)
+        snapshot_download(repo_id=model_name, local_dir=str(local_model_path))
+        if not _validate_model_directory(local_model_path):
+            raise ValueError(
+                f"Downloaded model '{model_name}' from HuggingFace Hub is incomplete at "
+                f"{local_model_path}. Missing weight files (model.safetensors or "
+                f"pytorch_model.bin) or config.json. Check your network connection or "
+                f"try: huggingface-cli login"
+            )
+        logger.info(f"Successfully downloaded model to: {local_model_path}")
+        return str(local_model_path)
 
 
 class TransformerCore:

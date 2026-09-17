@@ -123,20 +123,33 @@ recognizers you need and an `AnonymizerEngine` with the anonymizers you need,
 then call them directly:
 
 ```python
+import spacy
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from tide2.anonymizers import HipsNamesAnonymizer
 from tide2.recognizers import PhoneRecognizer, TransformersRecognizer
+from tide2.recognizers.nlp_engine import _BlankSpacyNlpEngine
 
 registry = RecognizerRegistry()
 registry.add_recognizer(TransformersRecognizer(model_name="StanfordAIMI/stanford-deidentifier-v2"))
 registry.add_recognizer(PhoneRecognizer())
-analyzer = AnalyzerEngine(registry=registry)
+registry.remove_recognizer("SpacyRecognizer")
+
+# AnalyzerEngine requires an NlpEngine even when recognition is regex/transformer-based.
+# The default SpacyNlpEngine eagerly loads en_core_web_lg, which isn't shipped here -
+# _BlankSpacyNlpEngine provides tokenization only, via spacy.blank(), instead.
+nlp_engine = _BlankSpacyNlpEngine(loaded_spacy_model=spacy.blank("en"))
+analyzer = AnalyzerEngine(registry=registry, nlp_engine=nlp_engine)
 
 anonymizer = AnonymizerEngine()
 anonymizer.add_anonymizer(HipsNamesAnonymizer)
+
+# 32-byte salt/key for HIPS's deterministic cryptographic anonymization - generate your
+# own with os.urandom(32) and manage them as secrets; never reuse these example values.
+salt = bytes.fromhex("00" * 32)
+key = bytes.fromhex("11" * 32)
 
 results = analyzer.analyze(text="Call Dr. Smith at 555-123-4567.", language="en")
 anonymized = anonymizer.anonymize(

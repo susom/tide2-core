@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+from presidio_analyzer import RecognizerResult as AnalyzerRecognizerResult
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_anonymizer.entities import RecognizerResult
@@ -59,9 +60,9 @@ recognizer = LlmJsonRecognizer(
     prompt_name=PROMPT_NAME,
 )
 
-recognizer_results_by_note: dict[str, list[RecognizerResult]] = {}
+recognizer_results_by_note: dict[str, list[AnalyzerRecognizerResult]] = {}
 for note_id, note_text in notes.items():
-    results = recognizer.analyze(text=note_text, entities=None, nlp_artifacts=None)
+    results = recognizer.analyze(text=note_text, entities=recognizer.supported_entities_list, nlp_artifacts=None)
     recognizer_results_by_note[note_id] = results
     print(f"  [{note_id}] {len(results)} entities found")
 
@@ -90,9 +91,15 @@ for note_id, note_text in notes.items():
         continue
 
     operators = {"DEFAULT": OperatorConfig("masking")}
+    # presidio-anonymizer defines its own RecognizerResult distinct from presidio-analyzer's;
+    # convert explicitly rather than relying on structural compatibility.
+    anonymizer_results = [
+        RecognizerResult(entity_type=r.entity_type, start=r.start, end=r.end, score=r.score)
+        for r in recognizer_results
+    ]
     anonymized = engine.anonymize(
         text=note_text,
-        analyzer_results=recognizer_results,
+        analyzer_results=anonymizer_results,
         operators=operators,
     )
 
