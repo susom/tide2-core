@@ -14,12 +14,31 @@ This implements the identifier_hashing_algorithm compatible with the BigQuery fu
     );
 """
 
+import contextlib
 import math
 from hashlib import sha256
 from typing import Any
 
+import numpy as np
+import pandas as pd
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
+
+
+def _is_null(value: Any) -> bool:
+    """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
+    if value is None:
+        return True
+    with contextlib.suppress(Exception):
+        res = pd.isna(value)
+        if isinstance(res, (bool, np.bool_)):
+            return bool(res)
+    with contextlib.suppress(TypeError, ValueError):
+        if isinstance(value, float) and math.isnan(value):
+            return True
+        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
+            return True
+    return False
 
 
 class AccessionNumberHashAnonymizer(Operator):
@@ -65,14 +84,12 @@ class AccessionNumberHashAnonymizer(Operator):
 
         Args:
             value: The input value (may be None, NaN, numeric, or string)
-            default: The default value to use if value is None or NaN
+            default: The default value to use if value is null/NaN
 
         Returns:
-            Uppercase trimmed value, or default if value is None or NaN
+            Uppercase trimmed value, or default if value is null/NaN
         """
-        if value is None:
-            return default
-        if isinstance(value, float) and math.isnan(value):
+        if _is_null(value):
             return default
         return str(value).strip().upper()
 

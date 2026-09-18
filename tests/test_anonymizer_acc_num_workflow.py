@@ -182,6 +182,38 @@ class TestAnonymizerWorkerAccNumDirect:
         items = orjson.loads(res["anonymizer_results_json"])
         assert items[0]["text"] == expected_hash
 
+    def test_numpy_and_pandas_null_patient_uids_use_default(self):
+        """NumPy float NaNs and pd.NA resolve to default [E] token and random jitter fallback."""
+        import numpy as np
+        import pandas as pd
+
+        salt = "salt_x"
+        study_id = "study_y"
+        worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
+
+        note = "Accession: ACC55555."
+        start = note.index("ACC55555")
+        end = start + len("ACC55555")
+        recognizer_json = orjson.dumps([{"entity_type": "ACC_NUM", "start": start, "end": end, "score": 1.0}]).decode(
+            "utf-8"
+        )
+        expected_hash = _compute_expected_hash(salt, study_id, None, "ACC55555")
+
+        for null_val in [np.float32("nan"), np.float64("nan"), pd.NA]:
+            res = worker.process_note(
+                note_text=note,
+                original_text_hash="h_null_scalar",
+                recognizer_results_json=recognizer_json,
+                patient_uid=null_val,
+                jitter=10,
+            )
+            items = orjson.loads(res["anonymizer_results_json"])
+            assert items[0]["text"] == expected_hash
+
+            # Jitter fallback when patient ID is null scalar: falls back to random jitter
+            jitter_val = worker._compute_jitter_for_patient(null_val)
+            assert isinstance(jitter_val, int)
+
     def test_numeric_patient_uid_worker(self):
         """Numeric patient_uid from integer column is converted to string for hashing."""
         salt = "salt_x"

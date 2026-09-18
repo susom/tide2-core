@@ -95,6 +95,19 @@ class TestAccessionNumberHashAnonymizer:
         )
         assert actual == expected
 
+    def test_numpy_and_pandas_null_scalars_resolve_to_default(self):
+        """NumPy float NaNs and pandas pd.NA resolve to default token [E]."""
+        import numpy as np
+        import pandas as pd
+
+        expected = _expected_bq_hash("salt", "study", None, "ACC99")
+        for null_val in [np.float32("nan"), np.float64("nan"), np.nan, pd.NA]:
+            actual = self.anonymizer.operate(
+                "ACC99",
+                {"salt": "salt", "study_id": "study", "patient_uid": null_val},
+            )
+            assert actual == expected
+
     def test_numeric_patient_uid(self):
         """Numeric patient_uid is converted to string for hashing."""
         expected = _expected_bq_hash("salt", "study", "12345", "ACC99")

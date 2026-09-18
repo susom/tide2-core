@@ -20,6 +20,7 @@ Output columns:
     - processing_timestamp: ISO timestamp of processing
 """
 
+import contextlib
 import hashlib
 import logging
 import math
@@ -30,7 +31,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import orjson
+import pandas as pd
 import ray
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
@@ -68,6 +71,22 @@ class NoteProcessingTimeoutError(Exception):
     """Raised when note processing exceeds the timeout limit."""
 
     pass
+
+
+def _is_null(value: Any) -> bool:
+    """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
+    if value is None:
+        return True
+    with contextlib.suppress(Exception):
+        res = pd.isna(value)
+        if isinstance(res, (bool, np.bool_)):
+            return bool(res)
+    with contextlib.suppress(TypeError, ValueError):
+        if isinstance(value, float) and math.isnan(value):
+            return True
+        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
+            return True
+    return False
 
 
 @ray.remote
@@ -254,9 +273,9 @@ class AnonymizerWorker:
             }
         )
 
-        # Convert numeric patient_uid to string, map NaN to None
+        # Convert numeric patient_uid to string, map null/NaN to None
         clean_patient_uid: str | None = None
-        if patient_uid is not None and not (isinstance(patient_uid, float) and math.isnan(patient_uid)):
+        if not _is_null(patient_uid):
             clean_patient_uid = str(patient_uid)
 
         # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
@@ -313,11 +332,7 @@ class AnonymizerWorker:
         Returns:
             Integer jitter value in days.
         """
-        if (
-            patient_uid is None
-            or (isinstance(patient_uid, float) and math.isnan(patient_uid))
-            or str(patient_uid).strip() == ""
-        ):
+        if _is_null(patient_uid) or str(patient_uid).strip() == "":
             # Fallback to random jitter if no patient ID
             return secrets.randbelow(357) - 178  # Random between -178 and +178
 
@@ -456,7 +471,7 @@ class AnonymizerWorker:
             Dictionary with processing results for this note.
         """
         # Compute jitter from patient ID if not provided or if NaN
-        jitter_missing = jitter is None or (isinstance(jitter, float) and math.isnan(jitter))
+        jitter_missing = _is_null(jitter)
         if jitter_missing:
             if self.jitter_required:
                 raise ValueError(f"Jitter value is required but missing for note {original_text_hash[:16]}")
