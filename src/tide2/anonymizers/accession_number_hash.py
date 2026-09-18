@@ -14,10 +14,31 @@ This implements the identifier_hashing_algorithm compatible with the BigQuery fu
     );
 """
 
+import contextlib
+import math
 from hashlib import sha256
+from typing import Any
 
+import numpy as np
+import pandas as pd
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
+
+
+def _is_null(value: Any) -> bool:
+    """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
+    if value is None:
+        return True
+    with contextlib.suppress(Exception):
+        res = pd.isna(value)
+        if isinstance(res, (bool, np.bool_)):
+            return bool(res)
+    with contextlib.suppress(TypeError, ValueError):
+        if isinstance(value, float) and math.isnan(value):
+            return True
+        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
+            return True
+    return False
 
 
 class AccessionNumberHashAnonymizer(Operator):
@@ -33,8 +54,10 @@ class AccessionNumberHashAnonymizer(Operator):
     Parameters:
         salt (str, optional): Salt value for hashing. Defaults to '[S]' if None.
         study_id (str, optional): Study identifier. Defaults to '[U]' if None.
-        entity_type (str): The entity type being anonymized (e.g., 'ACC_NUM').
+        patient_uid (str, optional): Patient identifier (SQL entity parameter).
             Defaults to '[E]' if None.
+        entity_type (str, optional): The Presidio entity type being anonymized
+            (e.g., 'ACC_NUM'). Provided by Presidio; defaults to 'DEFAULT'.
     """
 
     # Default values matching the SQL COALESCE behavior
@@ -52,7 +75,7 @@ class AccessionNumberHashAnonymizer(Operator):
             "ACCESSION_NUMBER",
         }
 
-    def _coalesce_param(self, value: str | None, default: str) -> str:
+    def _coalesce_param(self, value: Any, default: str) -> str:
         """
         Mimic SQL COALESCE(UPPER(TRIM(value)), default) behavior.
 
@@ -60,34 +83,36 @@ class AccessionNumberHashAnonymizer(Operator):
         So COALESCE(UPPER(TRIM('')), '[S]') returns '' (empty string), not '[S]'.
 
         Args:
-            value: The input value (may be None)
-            default: The default value to use if value is None
+            value: The input value (may be None, NaN, numeric, or string)
+            default: The default value to use if value is null/NaN
 
         Returns:
-            Uppercase trimmed value, or default if value is None
+            Uppercase trimmed value, or default if value is null/NaN
         """
-        if value is None:
+        if _is_null(value):
             return default
-        return value.strip().upper()
+        return str(value).strip().upper()
 
     def operate(self, text: str, params: dict) -> str:
         """
         Anonymize the accession number using deterministic hashing.
 
-        The algorithm concatenates salt, study_id, entity, and identifier with '|'
-        separator, applies SHA256, and returns the first 16 characters of the
+        The algorithm concatenates salt, study_id, entity (patient_uid), and identifier
+        with '|' separator, applies SHA256, and returns the first 16 characters of the
         uppercase hex digest.
 
         Args:
             text: The accession number to anonymize
-            params: Dictionary containing optional 'salt', 'study_id', and 'entity_type'
+            params: Dictionary containing optional 'salt', 'study_id', 'patient_uid',
+                and 'entity_type'
 
         Returns:
             16-character uppercase hexadecimal hash
         """
         salt = params.get("salt")
         study_id = params.get("study_id")
-        entity = params.get("entity_type")
+        # Read patient_uid for SQL entity component; entity_type is reserved by Presidio
+        entity = params.get("patient_uid")
 
         # Apply COALESCE logic matching the SQL function
         salt_part = self._coalesce_param(salt, self.DEFAULT_SALT)

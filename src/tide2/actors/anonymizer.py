@@ -20,6 +20,7 @@ Output columns:
     - processing_timestamp: ISO timestamp of processing
 """
 
+import contextlib
 import hashlib
 import logging
 import math
@@ -30,7 +31,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import orjson
+import pandas as pd
 import ray
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
@@ -68,6 +71,22 @@ class NoteProcessingTimeoutError(Exception):
     """Raised when note processing exceeds the timeout limit."""
 
     pass
+
+
+def _is_null(value: Any) -> bool:
+    """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
+    if value is None:
+        return True
+    with contextlib.suppress(Exception):
+        res = pd.isna(value)
+        if isinstance(res, (bool, np.bool_)):
+            return bool(res)
+    with contextlib.suppress(TypeError, ValueError):
+        if isinstance(value, float) and math.isnan(value):
+            return True
+        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
+            return True
+    return False
 
 
 @ray.remote
@@ -229,7 +248,7 @@ class AnonymizerWorker:
     def _create_operators_for_note(
         self,
         date_jitter: int | None = None,
-        patient_uid: str | None = None,
+        patient_uid: Any = None,
     ) -> dict[str, OperatorConfig]:
         """
         Create operators including per-note parameters.
@@ -254,14 +273,18 @@ class AnonymizerWorker:
             }
         )
 
-        # ACC_NUM uses the accession_number_hash anonymizer with per-note patient_uid
-        # The entity parameter is the patient_uid which varies per note
+        # Convert numeric patient_uid to string, map null/NaN to None
+        clean_patient_uid: str | None = None
+        if not _is_null(patient_uid):
+            clean_patient_uid = str(patient_uid)
+
+        # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
         operators["ACC_NUM"] = OperatorConfig(
             "accession_number_hash",
             {
                 "salt": self.acc_num_salt,
                 "study_id": self.acc_num_study_id,
-                "entity_type": patient_uid,  # Per-note: patient_uid as entity
+                "patient_uid": clean_patient_uid,
             },
         )
 
@@ -295,7 +318,7 @@ class AnonymizerWorker:
             logger.warning(f"Failed to parse recognizer results: {e}")
             return []
 
-    def _compute_jitter_for_patient(self, patient_uid: str | None) -> int:
+    def _compute_jitter_for_patient(self, patient_uid: Any) -> int:
         """
         Compute deterministic jitter for a patient when not provided.
 
@@ -303,18 +326,18 @@ class AnonymizerWorker:
         consistent jitter for the same patient across runs.
 
         Args:
-            patient_uid: Patient identifier. If None or empty,
+            patient_uid: Patient identifier. If None, NaN, or empty,
                 generates a random jitter.
 
         Returns:
             Integer jitter value in days.
         """
-        if not patient_uid:
+        if _is_null(patient_uid) or str(patient_uid).strip() == "":
             # Fallback to random jitter if no patient ID
             return secrets.randbelow(357) - 178  # Random between -178 and +178
 
         return derive_date_jitter(
-            patient_id=patient_uid,
+            patient_id=str(patient_uid),
             salt=self.salt,
             key=self.key,
             max_jitter_days=180,
@@ -448,7 +471,7 @@ class AnonymizerWorker:
             Dictionary with processing results for this note.
         """
         # Compute jitter from patient ID if not provided or if NaN
-        jitter_missing = jitter is None or (isinstance(jitter, float) and math.isnan(jitter))
+        jitter_missing = _is_null(jitter)
         if jitter_missing:
             if self.jitter_required:
                 raise ValueError(f"Jitter value is required but missing for note {original_text_hash[:16]}")
