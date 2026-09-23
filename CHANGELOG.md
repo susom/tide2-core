@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## [1.3.1](https://github.com/susom/tide2-core/compare/v1.3.0...v1.3.1) (2026-09-23)
+
+
+### Bug Fixes
+
+* **anonymizer:** scope accession hash to per-note patient_uid ([#59](https://github.com/susom/tide2-core/issues/59)) ([5939034](https://github.com/susom/tide2-core/commit/593903430daafcb6db9b8c1ced1c316f6f269967))
+* **deps:** bump vulnerable dependencies to patched versions ([#57](https://github.com/susom/tide2-core/issues/57)) ([b7ee611](https://github.com/susom/tide2-core/commit/b7ee61169bd612683221c8ee7b0a608651546eca))
+
 ## [1.3.0](https://github.com/susom/tide2-core/compare/v1.2.4...v1.3.0) (2026-08-26)
 
 
