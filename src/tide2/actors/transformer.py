@@ -114,6 +114,8 @@ class TransformerInferenceActor:
        tuples; span-level IoU).
     """
 
+    _aggregate_bio: bool = False
+
     def __init__(
         self,
         model_name: str,
@@ -123,6 +125,7 @@ class TransformerInferenceActor:
         gpu_batch_size: int | None = None,
         allow_huggingface_download: bool = True,
         window_overlap: int = _DEFAULT_WINDOW_OVERLAP,
+        aggregate_bio: bool = False,
     ) -> None:
         """
         Initialize the actor with a transformer model on GPU.
@@ -143,9 +146,16 @@ class TransformerInferenceActor:
                 exceeds the per-window budget (default 40, matching the upstream
                 char chunker's overlap). Clamped to ``[0, budget - 1]``. Overlap
                 duplicates are removed downstream (BIO dedup + reassembly IoU).
+            aggregate_bio: If True, aggregate raw BIO tokens to document-level
+                Presidio entities directly inside this actor, emitting
+                ``recognizer_results_json``. If False (default), emit raw BIO
+                tokens in ``predictions_raw_json`` for downstream aggregation.
         """
         self.model_name = model_name
         self._window_overlap = max(0, window_overlap)
+        self._aggregate_bio = aggregate_bio
+        if self._aggregate_bio:
+            self._recognizer_name = format_transformer_recognizer_name(model_name)
 
         # Count of CUDA OOMs this actor caught and recovered from (by shrinking
         # the forward batch). Read by the GPU OOM-recovery test to prove the
@@ -212,7 +222,7 @@ class TransformerInferenceActor:
         """Get the model pipeline (for backwards compatibility)."""
         return self._core.pipeline
 
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
         """
         Process a batch of **whole notes** through transformer inference (raw tokens).
 
@@ -248,23 +258,42 @@ class TransformerInferenceActor:
 
         # Handle empty batches
         if batch_size == 0:
-            return {
+            res: dict[str, list[Any]] = {
                 "text_hash": [],
                 "patient_id": [],
                 "note_text": [],
-                "predictions_raw_json": [],
             }
+            if self._aggregate_bio:
+                res["recognizer_results_json"] = []
+                res["entity_count"] = []
+                res["processing_timestamp"] = []
+            else:
+                res["predictions_raw_json"] = []
+            for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
+                if col in batch:
+                    res[col] = []
+            return res
 
         # Filter out None/empty texts
         note_texts = list(note_texts)
         valid_indices = [i for i, t in enumerate(note_texts) if t]
         if not valid_indices:
-            return {
+            res = {
                 "text_hash": list(text_hashes),
                 "patient_id": list(patient_ids),
                 "note_text": note_texts,
-                "predictions_raw_json": ["[]"] * batch_size,
             }
+            if self._aggregate_bio:
+                timestamp = datetime.now(tz=UTC).isoformat()
+                res["recognizer_results_json"] = ["[]"] * batch_size
+                res["entity_count"] = [0] * batch_size
+                res["processing_timestamp"] = [timestamp] * batch_size
+            else:
+                res["predictions_raw_json"] = ["[]"] * batch_size
+            for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
+                if col in batch:
+                    res[col] = list(batch[col])
+            return res
 
         valid_texts = [note_texts[i] for i in valid_indices]
 
@@ -273,20 +302,82 @@ class TransformerInferenceActor:
         raw_results = self._run_inference_raw_with_oom_recovery(valid_texts)
         self._log_gpu_mem(f"after __call__ (n={len(valid_texts)})")
 
-        # Map predictions back to original indices and serialize to JSON
-        predictions_raw_json_list = ["[]"] * batch_size
-        for idx, preds in zip(valid_indices, raw_results, strict=True):
-            try:
-                predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
-            except Exception:
-                logger.exception(f"Error serializing raw predictions for note {text_hashes[idx]}")
+        if self._aggregate_bio:
+            timestamp = datetime.now(tz=UTC).isoformat()
+            results_json_list: list[str] = ["[]"] * batch_size
+            entity_counts: list[int] = [0] * batch_size
+            for idx, preds in zip(valid_indices, raw_results, strict=True):
+                try:
+                    r_json, count = self._format_note(preds, note_texts[idx] or "")
+                except Exception:
+                    logger.exception(f"Error aggregating predictions for note {text_hashes[idx]}")
+                    r_json, count = "[]", 0
+                results_json_list[idx] = r_json
+                entity_counts[idx] = count
 
-        return {
-            "text_hash": list(text_hashes),
-            "patient_id": list(patient_ids),
-            "note_text": note_texts,
-            "predictions_raw_json": predictions_raw_json_list,
-        }
+            res = {
+                "text_hash": list(text_hashes),
+                "patient_id": list(patient_ids),
+                "note_text": note_texts,
+                "recognizer_results_json": results_json_list,
+                "entity_count": entity_counts,
+                "processing_timestamp": [timestamp] * batch_size,
+            }
+        else:
+            # Map predictions back to original indices and serialize to JSON
+            predictions_raw_json_list = ["[]"] * batch_size
+            for idx, preds in zip(valid_indices, raw_results, strict=True):
+                try:
+                    predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
+                except Exception:
+                    logger.exception(f"Error serializing raw predictions for note {text_hashes[idx]}")
+
+            res = {
+                "text_hash": list(text_hashes),
+                "patient_id": list(patient_ids),
+                "note_text": note_texts,
+                "predictions_raw_json": predictions_raw_json_list,
+            }
+
+        for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
+            if col in batch:
+                res[col] = list(batch[col])
+
+        return res
+
+    def _format_note(self, raw_tokens: list[dict], note_text: str) -> tuple[str, int]:
+        """Aggregate one note's raw BIO tokens into recognizer_results_json."""
+        if not raw_tokens or not note_text:
+            return "[]", 0
+
+        raw_tokens = _dedupe_raw_predictions(raw_tokens)
+        aggregated = aggregate_bio_tokens(raw_tokens, note_text)
+        entities = [
+            {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"]} for s in aggregated
+        ]
+        entities = deduplicate_overlapping_entities(entities, iou_threshold=0.5)
+
+        ner_results = []
+        for e in entities:
+            start = e["start"]
+            end = e["end"]
+            matched_text = note_text[start:end] if note_text and start < len(note_text) else ""
+            ner_results.append(
+                {
+                    "entity_type": e["entity"],
+                    "start": start,
+                    "end": end,
+                    "score": e["score"],
+                    "analysis_explanation": None,
+                    "recognition_metadata": {
+                        "recognizer_name": self._recognizer_name,
+                        "matched_pattern": matched_text,
+                        "recognizer_identifier": f"{self._recognizer_name}_{id(e)}",
+                    },
+                }
+            )
+
+        return json.dumps(ner_results, ensure_ascii=False), len(ner_results)
 
     def _log_gpu_mem(self, stage: str) -> None:
         """Log per-``__call__`` GPU memory when ``TIDE2_LOG_GPU_MEM`` is set.
@@ -371,15 +462,16 @@ class TransformerInferenceActor:
 
         # 3. Sort by token length within THIS __call__ so multi-slice batches
         #    (batch_size > gpu_batch_size) don't pad short windows to the batch max.
-        #    Merge keys on window.owner, so no un-sort is needed.
-        windows.sort(key=lambda w: len(w.content_ids))
+        sorted_indices = sorted(range(len(windows)), key=lambda i: len(windows[i].content_ids))
+        sorted_windows = [windows[i] for i in sorted_indices]
 
-        # 4. Forward (halve-and-retry on OOM), then merge each window onto its
-        #    owner. Offsets are document-relative, so this is a plain concatenation;
-        #    order across windows does not matter (downstream aggregation sorts by
-        #    start position).
-        for window, preds in zip(windows, self._forward_windows(windows), strict=True):
-            results[window.owner].extend(preds)
+        # 4. Forward through GPU in batches with OOM-halving recovery
+        sorted_preds = self._forward_windows(sorted_windows)
+
+        # 5. Restore original document window order before merging
+        preds_by_idx = dict(zip(sorted_indices, sorted_preds, strict=True))
+        for orig_idx, window in enumerate(windows):
+            results[window.owner].extend(preds_by_idx[orig_idx])
 
         return results
 
@@ -538,7 +630,7 @@ class BIOAggregationActor:
         batch_size = len(note_texts)
 
         if batch_size == 0:
-            return {
+            res: dict[str, list[Any]] = {
                 "text_hash": [],
                 "patient_id": [],
                 "note_text": [],
@@ -546,6 +638,10 @@ class BIOAggregationActor:
                 "entity_count": [],
                 "processing_timestamp": [],
             }
+            for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
+                if col in batch:
+                    res[col] = []
+            return res
 
         timestamp = datetime.now(tz=UTC).isoformat()
         results_json_list: list[str] = []
@@ -559,7 +655,7 @@ class BIOAggregationActor:
             results_json_list.append(results_json)
             entity_counts.append(count)
 
-        return {
+        res = {
             "text_hash": list(text_hashes),
             "patient_id": list(patient_ids),
             "note_text": list(note_texts),
@@ -567,6 +663,10 @@ class BIOAggregationActor:
             "entity_count": entity_counts,
             "processing_timestamp": [timestamp] * batch_size,
         }
+        for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
+            if col in batch:
+                res[col] = list(batch[col])
+        return res
 
 
 def create_transformer_actor(
@@ -577,6 +677,7 @@ def create_transformer_actor(
     gpu_batch_size: int | None = None,
     allow_huggingface_download: bool = True,
     window_overlap: int = _DEFAULT_WINDOW_OVERLAP,
+    aggregate_bio: bool = False,
 ) -> type[TransformerInferenceActor]:
     """
     Factory function to create a TransformerInferenceActor class with specific config.
@@ -595,6 +696,8 @@ def create_transformer_actor(
             when local cache and GCS both miss.
         window_overlap: Token overlap between adjacent windows for over-budget
             chunks (default 40).
+        aggregate_bio: If True, configure the actor to aggregate raw BIO tokens
+            to document-level Presidio entities directly inside the actor.
 
     Returns:
         A class that can be used with Ray Data's map_batches().
@@ -619,6 +722,7 @@ def create_transformer_actor(
                 gpu_batch_size=gpu_batch_size,
                 allow_huggingface_download=allow_huggingface_download,
                 window_overlap=window_overlap,
+                aggregate_bio=aggregate_bio,
             )
 
     return ConfiguredTransformerActor

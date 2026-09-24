@@ -81,6 +81,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         ("worker_num_cpus", "worker_num_cpus"),
         ("write_cpus", "write_cpus"),
         ("enable_checkpoint", "enable_checkpoint"),
+        ("override_num_blocks", "override_num_blocks"),
     ]:
         val = getattr(args, attr, None)
         if val is not None:
@@ -132,6 +133,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("agg_num_cpus", "agg_num_cpus"),
                 ("transformer_cpus", "transformer_cpus"),
                 ("enable_checkpoint", "enable_checkpoint"),
+                ("override_num_blocks", "override_num_blocks"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -192,6 +194,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             t_kw: dict = {}
             for attr, key in [
                 ("num_gpus", "num_gpus"),
+                ("gpu_batch_size", "gpu_batch_size"),
                 ("bucket_name", "bucket_name"),
                 ("project_id", "project_id"),
                 ("chunk_overlap", "chunk_overlap"),
@@ -203,6 +206,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("agg_num_cpus", "agg_num_cpus"),
                 ("transformer_cpus", "transformer_cpus"),
                 ("enable_checkpoint", "enable_checkpoint"),
+                ("override_num_blocks", "override_num_blocks"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -218,6 +222,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
                 ("enable_checkpoint", "enable_checkpoint"),
+                ("override_num_blocks", "override_num_blocks"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -239,6 +244,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
                 ("enable_checkpoint", "enable_checkpoint"),
+                ("override_num_blocks", "override_num_blocks"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -358,7 +364,16 @@ Examples:
     run_p.add_argument("--batch-size", type=int, help="Batch size per actor (default: 150 recognizer, 200 anonymizer)")
     run_p.add_argument("--batch-timeout", type=int, help="Batch timeout in seconds (default: 120, recognizer only)")
     run_p.add_argument("--num-cpus", type=int, help="Total CPUs for Ray cluster")
-    run_p.add_argument("--num-gpus", type=int, help="Number of GPUs (transformer jobs)")
+    run_p.add_argument(
+        "--num-gpus",
+        type=float,
+        help="Number of GPUs (transformer jobs, supports fractional e.g. 0.33 for GPU multiplexing)",
+    )
+    run_p.add_argument(
+        "--override-num-blocks",
+        type=int,
+        help="Explicit number of Ray Data blocks to split input into (e.g. 32 to fix block starvation)",
+    )
     run_p.add_argument(
         "--gpu-batch-size",
         type=int,
