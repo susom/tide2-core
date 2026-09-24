@@ -271,6 +271,10 @@ force-single-line = true
 "src/tide2/runner/cli.py" = [
     "PLR0915", # Too many statements — CLI dispatch and argparse setup are inherently verbose
 ]
+"scripts/**/*.py" = [
+    "S603", # subprocess call — ops scripts shell out to gcloud/docker/git by design
+    "S607", # partial executable path — gcloud/docker/git resolved from PATH on purpose
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tide2"]
