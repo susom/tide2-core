@@ -273,10 +273,12 @@ class AnonymizerWorker:
             }
         )
 
-        # Convert numeric patient_uid to string, map null/NaN to None
+        # Convert numeric patient_uid to string, map null/NaN/nan/none to None
         clean_patient_uid: str | None = None
         if not _is_null(patient_uid):
-            clean_patient_uid = str(patient_uid)
+            val_str = str(patient_uid).strip()
+            if val_str.lower() not in ("nan", "none", "null", ""):
+                clean_patient_uid = val_str
 
         # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
         operators["ACC_NUM"] = OperatorConfig(
@@ -332,12 +334,14 @@ class AnonymizerWorker:
         Returns:
             Integer jitter value in days.
         """
-        if _is_null(patient_uid) or str(patient_uid).strip() == "":
-            # Fallback to random jitter if no patient ID
+        if _is_null(patient_uid):
+            return secrets.randbelow(357) - 178  # Random between -178 and +178
+        val_str = str(patient_uid).strip()
+        if val_str.lower() in ("nan", "none", "null", ""):
             return secrets.randbelow(357) - 178  # Random between -178 and +178
 
         return derive_date_jitter(
-            patient_id=str(patient_uid),
+            patient_id=val_str,
             salt=self.salt,
             key=self.key,
             max_jitter_days=180,

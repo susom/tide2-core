@@ -20,6 +20,7 @@ Thread/Process Safety:
     recognizers per-note.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -29,6 +30,7 @@ from datetime import datetime
 from typing import Any
 
 import numpy as np
+import orjson
 import ray
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer import EntityRecognizer
@@ -72,6 +74,28 @@ class _BlankSpacyNlpEngine(SpacyNlpEngine):
         self.nlp = {"en": loaded_spacy_model}
         self.models = [{"lang_code": "en", "model_name": "blank"}]
         self.ner_model_configuration = NerModelConfiguration()
+
+
+class _DeduplicateLogFilter(logging.Filter):
+    """Suppress duplicate log messages to prevent console flood during multi-worker execution.
+
+    Repeated identical warnings (e.g. from Presidio recognizers or regex engines)
+    can saturate stdout/stderr when running across many concurrent CPU workers.
+    This filter only permits each unique (level, message_template) pair once per process.
+    """
+
+    def __init__(self, max_entries: int = 1000) -> None:
+        super().__init__()
+        self._seen: set[tuple[int, str]] = set()
+        self._max_entries = max_entries
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        key = (record.levelno, str(record.msg))
+        if key in self._seen:
+            return False
+        if len(self._seen) < self._max_entries:
+            self._seen.add(key)
+        return True
 
 
 # Threshold constants for logging
@@ -256,6 +280,11 @@ class RecognizerWorker:
             context_aware_enhancer=NoOpContextEnhancer(),  # No-op enhancer for batch performance
         )
 
+        # Attach deduplicate log filter to suppress repeated Presidio warnings
+        log_filter = _DeduplicateLogFilter()
+        logging.getLogger("presidio-analyzer").addFilter(log_filter)
+        logging.getLogger("tide2").addFilter(log_filter)
+
         logger.info("RecognizerWorker initialized with optimized AnalyzerEngine")
 
     def process_note(
@@ -351,13 +380,17 @@ class RecognizerWorker:
         # Add known values recognizers if patient PHI is available
         if patient_identifiers and not _is_null(patient_identifiers):
             try:
-                phi_dict = (
-                    json.loads(patient_identifiers) if isinstance(patient_identifiers, str) else patient_identifiers
-                )
+                if isinstance(patient_identifiers, dict):
+                    phi_dict = patient_identifiers
+                elif isinstance(patient_identifiers, (str, bytes)):
+                    phi_dict = orjson.loads(patient_identifiers)
+                else:
+                    phi_dict = None
+
                 if phi_dict and isinstance(phi_dict, dict):
                     known_value_recognizers = create_recognizers_for_patient(phi_dict)
                     ad_hoc_recognizers.extend(known_value_recognizers)
-            except (json.JSONDecodeError, TypeError) as e:
+            except (orjson.JSONDecodeError, json.JSONDecodeError, TypeError) as e:
                 logger.warning(f"Failed to parse patient_identifiers for note {text_hash}: {e}")
 
         return ad_hoc_recognizers
@@ -473,6 +506,10 @@ class RecognizerWorker:
             Dictionary with columnar results for all notes in the batch.
         """
         out_text_hashes = []
+        out_note_texts = []
+        out_patient_uids = []
+        out_row_ids = []
+        out_jitters = []
         results_json_list = []
         entity_counts = []
         processing_statuses = []
@@ -484,6 +521,11 @@ class RecognizerWorker:
         input_text_hashes = cols["text_hash"]
         cached_results_col = cols.get("recognizer_results_json", [None] * batch_size)
         patient_identifiers_col = cols.get("patient_identifiers", [None] * batch_size)
+        patient_uids_col = cols.get("patient_uid", cols.get("patient_id", [None] * batch_size))
+        jitters_col = cols.get("jitter", [None] * batch_size)
+        row_ids_col = cols.get("row_id", [None] * batch_size)
+        has_jitter = "jitter" in cols
+        has_row_id = "row_id" in cols
 
         for i in range(batch_size):
             note_text = note_texts[i]
@@ -498,7 +540,20 @@ class RecognizerWorker:
                     cached_results=cached_results,
                     patient_identifiers=patient_identifiers,
                 )
+                p_uid = patient_uids_col[i]
+                p_uid = str(text_hash) if _is_null(p_uid) or str(p_uid).strip() == "" else str(p_uid)
+
+                if has_row_id and not _is_null(row_ids_col[i]):
+                    r_id = row_ids_col[i]
+                else:
+                    r_id = hashlib.sha256(f"{text_hash}:{p_uid}".encode()).hexdigest()
+
                 out_text_hashes.append(result["text_hash"])
+                out_note_texts.append(note_text)
+                out_patient_uids.append(p_uid)
+                out_row_ids.append(r_id)
+                if has_jitter:
+                    out_jitters.append(jitters_col[i])
                 results_json_list.append(result["recognizer_results_json"])
                 entity_counts.append(result["entity_count"])
                 processing_statuses.append(result["processing_status"])
@@ -507,13 +562,19 @@ class RecognizerWorker:
                 logger.exception("Error processing note %s in batch, skipping (will retry on next run)", text_hash)
                 continue
 
-        return {
+        res = {
             "text_hash": out_text_hashes,
+            "note_text": out_note_texts,
+            "patient_uid": out_patient_uids,
+            "row_id": out_row_ids,
             "recognizer_results_json": results_json_list,
             "entity_count": entity_counts,
             "processing_status": processing_statuses,
             "error_message": error_messages,
         }
+        if has_jitter:
+            res["jitter"] = out_jitters
+        return res
 
 
 class RecognizerSupervisor:
@@ -621,14 +682,20 @@ class RecognizerSupervisor:
         text_hashes = list(cols["text_hash"])
         for th in text_hashes:
             logger.error("Note %s failed: %s (will retry on next run)", th, error)
-        return {
+        res = {
             "text_hash": [],
+            "note_text": [],
+            "patient_uid": [],
+            "row_id": [],
             "recognizer_results_json": [],
             "entity_count": [],
             "processing_timestamp": [],
             "processing_status": [],
             "error_message": [],
         }
+        if "jitter" in cols:
+            res["jitter"] = []
+        return res
 
 
 # Backwards compatibility alias
