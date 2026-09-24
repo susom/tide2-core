@@ -173,6 +173,10 @@ tide2-runner run transformer --config config.yaml
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --model StanfordAIMI/stanford-deidentifier-v2
 
+# Run discrete sequential stages with 32 blocks (optimized for 16-core, 1x L4 GPU):
+tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
+    --model StanfordAIMI/stanford-deidentifier-v2 --override-num-blocks 32
+
 # If you are running on Mac, you can use --object-store-gb option to set
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
      --model StanfordAIMI/stanford-deidentifier-v2  --object-store-gb 2

@@ -51,6 +51,8 @@ from .utils import resolve_input_files
 logger = logging.getLogger(__name__)
 
 KEY_SIZE_BYTES = 32
+TARGET_NODE_CPUS = 16
+TARGET_NODE_CPU_ACTORS = 14
 
 
 def _configure_checkpoint(
@@ -101,7 +103,7 @@ class LocalJobRunner:
     def __init__(
         self,
         num_cpus: int | None = None,
-        num_gpus: int | None = None,
+        num_gpus: int | float | None = None,
         object_store_gb: int | None = None,
         dashboard_host: str = DEFAULT_DASHBOARD_HOST,
         include_dashboard: bool = False,
@@ -111,7 +113,7 @@ class LocalJobRunner:
 
         Args:
             num_cpus: CPU count override
-            num_gpus: GPU count override
+            num_gpus: GPU count override (supports fractional e.g. 0.33)
             object_store_gb: Object store size in GB (default: ~30% of system RAM)
             dashboard_host: Dashboard host
             include_dashboard: Enable Ray dashboard
@@ -146,7 +148,7 @@ class LocalJobRunner:
 
         if self.num_cpus:
             kwargs["num_cpus"] = self.num_cpus
-        if self.num_gpus:
+        if self.num_gpus is not None:
             kwargs["num_gpus"] = self.num_gpus
         if self.object_store_gb:
             kwargs["object_store_memory"] = self.object_store_gb * 1024**3
@@ -184,25 +186,30 @@ class LocalJobRunner:
 
     def _resolve_transformer_resources(
         self,
-        num_gpus: int | None,
+        num_gpus: int | float | None,
         num_transformer_actors: int | None,
         num_agg_actors: int | None,
-    ) -> tuple[int, bool, int, int]:
+    ) -> tuple[int | float, bool, int, int]:
         """Resolve GPU/CPU resources and actor counts for transformer jobs.
 
         Returns:
             Tuple of (num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors)
         """
         if num_gpus is None:
-            num_gpus = int(ray.cluster_resources().get("GPU", 0))
+            num_gpus = float(ray.cluster_resources().get("GPU", 0))
 
         cpu_only_mode = num_gpus == 0
         available_cpus = ray.cluster_resources().get("CPU", 4)
 
         if num_transformer_actors is None:
             # Each transformer actor is memory-intensive (~500MB+ for model)
-            # CPU mode: limit actors; GPU mode: one actor per GPU
-            num_transformer_actors = max(1, int(available_cpus * 0.25)) if cpu_only_mode else num_gpus
+            # CPU mode: limit actors; GPU mode: scale with GPUs
+            if cpu_only_mode:
+                num_transformer_actors = max(1, int(available_cpus * 0.25))
+            elif num_gpus < 1.0 and num_gpus > 0:
+                num_transformer_actors = max(1, round(1.0 / num_gpus))
+            else:
+                num_transformer_actors = int(num_gpus)
 
         if cpu_only_mode:
             logger.warning(
@@ -211,7 +218,7 @@ class LocalJobRunner:
             )
 
         if num_agg_actors is None:
-            num_agg_actors = max(1, int(available_cpus * 0.3))
+            num_agg_actors = 0 if not cpu_only_mode and num_gpus < 1.0 else max(1, int(available_cpus * 0.3))
 
         return num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors
 
@@ -231,6 +238,7 @@ class LocalJobRunner:
         worker_num_cpus: int | float | None = None,
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
+        override_num_blocks: int | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """
@@ -259,6 +267,8 @@ class LocalJobRunner:
                 sort+repartition shuffle whose per-operator CPU reservations
                 exceed the cluster, deadlocking the stage at 0/1. Disabling it
                 trades resume capability (not correctness) for the ability to run.
+            override_num_blocks: Explicit number of Ray Data blocks to split the
+                input into (e.g. 32 to fix single-block starvation on multicore nodes).
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -294,8 +304,15 @@ class LocalJobRunner:
             num_actors = self._auto_num_actors()
 
         # Detect columns
-        required_cols = ["text_hash", "note_text", "patient_identifiers"]
-        optional_cols = ["recognizer_results_json"]
+        required_cols = ["text_hash", "note_text"]
+        optional_cols = [
+            "patient_identifiers",
+            "recognizer_results_json",
+            "patient_id",
+            "patient_uid",
+            "jitter",
+            "row_id",
+        ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         logger.info("Recognition job starting")
@@ -332,6 +349,8 @@ class LocalJobRunner:
             num_blocks = read_parallelism if read_parallelism is not None else len(input_files)
             # Ensure enough blocks to utilize all actors
             num_blocks = max(num_blocks, num_actors)
+            if override_num_blocks is not None:
+                num_blocks = override_num_blocks
             ds = ray.data.read_parquet(
                 input_files,
                 columns=columns,
@@ -564,7 +583,7 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_anonymization(
+    def run_anonymization(  # noqa: PLR0915
         self,
         input_path: str | list[str],
         output_path: str,
@@ -584,6 +603,7 @@ class LocalJobRunner:
         worker_num_cpus: int | float | None = None,
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
+        override_num_blocks: int | None = None,
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """
@@ -620,6 +640,8 @@ class LocalJobRunner:
                 sort+repartition shuffle whose per-operator CPU reservations
                 exceed the cluster, deadlocking the stage at 0/1. Disabling it
                 trades resume capability (not correctness) for the ability to run.
+            override_num_blocks: Explicit number of Ray Data blocks to split the
+                input into (e.g. 32 to fix single-block starvation on multicore nodes).
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -665,8 +687,8 @@ class LocalJobRunner:
             num_actors = self._auto_num_actors()
 
         # Detect columns
-        required_cols = ["text_hash", "note_text", "recognizer_results_json", "patient_uid"]
-        optional_cols = ["jitter", "row_id"]
+        required_cols = ["text_hash", "note_text", "recognizer_results_json"]
+        optional_cols = ["patient_uid", "patient_id", "jitter", "row_id"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         logger.info("Anonymization job starting")
@@ -715,6 +737,8 @@ class LocalJobRunner:
             num_blocks = read_parallelism if read_parallelism is not None else len(input_files)
             # Ensure enough blocks to utilize all actors
             num_blocks = max(num_blocks, num_actors)
+            if override_num_blocks is not None:
+                num_blocks = override_num_blocks
             ds = ray.data.read_parquet(
                 input_files,
                 columns=columns,
@@ -760,7 +784,7 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_transformer(
+    def run_transformer(  # noqa: PLR0915
         self,
         input_path: str | list[str],
         output_path: str,
@@ -779,6 +803,7 @@ class LocalJobRunner:
         agg_num_cpus: float = 1.0,
         transformer_cpus: float | None = None,
         enable_checkpoint: bool = True,
+        override_num_blocks: int | None = None,
     ) -> dict[str, Any]:
         """
         Run transformer NER job with token-accurate windowing.
@@ -837,10 +862,9 @@ class LocalJobRunner:
             model_path: Optional explicit model path
             bucket_name: Optional GCS bucket for model loading
             project_id: Optional GCP project ID
-            num_gpus: Number of GPU actors (auto-detect if None). Used when GPUs
-                are available to determine actor pool size.
+            num_gpus: Number of GPUs (or fractional GPUs, e.g. 0.33) per actor.
             num_transformer_actors: Number of transformer inference actors.
-                If None, defaults to num_gpus when GPUs available, or ~25% of
+                If None, defaults to scaling with available GPUs, or ~25% of
                 available CPUs in CPU-only mode.
             batch_size: Batch size for map_batches (whole notes per actor call).
                 This is the host-memory knob: a batch of long notes tokenizes to
@@ -853,7 +877,9 @@ class LocalJobRunner:
                 exceeds the model's per-window token budget (default: from model
                 config's ``CHUNK_OVERLAP_SIZE``).
             num_agg_actors: Number of CPU actors for BIO aggregation.
-                If None, auto-computed as ~30% of available CPUs.
+                If 0, aggregates within the transformer actor directly, emitting
+                document-ready entities without a separate aggregation actor pool.
+                If None, auto-computed (0 in fractional-GPU mode; ~30% CPUs otherwise).
             read_cpus: CPUs to reserve for each read_parquet task. Default 1.0
                 reproduces Ray's default reservation. Lower (e.g. 0.25) to fit
                 small boxes where concurrent operators contend for CPUs.
@@ -871,6 +897,8 @@ class LocalJobRunner:
                 stage regardless of the fractional CPU knobs above (see the
                 "Hardware sizing" section). Disabling it loses resume capability,
                 not correctness.
+            override_num_blocks: Explicit number of Ray Data blocks to split the
+                input into.
 
         Returns:
             Processing statistics dictionary
@@ -932,6 +960,7 @@ class LocalJobRunner:
 
         # Create transformer actor class. The actor tokenizes + token-windows whole
         # notes against the model's real budget; chunk_overlap is the window overlap.
+        aggregate_in_actor = num_agg_actors == 0
         transformer_actor = create_transformer_actor(
             model_name=model_name,
             model_path=model_path,
@@ -939,61 +968,76 @@ class LocalJobRunner:
             project_id=project_id,
             gpu_batch_size=gpu_batch_size,
             window_overlap=chunk_overlap,
+            aggregate_bio=aggregate_in_actor,
         )
 
-        input_pattern = self._resolve_input_pattern(input_path)
+        input_files = resolve_input_files(input_path)
+        required_cols = ["text_hash", "note_text"]
+        optional_cols = ["patient_id", "patient_identifiers", "patient_uid", "jitter", "row_id"]
+        if input_files:
+            try:
+                columns = detect_columns(input_files[0], required_cols, optional_cols)
+            except (FileNotFoundError, OSError):
+                columns = ["text_hash", "note_text", "patient_id"]
+            read_target = input_files
+        else:
+            columns = ["text_hash", "note_text", "patient_id"]
+            read_target = self._resolve_input_pattern(input_path)
+
         self._ensure_output_dir(output_path)
 
         # Configure Ray Data checkpointing for row-level resume, keyed on text_hash
         # (one row per note through the whole stage now — no chunk_uid).
-        #
-        # CRITICAL on tiny clusters (≲4 CPUs): this is THE transformer-stage
-        # deadlock — fractional CPU knobs alone do NOT fix it, and disabling
-        # op_resource_reservation_enabled does NOT help either. See
-        # _configure_checkpoint for the full explanation; pass
-        # enable_checkpoint=False on small boxes.
         ctx = ray.data.DataContext.get_current()
         _configure_checkpoint(
             ctx, enable=enable_checkpoint, output_dir=Path(output_path).resolve(), id_column="text_hash"
         )
 
+        read_kwargs: dict[str, Any] = {
+            "columns": columns,
+            "ray_remote_args": {"num_cpus": read_cpus},
+        }
+        if override_num_blocks is not None:
+            read_kwargs["override_num_blocks"] = override_num_blocks
+
         # Phase 1: Read whole notes (the actor's token-windowing is the sole chunker)
         ds: Dataset = ray.data.read_parquet(
-            input_pattern,
-            columns=["text_hash", "note_text", "patient_id"],
-            ray_remote_args={"num_cpus": read_cpus},
+            read_target,
+            **read_kwargs,
         )
 
-        # Phase 2: Transformer inference (tokenize -> window -> forward, per note;
-        # raw BIO tokens only, no aggregation). Use GPU remote args with num_gpus=0
-        # for CPU-only mode (no GPU resource request).
-        ray_remote_args_transformer = get_ray_remote_args_gpu(num_gpus=0 if cpu_only_mode else 1)
+        # Phase 2: Transformer inference (tokenize -> window -> forward, per note).
+        # When aggregate_in_actor is True, also aggregates BIO tokens directly.
+        ray_remote_args_transformer = get_ray_remote_args_gpu(num_gpus=0 if cpu_only_mode else num_gpus)
         if transformer_cpus is not None:
             # Set a CPU floor for the transformer actor. Never add num_gpus here
-            # in CPU mode; GPU pinning (num_gpus=1) is preserved in GPU mode.
+            # in CPU mode; GPU pinning (num_gpus=1 or fractional) is preserved in GPU mode.
             ray_remote_args_transformer["num_cpus"] = transformer_cpus
 
         ds_raw = ds.map_batches(
             transformer_actor,
             batch_size=batch_size,
             batch_format="numpy",
-            compute=ray.data.ActorPoolStrategy(size=num_transformer_actors),
+            compute=ray.data.ActorPoolStrategy(min_size=1, max_size=num_transformer_actors),
             **ray_remote_args_transformer,
         )
 
-        # Phase 3: CPU aggregation -> dedup -> Presidio format, producing
-        # document-ready recognizer_results_json (runs concurrently with GPU via
-        # streaming). Folds in the old separate reassembly stage.
-        ray_remote_args_cpu = get_ray_remote_args_cpu(num_cpus=agg_num_cpus)
+        if aggregate_in_actor:
+            ds_predictions = ds_raw
+        else:
+            # Phase 3: CPU aggregation -> dedup -> Presidio format, producing
+            # document-ready recognizer_results_json (runs concurrently with GPU via
+            # streaming). Folds in the old separate reassembly stage.
+            ray_remote_args_cpu = get_ray_remote_args_cpu(num_cpus=agg_num_cpus)
 
-        ds_predictions = ds_raw.map_batches(
-            BIOAggregationActor,
-            batch_size=batch_size,
-            batch_format="numpy",
-            compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
-            fn_constructor_kwargs={"model_name": model_name},
-            **ray_remote_args_cpu,
-        )
+            ds_predictions = ds_raw.map_batches(
+                BIOAggregationActor,
+                batch_size=batch_size,
+                batch_format="numpy",
+                compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
+                fn_constructor_kwargs={"model_name": model_name},
+                **ray_remote_args_cpu,
+            )
 
         # Phase 4: Write document-level recognizer results (fully streaming, no groupby)
         ds_predictions.write_parquet(output_path, compression="zstd", ray_remote_args={"num_cpus": write_cpus})
@@ -1081,9 +1125,7 @@ class LocalJobRunner:
         # --- Intermediate paths ---
         transformer_input_path = output_path / "01_transformer_input.parquet"
         transformer_output_path = output_path / "02_transformer_output"
-        recognizer_input_path = output_path / "03_recognizer_input.parquet"
         recognizer_output_path = output_path / "04_recognizer_output"
-        anonymizer_input_path = output_path / "05_anonymizer_input.parquet"
         anonymizer_output_path = output_path / "06_anonymizer_output"
 
         llm_recognizer_output_path = output_path / "03b_llm_recognizer_output"
@@ -1117,13 +1159,34 @@ class LocalJobRunner:
         if "patient_id" not in df_input.columns:
             df_input["patient_id"] = df_input["text_hash"]
 
-        # Write transformer input (only needs note_text, patient_id, text_hash)
-        df_input[["note_text", "patient_id", "text_hash"]].to_parquet(transformer_input_path, index=False)
+        if "patient_uid" not in df_input.columns:
+            df_input["patient_uid"] = df_input["patient_id"]
+
+        if "row_id" not in df_input.columns:
+            df_input["row_id"] = (
+                df_input["text_hash"] + ":" + df_input["patient_uid"].fillna("None").astype(str)
+            ).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+
+        # Write transformer input (with all columns needed across downstream stages)
+        df_input.to_parquet(transformer_input_path, index=False)
         logger.info(f"Pipeline input: {len(df_input)} notes")
 
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
         # ------------------------------------------------------------------
+        available_gpus = ray.cluster_resources().get("GPU", 0)
+        t_kwargs: dict[str, Any] = dict(t_kw)
+        if available_gpus > 0:
+            t_kwargs.setdefault("num_transformer_actors", 3)
+            t_kwargs.setdefault("transformer_cpus", 4.0)
+            t_kwargs.setdefault("num_gpus", 0.33)
+            t_kwargs.setdefault("batch_size", 512)
+            t_kwargs.setdefault("gpu_batch_size", 64)
+            t_kwargs.setdefault("override_num_blocks", 16)
+            t_kwargs.setdefault("num_agg_actors", 0)
+        else:
+            t_kwargs.setdefault("override_num_blocks", 16)
+
         if llm_recognizer_mode == "only":
             # In "only" mode, skip transformer entirely — LLM replaces it
             if run_transformer:
@@ -1135,7 +1198,7 @@ class LocalJobRunner:
                 input_path=str(transformer_input_path),
                 output_path=str(transformer_output_path),
                 model_name=model_name,
-                **t_kw,
+                **t_kwargs,
             )
             results["transformer"] = transformer_manifest
         else:
@@ -1144,6 +1207,15 @@ class LocalJobRunner:
         # ------------------------------------------------------------------
         # Phase 2: Recognizer (+ optional LLM recognizer)
         # ------------------------------------------------------------------
+        available_cpus = ray.cluster_resources().get("CPU", TARGET_NODE_CPUS)
+        r_num_actors = TARGET_NODE_CPU_ACTORS if available_cpus >= TARGET_NODE_CPUS else max(1, int(available_cpus - 2))
+        r_kwargs: dict[str, Any] = dict(r_kw)
+        r_kwargs.setdefault("num_actors", r_num_actors)
+        r_kwargs.setdefault("num_cpus", 1.0)
+        r_kwargs.setdefault("override_num_blocks", 32)
+
+        rec_input_path = transformer_output_path if run_transformer else transformer_input_path
+
         if llm_recognizer_mode == "only":
             # LLM replaces both transformer and regex recognizer
             logger.info("Pipeline phase 2/3: LLM Recognizer (only mode)")
@@ -1165,12 +1237,10 @@ class LocalJobRunner:
 
             # --- Standard regex recognizer ---
             if run_recognizer:
-                df_rec_in = self._build_recognizer_input_from_transformer(transformer_output_path, df_input)
-                df_rec_in.to_parquet(recognizer_input_path, index=False)
                 recognizer_manifest = self.run_recognition(
-                    input_path=str(recognizer_input_path),
+                    input_path=str(rec_input_path),
                     output_path=str(recognizer_output_path),
-                    **r_kw,
+                    **r_kwargs,
                 )
                 results["recognizer"] = recognizer_manifest
             else:
@@ -1266,6 +1336,13 @@ class LocalJobRunner:
                 )
 
             df_merged_results = pd.DataFrame(merged_rows)
+            cols_to_keep = [c for c in ["note_text", "patient_uid", "row_id", "jitter"] if c in df_regex.columns]
+            if cols_to_keep:
+                df_merged_results = df_merged_results.merge(
+                    df_regex[["text_hash", *cols_to_keep]].drop_duplicates(subset=["text_hash"]),
+                    on="text_hash",
+                    how="left",
+                )
 
             # Overwrite recognizer output with merged results
             if recognizer_output_path.exists():
@@ -1277,14 +1354,10 @@ class LocalJobRunner:
         elif run_recognizer:
             # Standard recognizer path (no LLM)
             logger.info("Pipeline phase 2/3: Recognizer")
-
-            df_rec_in = self._build_recognizer_input_from_transformer(transformer_output_path, df_input)
-            df_rec_in.to_parquet(recognizer_input_path, index=False)
-
             recognizer_manifest = self.run_recognition(
-                input_path=str(recognizer_input_path),
+                input_path=str(rec_input_path),
                 output_path=str(recognizer_output_path),
-                **r_kw,
+                **r_kwargs,
             )
             results["recognizer"] = recognizer_manifest
         else:
@@ -1296,53 +1369,32 @@ class LocalJobRunner:
         if run_anonymizer:
             logger.info("Pipeline phase 3/3: Anonymizer")
 
-            # Read recognizer output
-            rec_files = list(recognizer_output_path.glob("**/*.parquet"))
-            if not rec_files:
-                raise FileNotFoundError(
-                    f"No recognizer output found in {recognizer_output_path}. Run with run_recognizer=True first."
-                )
-            dfs_rec = [pq.read_table(f).to_pandas() for f in rec_files]
-            df_rec = pd.concat(dfs_rec, ignore_index=True)
-            df_rec.columns = df_rec.columns.str.lower()
-
-            # Merge columns from input that the recognizer doesn't produce
-            cols_to_add = [
-                c
-                for c in ["note_text", "patient_id", "patient_uid", "jitter"]
-                if c in df_input.columns and c not in df_rec.columns
-            ]
-            if cols_to_add:
-                df_rec = df_rec.merge(
-                    df_input[["text_hash", *cols_to_add]],
-                    on="text_hash",
-                    how="left",
-                )
-
-            # patient_uid required by anonymizer
-            if "patient_uid" not in df_rec.columns:
-                df_rec["patient_uid"] = df_rec.get("patient_id", df_rec["text_hash"])
-
-            # Always generate unique row_id for anonymizer checkpointing
-            # Use fillna("None") to match SQL COALESCE(..., 'None') behavior
-            df_rec["row_id"] = (df_rec["text_hash"] + ":" + df_rec["patient_uid"].fillna("None").astype(str)).apply(
-                lambda x: hashlib.sha256(x.encode()).hexdigest()
-            )
-
-            df_rec.to_parquet(anonymizer_input_path, index=False)
-
             # Write hex keys to temp files
             salt_file = output_path / "salt.bin"
             key_file = output_path / "key.bin"
             salt_file.write_text(salt_hex)
             key_file.write_text(key_hex)
 
+            a_num_actors = (
+                TARGET_NODE_CPU_ACTORS if available_cpus >= TARGET_NODE_CPUS else max(1, int(available_cpus - 2))
+            )
+            a_kwargs: dict[str, Any] = dict(a_kw)
+            a_kwargs.setdefault("num_actors", a_num_actors)
+            a_kwargs.setdefault("num_cpus", 1.0)
+            a_kwargs.setdefault("override_num_blocks", 32)
+
+            anon_input_path = (
+                recognizer_output_path
+                if run_recognizer or llm_recognizer_mode != "off"
+                else (transformer_output_path if run_transformer else transformer_input_path)
+            )
+
             anonymizer_manifest = self.run_anonymization(
-                input_path=str(anonymizer_input_path),
+                input_path=str(anon_input_path),
                 output_path=str(anonymizer_output_path),
                 salt_path=str(salt_file),
                 key_path=str(key_file),
-                **a_kw,
+                **a_kwargs,
             )
             results["anonymizer"] = anonymizer_manifest
         else:

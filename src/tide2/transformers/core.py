@@ -625,25 +625,43 @@ class TransformerCore:
 
         return input_ids, attention_mask, special_np, offset_np, texts
 
+    def _get_is_ignored_array(self, max_id: int) -> np.ndarray:
+        """Get or initialize cached boolean array indicating whether label ID is in ignore_labels."""
+        cached = getattr(self, "_is_ignored_arr", None)
+        if cached is not None and len(cached) > max_id:
+            return cached
+        id2label = self._id2label
+        max_key = max(max(id2label.keys(), default=0), max_id)
+        arr = np.zeros(max_key + 1, dtype=bool)
+        for k, v in id2label.items():
+            if v in self._ignore_labels_set:
+                arr[k] = True
+        self._is_ignored_arr = arr
+        return arr
+
     def _extract_window_predictions(
         self, scores_np: Any, label_ids_np: Any, special_np: Any, offset_np: Any, texts: list[str]
     ) -> list[list[dict]]:
         """Turn per-position scores/labels into raw BIO predictions per window.
 
         Skips special/padding positions and ignored labels; ``index`` is the
-        token's position in the padded, special-token-bearing sequence.
+        token's position in the padded, special-token-bearing sequence. Uses
+        vectorized NumPy filtering to eliminate nested Python loop overhead.
         """
+        if scores_np.size == 0 or len(texts) == 0:
+            return [[] for _ in texts]
+
+        max_label_id = int(label_ids_np.max()) if label_ids_np.size > 0 else 0
+        is_ignored = self._get_is_ignored_array(max_label_id)
+        valid_mask = (~special_np) & (~is_ignored[label_ids_np])
+
         id2label = self._id2label
-        ignore = self._ignore_labels_set
         results: list[list[dict]] = []
         for i, text in enumerate(texts):
             preds: list[dict] = []
-            for j in range(scores_np.shape[1]):
-                if special_np[i, j]:
-                    continue
-                label = id2label[label_ids_np[i, j]]
-                if label in ignore:
-                    continue
+            valid_indices = np.flatnonzero(valid_mask[i])
+            for j in valid_indices:
+                label = id2label[int(label_ids_np[i, j])]
                 s, e = int(offset_np[i, j, 0]), int(offset_np[i, j, 1])
                 preds.append(
                     {
@@ -652,7 +670,7 @@ class TransformerCore:
                         "start": s,
                         "end": e,
                         "word": text[s:e],
-                        "index": j,
+                        "index": int(j),
                     }
                 )
             results.append(preds)

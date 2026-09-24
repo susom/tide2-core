@@ -79,15 +79,17 @@ def get_ray_remote_args_cpu(**overrides) -> dict[str, Any]:
     return config
 
 
-def get_ray_remote_args_gpu(num_gpus: int = 1, **overrides) -> dict[str, Any]:
+def get_ray_remote_args_gpu(num_gpus: int | float = 1, **overrides) -> dict[str, Any]:
     """
     Get ray_remote_args for GPU-based actors with fault tolerance.
 
     Includes num_gpus resource requirement by default. When num_gpus=0,
-    no GPU resource is requested, allowing CPU-only execution.
+    no GPU resource is requested, allowing CPU-only execution. Supports
+    fractional GPUs (e.g. 0.33, 0.5) for multi-worker GPU multiplexing.
 
     Args:
         num_gpus: Number of GPUs per actor (default: 1). Set to 0 for CPU-only mode.
+            May be fractional (e.g. 0.33 for 3 actors on 1 GPU).
         **overrides: Override any default settings.
 
     Returns:
