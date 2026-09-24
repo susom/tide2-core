@@ -11,7 +11,9 @@ import socket
 import threading
 from pathlib import Path
 from typing import Any
+from typing import NamedTuple
 
+import numpy as np
 import torch
 from transformers import AutoModelForTokenClassification
 from transformers import AutoTokenizer
@@ -24,9 +26,87 @@ from .config import load_model_config
 
 logger = logging.getLogger(__name__)
 
-# Fixed schema of a raw BIO token prediction (see infer_raw). Used to build a
-# stable dedupe key that does not depend on dict insertion order.
+# Fixed schema of a raw BIO token prediction (see infer_single_raw /
+# forward_windows). Used to build a stable dedupe key that does not depend on dict
+# insertion order.
 _RAW_PRED_KEYS = ("entity", "score", "start", "end", "word", "index")
+
+
+class _Window(NamedTuple):
+    """One token-space window carved from a single input text.
+
+    Windowing (not truncation) is how tide2 covers a text whose tokenized length
+    exceeds the model's per-window budget. Each window carries the source text's
+    index (``owner``) plus the content token ids and their character offsets for
+    this slice — all sourced from a single tokenization, so offsets are already
+    relative to ``text`` and never need re-basing when window predictions are
+    merged back. ``text`` is the *whole* source text; ``offsets`` index into it.
+    """
+
+    owner: int
+    content_ids: list[int]
+    offsets: list[tuple[int, int]]
+    text: str
+    token_start: int  # index of this window's first content token within the text
+    token_end: int  # exclusive index of its last content token within the text
+
+
+def plan_windows(
+    texts: list[str],
+    input_ids: list[list[int]],
+    offset_mapping: list[list[Any]],
+    token_budget: int,
+    window_overlap: int,
+) -> list[_Window]:
+    """Slice each text's tokens into ≤-budget windows (never truncating).
+
+    The single windowing implementation shared by the transformer actor (batch
+    path) and — via :meth:`TransformerCore.tokenize_and_window` — the recognizer.
+    A text within budget becomes a single window; an over-budget text is sliced
+    into windows of ``token_budget`` content tokens that step forward by
+    ``token_budget - window_overlap`` (>= 1), so consecutive windows overlap by
+    ``window_overlap`` and together cover every token with no gaps. Char offsets
+    are carried straight from the single tokenization, so they already index into
+    the source ``texts[owner]``.
+
+    Args:
+        texts: The source texts, in the caller's order (each window's ``owner`` is
+            an index into this list).
+        input_ids: Ragged content-token ids per text (from
+            :meth:`TransformerCore.tokenize_ragged`).
+        offset_mapping: Ragged ``(start, end)`` char spans per text, aligned to
+            ``input_ids``.
+        token_budget: Max content tokens per window (see
+            :attr:`TransformerCore.token_budget`). Clamped to ``>= 1``.
+        window_overlap: Token overlap between adjacent windows. Clamped to
+            ``[0, token_budget - 1]`` so the step stays ``>= 1``.
+
+    Returns:
+        The windows across all texts, in text order (a text producing zero tokens
+        contributes no window).
+    """
+    budget = max(1, token_budget)
+    overlap = min(max(0, window_overlap), budget - 1)
+    step = max(1, budget - overlap)
+
+    windows: list[_Window] = []
+    for owner, text in enumerate(texts):
+        ids = input_ids[owner]
+        offs = offset_mapping[owner]
+        n = len(ids)
+        if n == 0:
+            continue
+        if n <= budget:
+            windows.append(_Window(owner, list(ids), [tuple(o) for o in offs], text, 0, n))
+            continue
+        start = 0
+        while start < n:
+            end = min(start + budget, n)
+            windows.append(_Window(owner, list(ids[start:end]), [tuple(o) for o in offs[start:end]], text, start, end))
+            if end == n:
+                break
+            start += step
+    return windows
 
 
 def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
@@ -70,13 +150,6 @@ class TransformerCore:
         dtype: Model dtype (default: torch.float16 for memory efficiency)
         load_immediately: If True, load pipeline in __init__. If False, lazy load.
         local_files_only: If True, don't download from HuggingFace (for cached models)
-        compile_model: Controls torch.compile behavior:
-            - None (default): Auto-detect. If compiled_cache.bin exists alongside
-              model weights, compile automatically.
-            - True: Require compilation. Raises FileNotFoundError if cache missing.
-            - False: Skip compilation even if cache file exists.
-        compile_cache_path: Override path to mega-cache .bin file. If None, looks
-            for compiled_cache.bin in the resolved model directory.
         allow_huggingface_download: If True (default), fall back to downloading
             from HuggingFace Hub when local cache and GCS both miss.
 
@@ -103,8 +176,6 @@ class TransformerCore:
         dtype: torch.dtype = torch.float16,
         load_immediately: bool = False,
         local_files_only: bool = False,
-        compile_model: bool | None = None,
-        compile_cache_path: str | None = None,
         allow_huggingface_download: bool = True,
     ) -> None:
         """Initialize the transformer core.
@@ -118,8 +189,6 @@ class TransformerCore:
             dtype: Torch dtype for model weights.
             load_immediately: If True, load the pipeline during init.
             local_files_only: Restrict HuggingFace to local files only.
-            compile_model: Whether to use a compiled model cache.
-            compile_cache_path: Path to the compiled ``.bin`` cache file.
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
         """
@@ -141,11 +210,25 @@ class TransformerCore:
         self.device = device
         self.dtype = dtype
         self.local_files_only = local_files_only
-        self.compile_model = compile_model
-        self.compile_cache_path = compile_cache_path
 
         # Load configuration
         self._config = load_model_config(model_name)
+
+        # Per-model dtype override from the config, e.g. {"DTYPE": "float32"}. Some
+        # architectures are not half-precision-safe: DeBERTa-v1's disentangled
+        # attention raises "expected scalar type Float but found Half/BFloat16" under
+        # fp16/bf16, so its config pins float32. Absent key => keep the constructor
+        # dtype (float16 default).
+        _cfg_dtype = self._config.get("DTYPE")
+        if _cfg_dtype:
+            resolved_dtype = getattr(torch, _cfg_dtype, None)
+            if not isinstance(resolved_dtype, torch.dtype):
+                raise ValueError(
+                    f"Model {model_name!r} config has invalid DTYPE={_cfg_dtype!r}: it must name a "
+                    f"torch dtype (e.g. 'float16', 'float32', 'bfloat16'). Got "
+                    f"{'no such torch attribute' if resolved_dtype is None else type(resolved_dtype).__name__}."
+                )
+            self.dtype = resolved_dtype
 
         # Resolve model path
         if model_path is not None:
@@ -287,15 +370,17 @@ class TransformerCore:
             model.eval()
             device_for_pipeline = -1
 
-        # Apply torch.compile with mega-cache
-        cache_path = self._resolve_compile_cache_path()
-        if cache_path is not None:
-            logger.info(f"[{thread_name}] Loading compile cache from {cache_path}")
-            torch.compiler.load_cache_artifacts(cache_path.read_bytes())
-            model = torch.compile(model, mode="reduce-overhead", fullgraph=True)
-            logger.info(f"[{thread_name}] Model compiled with fullgraph=True, mode=reduce-overhead")
-
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=self.local_files_only)
+
+        # Per-model max sequence length is the single length authority for tide2's
+        # token-accurate windowing (see :attr:`token_budget`). It MUST be pinned
+        # explicitly per model in the config (``MODEL_MAX_LENGTH``): tokenizers ship
+        # an unreliable model_max_length — a sentinel (XLM-R/SentencePiece's 1e30)
+        # that never bounds sequences, or an off-by-two value (RoBERTa reports 514
+        # for a real 512 context). Deriving from either silently reintroduces the
+        # over-length crash, so we resolve it here from the config and refuse to run
+        # without it rather than fall back to the tokenizer sentinel.
+        tokenizer.model_max_length = self._resolve_model_max_length()
 
         # Build pipeline kwargs
         # Note: transformers 5.x removed the `framework` argument from pipeline()
@@ -314,7 +399,7 @@ class TransformerCore:
 
         self._pipeline = pipeline(**pipeline_kwargs)
 
-        # Store direct references for infer_raw_direct (bypasses HF pipeline dispatch)
+        # Store direct references for windowed inference (bypasses HF pipeline dispatch)
         self._model = model
         self._tokenizer = tokenizer
         self._id2label = model.config.id2label
@@ -324,156 +409,233 @@ class TransformerCore:
         model_device = next(model.parameters()).device
         logger.info(f"[{thread_name}] Pipeline loaded on device: {model_device}")
 
-    def _resolve_compile_cache_path(self) -> Path | None:
-        """Resolve the path to the compiled cache .bin file.
+    def tokenize_ragged(self, texts: list[str]) -> Any:
+        """Tokenize a batch **once**, with no truncation, no padding, and offsets.
 
-        Behavior depends on self.compile_model:
-            - None: Auto-detect. Return path if compiled_cache.bin exists, else None.
-            - True: Require cache. Raise FileNotFoundError if missing.
-            - False: Skip compilation. Return None immediately.
-
-        The cache file is expected alongside the model weights at
-        <model_path>/compiled_cache.bin, or at compile_cache_path if overridden.
-
-        Returns:
-            Path to the cache file, or None to skip compilation.
-
-        Raises:
-            FileNotFoundError: If compile_model is True and the cache file is missing.
-        """
-        if self.compile_model is False:
-            return None
-
-        if self.compile_cache_path is not None:
-            path = Path(self.compile_cache_path)
-        else:
-            path = Path(self.model_path) / "compiled_cache.bin"
-
-        if path.is_file():
-            return path
-
-        if self.compile_model is True:
-            raise FileNotFoundError(
-                f"Compiled cache file not found at {path}. "
-                f"Generate it with: python scripts/compile_model.py save --output {path}"
-            )
-
-        # compile_model is None (auto-detect) and file not found — skip
-        return None
-
-    def infer_raw(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run raw inference on texts, returning BIO tokens.
-
-        This method runs the transformer pipeline on a batch of texts and returns
-        the raw predictions without BIO aggregation.
+        This is the single tokenization per input batch. It returns the *content*
+        tokens only (``add_special_tokens=False``) so the caller can window in
+        token space against the model's real budget (``model_max_length`` minus
+        :attr:`num_special_tokens`) and add the special tokens per window at
+        forward time (:meth:`forward_windows`). Because tokenization happens here
+        exactly once, windowing and OOM retries reuse this output and never
+        re-tokenize.
 
         Args:
-            texts: List of text strings to process
-            batch_size: Optional batch size for pipeline (default: process all at once)
+            texts: List of text strings to tokenize, in the caller's order.
 
         Returns:
-            List of prediction lists, one per input text. Each prediction is a dict:
-            {
-                "entity": "B-PERSON",
-                "score": 0.95,
-                "start": 0,
-                "end": 4,
-                "word": "John",
-                "index": 1,
-            }
-        """
-        pipeline_instance = self._ensure_pipeline_loaded()
-
-        if not texts:
-            return []
-
-        # Run pipeline
-        if batch_size is not None:
-            results = pipeline_instance(texts, batch_size=batch_size)
-        else:
-            results = pipeline_instance(texts)
-
-        # Handle single-text case (pipeline returns list of dicts, not list of lists)
-        if len(texts) == 1 and results and isinstance(results[0], dict):
-            return [results]
-
-        return results
-
-    def infer_raw_direct(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run inference bypassing the HF pipeline dispatch loop.
-
-        Tokenizes the entire batch in one call, runs a single GPU forward pass
-        (or sub-batched forward passes if batch_size < len(texts)), and extracts
-        raw token predictions using offset_mapping. This avoids the per-text
-        preprocess/postprocess Python loops in HuggingFace's ChunkPipeline.
-
-        Output format matches infer_raw(): list of lists of dicts with keys
-        {entity, score, start, end, word, index}.
-
-        Args:
-            texts: List of text strings to process.
-            batch_size: Max texts per GPU forward pass. If None, process all at once.
-
-        Returns:
-            List of prediction lists, one per input text.
+            A ``BatchEncoding`` whose ``input_ids`` and ``offset_mapping`` are
+            **ragged** Python lists — one list per input text (no tensors, since
+            padding is off). ``input_ids[i]`` are the content token ids of
+            ``texts[i]`` and ``offset_mapping[i]`` the matching ``(start, end)``
+            character spans into ``texts[i]``. Requires a fast tokenizer (for
+            ``offset_mapping``); tide2's models all ship one.
         """
         self._ensure_pipeline_loaded()
-
-        if not texts:
-            return []
-
-        if batch_size is None:
-            batch_size = len(texts)
-
-        all_results: list[list[dict]] = []
-
-        for start in range(0, len(texts), batch_size):
-            sub_texts = texts[start : start + batch_size]
-            sub_results = self._forward_batch_direct(sub_texts)
-            all_results.extend(sub_results)
-
-        return all_results
-
-    def _forward_batch_direct(self, texts: list[str]) -> list[list[dict]]:
-        """Single batch: tokenize → GPU forward → extract predictions."""
-        model = self._model
-        tokenizer = self._tokenizer
-        device = next(model.parameters()).device
-
-        # Batch tokenize
-        encoded = tokenizer(
+        return self._tokenizer(
             texts,
-            padding=True,
-            truncation=True,
-            return_tensors="pt",
+            add_special_tokens=False,
+            truncation=False,
+            padding=False,
             return_offsets_mapping=True,
-            return_special_tokens_mask=True,
         )
 
-        offset_mapping = encoded.pop("offset_mapping")  # (batch, seq_len, 2) — keep on CPU
-        special_tokens_mask = encoded.pop("special_tokens_mask")  # (batch, seq_len) — keep on CPU
+    def tokenize_and_window(self, texts: list[str], window_overlap: int) -> list[_Window]:
+        """Tokenize a batch **once** and slice it into ≤-budget token windows.
 
-        # Move input tensors to GPU
-        encoded = {k: v.to(device) for k, v in encoded.items()}
+        The shared tokenize→window primitive: it runs the single
+        :meth:`tokenize_ragged` pass and hands the ragged ids/offsets to
+        :func:`plan_windows` against :attr:`token_budget`. Callers (the transformer
+        actor's batch path; the recognizer once #54 lands) get one windowing
+        implementation with no duplicated char/token arithmetic. Because
+        tokenization happens here exactly once, downstream windowing and OOM
+        retries reuse the result and never re-tokenize.
 
-        # Single forward pass
-        with torch.no_grad():
-            logits = model(**encoded).logits  # (batch, seq_len, num_labels)
+        Args:
+            texts: Texts to tokenize and window, in the caller's order.
+            window_overlap: Token overlap between adjacent windows of an
+                over-budget text (clamped to ``[0, token_budget - 1]``).
 
-        # Softmax + argmax on GPU, then transfer to CPU
-        probs = torch.softmax(logits, dim=-1)
-        scores_max, label_ids = probs.max(dim=-1)  # (batch, seq_len)
+        Returns:
+            The token windows across all ``texts`` (see :func:`plan_windows`).
+        """
+        encoded = self.tokenize_ragged(texts)
+        return plan_windows(texts, encoded["input_ids"], encoded["offset_mapping"], self.token_budget, window_overlap)
 
-        scores_np = scores_max.cpu().numpy()
-        label_ids_np = label_ids.cpu().numpy()
-        offset_np = offset_mapping.numpy()
-        special_np = special_tokens_mask.numpy()
+    def forward_windows(self, windows: list[tuple[list[int], list[tuple[int, int]], str]]) -> list[list[dict]]:
+        """GPU forward + prediction extraction for pre-tokenized token windows.
 
-        # Extract per-text predictions
+        Each window is ``(content_ids, offsets, text)`` where ``content_ids`` are
+        the token ids of one window **without** special tokens and ``offsets`` are
+        the matching ``(start, end)`` character spans into ``text`` — both taken
+        directly from a single :meth:`tokenize_ragged` call, so they are already
+        chunk-relative and never re-based. This method adds the model's special
+        tokens, right-pads every window to the batch's longest member, runs one
+        forward pass, and extracts raw BIO predictions.
+
+        Releases every CUDA-resident tensor in a ``finally`` (Fix A1) so that on
+        OOM no exception traceback can pin the failed forward's VRAM — this is
+        what lets the caller's ``empty_cache()`` reclaim before retrying at a
+        smaller window-batch. Because the windows are supplied pre-tokenized, that
+        retry never re-tokenizes. See
+        :meth:`tide2.actors.transformer.TransformerInferenceActor._forward_windows`.
+
+        Args:
+            windows: List of ``(content_ids, offsets, text)`` tuples, one per
+                window, in the order the caller will consume predictions.
+
+        Returns:
+            One prediction list per window, aligned to ``windows``. Each dict has
+            keys ``{entity, score, start, end, word, index}``; ``index`` is the
+            token's position in the padded, special-token-bearing sequence, the
+            same convention as the rest of the pipeline.
+        """
+        if not windows:
+            return []
+
+        model = self._model
+        device = next(model.parameters()).device
+        input_ids, attention_mask, special_np, offset_np, texts = self._build_window_batch(windows)
+
+        # Track every CUDA-resident tensor so ``finally`` can free it all, even if
+        # ``.to(device)`` or the forward raises CUDA OOM.
+        input_ids_gpu = attention_mask_gpu = logits = probs = scores_max = label_ids = None
+        try:
+            input_ids_gpu = input_ids.to(device)
+            attention_mask_gpu = attention_mask.to(device)
+
+            with torch.inference_mode():
+                logits = model(input_ids=input_ids_gpu, attention_mask=attention_mask_gpu).logits
+
+            probs = torch.softmax(logits, dim=-1)
+            scores_max, label_ids = probs.max(dim=-1)  # (batch, seq_len)
+
+            scores_np = scores_max.cpu().numpy()
+            label_ids_np = label_ids.cpu().numpy()
+        finally:
+            # Drop this frame's references to every GPU tensor. Without this an
+            # exception traceback would keep them alive and empty_cache() could not
+            # reclaim; the CPU numpy copies above are already detached from CUDA.
+            del input_ids_gpu, attention_mask_gpu, logits, probs, scores_max, label_ids
+
+        return self._extract_window_predictions(scores_np, label_ids_np, special_np, offset_np, texts)
+
+    def _special_token_affixes(self) -> tuple[list[int], list[int]]:
+        """The special token ids the tokenizer wraps a single sequence with.
+
+        Returns ``(prefix_ids, suffix_ids)`` — e.g. ``([CLS], [SEP])`` for BERT or
+        ``([<s>], [</s>])`` for RoBERTa. Derived once by diffing a probe encoding
+        with and without special tokens, so it is architecture- and version-robust
+        (transformers 5.x dropped ``build_inputs_with_special_tokens`` /
+        ``prepare_for_model`` and only implements ``get_special_tokens_mask`` for
+        already-formatted sequences). Cached on the instance.
+
+        Raises:
+            RuntimeError: If the probe diff cannot derive affixes whose total length
+                matches ``num_special_tokens_to_add(pair=False)`` — i.e. windowed
+                inference would otherwise run without the model's special tokens.
+                Raised before caching, so the failure is not sticky.
+        """
+        cached = getattr(self, "_special_affixes", None)
+        if cached is not None:
+            return cached
+
+        tokenizer = self._tokenizer
+        probe = "hello"
+        with_sp = tokenizer(probe, add_special_tokens=True)["input_ids"]
+        without = tokenizer(probe, add_special_tokens=False)["input_ids"]
+        prefix: list[int] = []
+        suffix: list[int] = []
+        span = len(without)
+        for i in range(len(with_sp) - span + 1):
+            if with_sp[i : i + span] == without:
+                prefix = list(with_sp[:i])
+                suffix = list(with_sp[i + span :])
+                break
+
+        # Validate before caching: an empty/partial diff would silently forward
+        # windows without the model's special tokens (degraded NER), and caching
+        # would make that failure sticky. Cross-check against the count the
+        # tokenizer itself declares — the same API model_max_length windowing
+        # already trusts via ``num_special_tokens`` (below).
+        expected = tokenizer.num_special_tokens_to_add(pair=False)
+        if len(prefix) + len(suffix) != expected:
+            raise RuntimeError(
+                "Could not derive special-token affixes for "
+                f"{getattr(tokenizer, 'name_or_path', tokenizer)!r}: probe diff "
+                f"yielded prefix={prefix} suffix={suffix} "
+                f"({len(prefix) + len(suffix)} tokens) but the tokenizer adds "
+                f"{expected} special token(s) to a single sequence. Windowed "
+                "inference would run without the model's special tokens."
+            )
+
+        self._special_affixes = (prefix, suffix)
+        return prefix, suffix
+
+    def _build_window_batch(
+        self, windows: list[tuple[list[int], list[tuple[int, int]], str]]
+    ) -> tuple[Any, Any, Any, Any, list[str]]:
+        """Add special tokens and right-pad windows into a single forward batch.
+
+        Returns ``(input_ids, attention_mask, special_np, offset_np, texts)``:
+        two CPU ``torch`` tensors for the model plus numpy ``special``/``offset``
+        arrays aligned to the padded sequence for extraction. Padding positions are
+        marked special (so they are skipped) and carry a ``(0, 0)`` offset.
+        """
+        tokenizer = self._tokenizer
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = 0
+
+        prefix, suffix = self._special_token_affixes()
+        n_pre, n_suf = len(prefix), len(suffix)
+        pre_offsets = [(0, 0)] * n_pre
+        suf_offsets = [(0, 0)] * n_suf
+        pre_special = [1] * n_pre
+        suf_special = [1] * n_suf
+
+        n = len(windows)
+        full_ids_list: list[list[int]] = []
+        special_list: list[list[int]] = []
+        offset_list: list[list[tuple[int, int]]] = []
+        texts: list[str] = []
+        for content_ids, offsets, text in windows:
+            ids = list(content_ids)
+            # Wrap the content tokens with the model's special-token affixes and
+            # align the special mask + offsets: special positions carry a (0, 0)
+            # placeholder and are skipped at extraction; content positions keep the
+            # window's char offsets straight from the single tokenization.
+            full_ids_list.append(prefix + ids + suffix)
+            special_list.append(pre_special + [0] * len(ids) + suf_special)
+            offset_list.append(pre_offsets + [tuple(o) for o in offsets] + suf_offsets)
+            texts.append(text)
+
+        max_len = max(len(ids) for ids in full_ids_list)
+
+        input_ids = torch.full((n, max_len), pad_id, dtype=torch.long)
+        attention_mask = torch.zeros((n, max_len), dtype=torch.long)
+        special_np = np.ones((n, max_len), dtype=bool)  # padding => special => skipped
+        offset_np = np.zeros((n, max_len, 2), dtype=np.int64)
+        for i, ids in enumerate(full_ids_list):
+            length = len(ids)
+            input_ids[i, :length] = torch.tensor(ids, dtype=torch.long)
+            attention_mask[i, :length] = 1
+            special_np[i, :length] = np.asarray(special_list[i], dtype=bool)
+            offset_np[i, :length] = np.asarray(offset_list[i], dtype=np.int64)
+
+        return input_ids, attention_mask, special_np, offset_np, texts
+
+    def _extract_window_predictions(
+        self, scores_np: Any, label_ids_np: Any, special_np: Any, offset_np: Any, texts: list[str]
+    ) -> list[list[dict]]:
+        """Turn per-position scores/labels into raw BIO predictions per window.
+
+        Skips special/padding positions and ignored labels; ``index`` is the
+        token's position in the padded, special-token-bearing sequence.
+        """
         id2label = self._id2label
         ignore = self._ignore_labels_set
         results: list[list[dict]] = []
-
         for i, text in enumerate(texts):
             preds: list[dict] = []
             for j in range(scores_np.shape[1]):
@@ -494,7 +656,6 @@ class TransformerCore:
                     }
                 )
             results.append(preds)
-
         return results
 
     def infer_single_raw(self, text: str) -> list[dict]:
@@ -543,38 +704,66 @@ class TransformerCore:
         # Aggregate BIO tokens
         return aggregate_bio_tokens(raw_predictions, text)
 
-    def infer_batch_aggregated(self, texts: list[str], batch_size: int | None = None) -> list[list[dict]]:
-        """Run inference on a batch of texts with BIO aggregation.
+    def _resolve_model_max_length(self) -> int:
+        """The model's real tokenized context window, from ``MODEL_MAX_LENGTH``.
 
-        Args:
-            texts: List of texts to process
-            batch_size: Optional batch size for pipeline
+        This is the single length authority for token-accurate windowing. It is a
+        hard requirement in the model config — no fallback to the tokenizer's
+        ``model_max_length`` (which is unreliable: 1e30 sentinels, or RoBERTa's
+        off-by-two 514). A config missing it raises so a wrong context can never
+        silently reintroduce the over-length crash.
 
-        Returns:
-            List of aggregated entity prediction lists, one per input text
+        Raises:
+            ValueError: If the model config has no ``MODEL_MAX_LENGTH`` or it is
+                not a positive integer.
         """
-        raw_results = self.infer_raw(texts, batch_size=batch_size)
-
-        aggregated_results = []
-        for text, raw_preds in zip(texts, raw_results, strict=True):
-            if not raw_preds:
-                aggregated_results.append([])
-                continue
-
-            # Remove duplicates (can occur from chunking at caller level)
-            deduped_preds = _dedupe_raw_predictions(raw_preds)
-
-            # Aggregate BIO tokens
-            aggregated = aggregate_bio_tokens(deduped_preds, text)
-            aggregated_results.append(aggregated)
-
-        return aggregated_results
+        raw = self._config.get("MODEL_MAX_LENGTH")
+        if raw is None:
+            raise ValueError(
+                f"Model {self.model_name!r} config is missing the required "
+                f"'MODEL_MAX_LENGTH' key. It must be set to the model's real "
+                f"tokenized context window (e.g. 512 for BERT/RoBERTa, 8192 for "
+                f"ModernBERT); tide2 will not fall back to the tokenizer sentinel."
+            )
+        value = int(raw)
+        if value <= 0:
+            raise ValueError(
+                f"Model {self.model_name!r} config has non-positive "
+                f"MODEL_MAX_LENGTH={raw!r}; it must be a positive integer."
+            )
+        return value
 
     @property
     def model_max_length(self) -> int:
-        """Maximum input length for the tokenizer."""
-        pipeline_instance = self._ensure_pipeline_loaded()
-        return getattr(pipeline_instance.tokenizer, "model_max_length", 512)
+        """The model's real tokenized context window (from ``MODEL_MAX_LENGTH``).
+
+        Raises:
+            ValueError: If the model config does not pin ``MODEL_MAX_LENGTH``.
+        """
+        return self._resolve_model_max_length()
+
+    @property
+    def num_special_tokens(self) -> int:
+        """Special tokens the tokenizer adds around a single sequence.
+
+        For a single sequence this is typically 2 (e.g. BERT's ``[CLS]``/``[SEP]``
+        or RoBERTa's ``<s>``/``</s>``). Callers subtract it from
+        :attr:`model_max_length` to get the per-window content-token budget used
+        for token-space windowing (see :attr:`token_budget`).
+        """
+        self._ensure_pipeline_loaded()
+        return int(self._tokenizer.num_special_tokens_to_add(pair=False))
+
+    @property
+    def token_budget(self) -> int:
+        """Per-window content-token budget: context window minus special tokens.
+
+        The single source of truth for how many content tokens fit in one forward
+        pass: :attr:`model_max_length` (the real context window) minus the special
+        tokens the tokenizer wraps each sequence with (:attr:`num_special_tokens`).
+        Chunks longer than this are windowed, never truncated. Always ``>= 1``.
+        """
+        return max(1, self.model_max_length - self.num_special_tokens)
 
     def get_device_info(self) -> str:
         """Get current device information."""
@@ -582,7 +771,7 @@ class TransformerCore:
             return "not loaded"
 
         try:
-            model = self._pipeline.model
+            model = self.pipeline.model
             device = next(model.parameters()).device
             if device.type == "cuda":
                 device_name = torch.cuda.get_device_name(device.index)

@@ -44,6 +44,7 @@ from .fault_tolerance import get_ray_remote_args_cpu
 from .fault_tolerance import get_ray_remote_args_gpu
 from .utils import DEFAULT_DASHBOARD_HOST
 from .utils import detect_columns
+from .utils import gpu_worker_runtime_env
 from .utils import log_ray_cluster_info
 from .utils import resolve_input_files
 
@@ -137,6 +138,10 @@ class LocalJobRunner:
             "ignore_reinit_error": True,
             "include_dashboard": self.include_dashboard,
             "dashboard_host": dashboard_host,
+            # Configure the CUDA allocator (expandable_segments) for GPU actors
+            # before CUDA initializes in the worker. Fragmentation mitigation, not
+            # a leak fix. See runner.utils.gpu_worker_runtime_env.
+            "runtime_env": gpu_worker_runtime_env(),
         }
 
         if self.num_cpus:
@@ -765,41 +770,37 @@ class LocalJobRunner:
         project_id: str | None = None,
         num_gpus: int | None = None,
         num_transformer_actors: int | None = None,
-        batch_size: int = 512,
+        batch_size: int = 8,
         gpu_batch_size: int | None = None,
-        short_seq_budget: float | None = None,
-        chunk_size: int | None = None,
         chunk_overlap: int | None = None,
-        compile_model: bool | None = None,
-        compile_cache_path: str | None = None,
         num_agg_actors: int | None = None,
-        pre_chunked: bool = False,
         read_cpus: float = 1.0,
-        flat_map_cpus: float = 1.0,
         write_cpus: float = 1.0,
         agg_num_cpus: float = 1.0,
         transformer_cpus: float | None = None,
         enable_checkpoint: bool = True,
     ) -> dict[str, Any]:
         """
-        Run transformer NER job with proper document chunking.
+        Run transformer NER job with token-accurate windowing.
 
-        Documents are chunked into overlapping windows before inference,
-        then predictions are aggregated back to document-level entities.
+        Whole notes flow to the GPU actor, which tokenizes each note once and
+        token-windows it against the model's real context window before inference;
+        the downstream aggregation actor produces document-level entities directly.
+        There is no separate char-chunking stage or reassembly stage.
 
         Hardware sizing (CPU/actor knobs)
         ---------------------------------
         Ray Data runs every operator of this stage concurrently
-        (read -> flat_map -> transformer actor -> BIO actor -> write) and, under
+        (read -> transformer actor -> aggregation actor -> write) and, under
         Ray 2.55's ReservationOpResourceAllocator, must reserve a minimum CPU
         slice for each *eligible* operator at once. If those minimums sum to more
         than the cluster's CPUs, NOTHING schedules and the stage hangs at 0/1
         (``backpressured:tasks(ResourceBudget)``). Two independent levers avoid
         this on small boxes:
 
-        1. **Fractional CPU knobs** (``read_cpus``, ``flat_map_cpus``,
-           ``write_cpus``, ``agg_num_cpus``, ``transformer_cpus``) shrink each
-           operator's reservation so the concurrent sum fits.
+        1. **Fractional CPU knobs** (``read_cpus``, ``write_cpus``,
+           ``agg_num_cpus``, ``transformer_cpus``) shrink each operator's
+           reservation so the concurrent sum fits.
         2. **``enable_checkpoint=False``** removes the checkpoint shuffle
            (sort + repartition), which otherwise adds several more eligible
            operators and re-triggers the deadlock *even with* fractional CPUs.
@@ -816,7 +817,7 @@ class LocalJobRunner:
           auto-scales actor counts; reservations fit comfortably.
         - **Small GPU box (e.g. C=2, G=1 — Colab T4)**: the transformer actor is
           GPU-pinned (0 CPU), so budget the CPU operators fractionally:
-          ``read_cpus=flat_map_cpus=write_cpus=0.25``, ``agg_num_cpus=0.5``,
+          ``read_cpus=write_cpus=0.25``, ``agg_num_cpus=0.5``,
           ``transformer_cpus=0.25`` (small optional floor),
           ``num_transformer_actors=1``, ``num_agg_actors=1``,
           ``enable_checkpoint=False``.
@@ -824,7 +825,7 @@ class LocalJobRunner:
           and ``transformer_cpus`` also caps its torch thread count
           (``transformer.py``: ``int(transformer_cpus) or 1``), so give it most
           of the box: ``transformer_cpus=max(0.5, C-1.0)``,
-          ``read_cpus=flat_map_cpus=write_cpus=0.25``, ``agg_num_cpus=0.25``,
+          ``read_cpus=write_cpus=0.25``, ``agg_num_cpus=0.25``,
           ``num_transformer_actors=1``, ``num_agg_actors=1``,
           ``enable_checkpoint=False``. Expect SLOW single-threaded inference —
           this restores correctness, not speed.
@@ -841,25 +842,21 @@ class LocalJobRunner:
             num_transformer_actors: Number of transformer inference actors.
                 If None, defaults to num_gpus when GPUs available, or ~25% of
                 available CPUs in CPU-only mode.
-            batch_size: Batch size for map_batches (chunks per actor call).
-                Larger values reduce Ray Data dispatch overhead.
-            gpu_batch_size: Batch size for HuggingFace pipeline inference
-                (texts fed to GPU at once). None = auto-compute from model
-                config and available GPU memory.
-            chunk_size: Maximum chunk size in tokens (default: from model config)
-            chunk_overlap: Overlap between chunks in tokens (default: from model config)
-            compile_model: If True, apply torch.compile with mega-cache
-            compile_cache_path: Path to compiled cache .bin file
+            batch_size: Batch size for map_batches (whole notes per actor call).
+                This is the host-memory knob: a batch of long notes tokenizes to
+                many ragged ids at once, so keep it modest. GPU memory stays
+                bounded by ``gpu_batch_size``, not this.
+            gpu_batch_size: Number of token windows per GPU forward. Size it for
+                the load; if a batch OOMs, the actor halves and retries. None = a
+                nominal default that only needs to run out of the box.
+            chunk_overlap: Token overlap between adjacent windows when a note
+                exceeds the model's per-window token budget (default: from model
+                config's ``CHUNK_OVERLAP_SIZE``).
             num_agg_actors: Number of CPU actors for BIO aggregation.
                 If None, auto-computed as ~30% of available CPUs.
-            pre_chunked: If True, input is already chunked (skip flat_map).
-                Expects columns: chunk_text, text_hash, chunk_id,
-                char_offset_start, patient_id.
             read_cpus: CPUs to reserve for each read_parquet task. Default 1.0
                 reproduces Ray's default reservation. Lower (e.g. 0.25) to fit
                 small boxes where concurrent operators contend for CPUs.
-            flat_map_cpus: CPUs to reserve for each chunking flat_map task.
-                Default 1.0 reproduces Ray's default reservation.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
                 reproduces Ray's default reservation.
             agg_num_cpus: CPUs to reserve for each BIO aggregation actor.
@@ -882,15 +879,28 @@ class LocalJobRunner:
         from tide2.actors import create_transformer_actor
         from tide2.transformers.config import load_model_config
 
-        from .transformer import chunk_document_row
-
         self._init_ray()
         start_time = time.time()
 
-        # Resolve chunk_size/chunk_overlap from model config if not provided
+        # Resolve the window overlap from the model config if not provided. This is
+        # the token overlap between adjacent windows of an over-budget note; the
+        # per-window token budget itself is the model's real context window,
+        # resolved inside the actor from MODEL_MAX_LENGTH (no CHUNK_SIZE here).
         model_config = load_model_config(model_name)
-        if chunk_size is None:
-            chunk_size = model_config.get("CHUNK_SIZE", 512)
+
+        # Fail fast on the driver if the single length authority is missing/invalid.
+        # MODEL_MAX_LENGTH is a hard requirement (the transformer actor resolves the
+        # per-window token budget from it); validating here surfaces a clear
+        # driver-side error instead of a harder-to-diagnose failure deep inside Ray
+        # worker actor init.
+        _mml = model_config.get("MODEL_MAX_LENGTH")
+        if not isinstance(_mml, int) or _mml <= 0:
+            raise ValueError(
+                f"Model {model_name!r} config is missing a valid 'MODEL_MAX_LENGTH' "
+                f"(got {_mml!r}). It must be a positive integer equal to the model's real "
+                f"tokenized context window (e.g. 512 for BERT/RoBERTa, 8192 for ModernBERT)."
+            )
+
         if chunk_overlap is None:
             chunk_overlap = model_config.get("CHUNK_OVERLAP_SIZE", 40)
 
@@ -907,7 +917,7 @@ class LocalJobRunner:
         else:
             logger.info(f"  GPUs: {num_gpus}, Batch size: {batch_size}, GPU batch size: {gpu_batch_size}")
         logger.info(f"  BIO aggregation actors: {num_agg_actors}")
-        logger.info(f"  Chunk size: {chunk_size}, Overlap: {chunk_overlap}")
+        logger.info(f"  Window overlap: {chunk_overlap} tokens")
 
         # Resolve model path on driver (downloads if needed, validates weights)
         if model_path is None:
@@ -920,25 +930,22 @@ class LocalJobRunner:
             )
             logger.info(f"Model resolved on driver: {model_path}")
 
-        # Create transformer actor class
+        # Create transformer actor class. The actor tokenizes + token-windows whole
+        # notes against the model's real budget; chunk_overlap is the window overlap.
         transformer_actor = create_transformer_actor(
             model_name=model_name,
             model_path=model_path,
             bucket_name=bucket_name,
             project_id=project_id,
-            compile_model=compile_model,
-            compile_cache_path=compile_cache_path,
             gpu_batch_size=gpu_batch_size,
-            short_seq_budget=short_seq_budget,
+            window_overlap=chunk_overlap,
         )
 
         input_pattern = self._resolve_input_pattern(input_path)
         self._ensure_output_dir(output_path)
 
-        # Configure Ray Data checkpointing for row-level resume.
-        # text_hash is always present in the raw input parquet. chunk_uid is
-        # produced by chunk_document_row after ReadParquet, so it does not
-        # exist in the input schema when the checkpoint filter runs.
+        # Configure Ray Data checkpointing for row-level resume, keyed on text_hash
+        # (one row per note through the whole stage now — no chunk_uid).
         #
         # CRITICAL on tiny clusters (≲4 CPUs): this is THE transformer-stage
         # deadlock — fractional CPU knobs alone do NOT fix it, and disabling
@@ -950,34 +957,23 @@ class LocalJobRunner:
             ctx, enable=enable_checkpoint, output_dir=Path(output_path).resolve(), id_column="text_hash"
         )
 
-        # Phase 1: Read documents (only columns needed for chunking + inference)
+        # Phase 1: Read whole notes (the actor's token-windowing is the sole chunker)
         ds: Dataset = ray.data.read_parquet(
             input_pattern,
             columns=["text_hash", "note_text", "patient_id"],
             ray_remote_args={"num_cpus": read_cpus},
         )
 
-        # Phase 2: Chunk documents (or skip if pre-chunked)
-        if pre_chunked:
-            ds_chunks: Dataset = ds
-            logger.info("Using pre-chunked input (skipping chunking step)")
-        else:
-            logger.info(f"Chunking documents (size={chunk_size}, overlap={chunk_overlap})")
-
-            def chunk_fn(row):
-                return chunk_document_row(row, chunk_size, chunk_overlap)
-
-            ds_chunks = ds.flat_map(chunk_fn, num_cpus=flat_map_cpus)
-
-        # Phase 3: Transformer inference (raw BIO tokens only, no aggregation)
-        # Use GPU remote args with num_gpus=0 for CPU-only mode (no GPU resource request)
+        # Phase 2: Transformer inference (tokenize -> window -> forward, per note;
+        # raw BIO tokens only, no aggregation). Use GPU remote args with num_gpus=0
+        # for CPU-only mode (no GPU resource request).
         ray_remote_args_transformer = get_ray_remote_args_gpu(num_gpus=0 if cpu_only_mode else 1)
         if transformer_cpus is not None:
             # Set a CPU floor for the transformer actor. Never add num_gpus here
             # in CPU mode; GPU pinning (num_gpus=1) is preserved in GPU mode.
             ray_remote_args_transformer["num_cpus"] = transformer_cpus
 
-        ds_raw = ds_chunks.map_batches(
+        ds_raw = ds.map_batches(
             transformer_actor,
             batch_size=batch_size,
             batch_format="numpy",
@@ -985,7 +981,9 @@ class LocalJobRunner:
             **ray_remote_args_transformer,
         )
 
-        # Phase 4: CPU BIO aggregation (runs concurrently with GPU via streaming)
+        # Phase 3: CPU aggregation -> dedup -> Presidio format, producing
+        # document-ready recognizer_results_json (runs concurrently with GPU via
+        # streaming). Folds in the old separate reassembly stage.
         ray_remote_args_cpu = get_ray_remote_args_cpu(num_cpus=agg_num_cpus)
 
         ds_predictions = ds_raw.map_batches(
@@ -993,10 +991,11 @@ class LocalJobRunner:
             batch_size=batch_size,
             batch_format="numpy",
             compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
+            fn_constructor_kwargs={"model_name": model_name},
             **ray_remote_args_cpu,
         )
 
-        # Phase 5: Write chunk-level predictions (fully streaming, no groupby)
+        # Phase 4: Write document-level recognizer results (fully streaming, no groupby)
         ds_predictions.write_parquet(output_path, compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
         # Clear checkpoint config to avoid leaking to subsequent pipelines
@@ -1008,77 +1007,11 @@ class LocalJobRunner:
         return {
             "elapsed_seconds": round(elapsed, 2),
             "model_name": model_name,
-            "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
             "num_gpus": num_gpus,
             "cpu_only_mode": cpu_only_mode,
             "num_transformer_actors": num_transformer_actors,
             "num_agg_actors": num_agg_actors,
-            "batch_size": batch_size,
-        }
-
-    def run_reassembly(
-        self,
-        input_path: str | list[str],
-        output_path: str,
-        model_name: str,
-        num_actors: int | None = None,
-        batch_size: int = 500,
-        num_cpus: int = 1,
-    ) -> dict[str, Any]:
-        """
-        Run chunk-to-document reassembly via map_batches.
-
-        Input rows are one-per-document with chunks pre-grouped into a
-        chunks_json column (e.g. via BigQuery ARRAY_AGG). Required columns:
-        text_hash, patient_id, note_text, chunks_json.
-
-        Args:
-            input_path: Path to parquet files with pre-grouped chunks.
-            output_path: Output directory for document-level results.
-            model_name: Transformer model name for recognition_metadata.
-            num_actors: Number of ReassemblyActor instances (auto-detect if None).
-            batch_size: Rows per batch.
-            num_cpus: CPUs per actor.
-
-        Returns:
-            Processing statistics dictionary.
-        """
-        from tide2.actors import ReassemblyActor
-
-        self._init_ray()
-        start_time = time.time()
-
-        if num_actors is None:
-            num_actors = self._auto_num_actors()
-
-        self._ensure_output_dir(output_path)
-
-        logger.info("Reassembly job starting")
-        logger.info(f"  Input: {input_path}")
-        logger.info(f"  Output: {output_path}")
-        logger.info(f"  Model: {model_name}")
-        logger.info(f"  Actors: {num_actors}, Batch size: {batch_size}")
-
-        input_pattern = self._resolve_input_pattern(input_path)
-
-        ds = ray.data.read_parquet(input_pattern)
-        ds = ds.map_batches(
-            ReassemblyActor,
-            batch_size=batch_size,
-            compute=ray.data.ActorPoolStrategy(size=num_actors),
-            fn_constructor_kwargs={"model_name": model_name},
-            num_cpus=num_cpus,
-        )
-        ds.write_parquet(output_path, compression="zstd")
-
-        elapsed = time.time() - start_time
-        logger.info(f"Reassembly complete in {elapsed:.1f}s")
-
-        return {
-            "elapsed_seconds": round(elapsed, 2),
-            "model_name": model_name,
-            "num_actors": num_actors,
             "batch_size": batch_size,
         }
 
@@ -1121,7 +1054,7 @@ class LocalJobRunner:
             key_hex: Hex-encoded 32-byte FPE key.
             transformer_kwargs: Extra kwargs passed to self.run_transformer().
                 e.g. bucket_name, project_id, num_gpus, batch_size,
-                chunk_size, chunk_overlap.
+                gpu_batch_size, chunk_overlap.
             recognizer_kwargs: Extra kwargs passed to self.run_recognition().
                 e.g. num_actors, batch_size, batch_timeout, num_cpus.
             anonymizer_kwargs: Extra kwargs passed to self.run_anonymization().
@@ -1209,7 +1142,7 @@ class LocalJobRunner:
             logger.info("Pipeline phase 1/3: Transformer NER (SKIPPED)")
 
         # ------------------------------------------------------------------
-        # Phase 2: Reassembly + Recognizer (+ optional LLM recognizer)
+        # Phase 2: Recognizer (+ optional LLM recognizer)
         # ------------------------------------------------------------------
         if llm_recognizer_mode == "only":
             # LLM replaces both transformer and regex recognizer
@@ -1232,32 +1165,7 @@ class LocalJobRunner:
 
             # --- Standard regex recognizer ---
             if run_recognizer:
-                trans_files = list(transformer_output_path.glob("**/*.parquet"))
-                if trans_files:
-                    from .transformer import reassemble_document_predictions
-
-                    dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
-                    df_chunks = pd.concat(dfs_trans, ignore_index=True)
-                    df_rec_in = reassemble_document_predictions(
-                        df_chunks=df_chunks,
-                        df_notes=df_input[["text_hash", "note_text", "patient_id"]],
-                        model_name=model_name,
-                    )
-                    if "patient_identifiers" in df_input.columns:
-                        id_map = df_input.drop_duplicates(subset="text_hash").set_index("text_hash")[
-                            "patient_identifiers"
-                        ]
-                        df_rec_in["patient_identifiers"] = df_rec_in["text_hash"].map(id_map).fillna("{}")
-                    else:
-                        df_rec_in["patient_identifiers"] = "{}"
-                else:
-                    logger.info("No transformer output found; using input data for recognizer")
-                    df_rec_in = df_input.copy()
-                    if "patient_identifiers" not in df_rec_in.columns:
-                        df_rec_in["patient_identifiers"] = "{}"
-                    if "recognizer_results_json" not in df_rec_in.columns:
-                        df_rec_in["recognizer_results_json"] = "[]"
-
+                df_rec_in = self._build_recognizer_input_from_transformer(transformer_output_path, df_input)
                 df_rec_in.to_parquet(recognizer_input_path, index=False)
                 recognizer_manifest = self.run_recognition(
                     input_path=str(recognizer_input_path),
@@ -1370,30 +1278,7 @@ class LocalJobRunner:
             # Standard recognizer path (no LLM)
             logger.info("Pipeline phase 2/3: Recognizer")
 
-            trans_files = list(transformer_output_path.glob("**/*.parquet"))
-            if trans_files:
-                from .transformer import reassemble_document_predictions
-
-                dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
-                df_chunks = pd.concat(dfs_trans, ignore_index=True)
-                df_rec_in = reassemble_document_predictions(
-                    df_chunks=df_chunks,
-                    df_notes=df_input[["text_hash", "note_text", "patient_id"]],
-                    model_name=model_name,
-                )
-                if "patient_identifiers" in df_input.columns:
-                    id_map = df_input.drop_duplicates(subset="text_hash").set_index("text_hash")["patient_identifiers"]
-                    df_rec_in["patient_identifiers"] = df_rec_in["text_hash"].map(id_map).fillna("{}")
-                else:
-                    df_rec_in["patient_identifiers"] = "{}"
-            else:
-                logger.info("No transformer output found; using input data for recognizer")
-                df_rec_in = df_input.copy()
-                if "patient_identifiers" not in df_rec_in.columns:
-                    df_rec_in["patient_identifiers"] = "{}"
-                if "recognizer_results_json" not in df_rec_in.columns:
-                    df_rec_in["recognizer_results_json"] = "[]"
-
+            df_rec_in = self._build_recognizer_input_from_transformer(transformer_output_path, df_input)
             df_rec_in.to_parquet(recognizer_input_path, index=False)
 
             recognizer_manifest = self.run_recognition(
@@ -1521,6 +1406,41 @@ class LocalJobRunner:
         """Ensure output directory exists."""
         if not output_path.startswith("gs://"):
             Path(output_path).mkdir(parents=True, exist_ok=True)
+
+    def _build_recognizer_input_from_transformer(
+        self,
+        transformer_output_path: Path,
+        df_input: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Assemble the recognizer input DataFrame from transformer-stage output.
+
+        The transformer stage now emits document-level rows directly
+        (text_hash, patient_id, note_text, recognizer_results_json) — there is no
+        chunk→reassembly step. This reads that output, keeps the columns the
+        recognizer needs, and attaches patient_identifiers from the pipeline input.
+        Falls back to the raw input when no transformer output exists (e.g. the
+        transformer stage was skipped).
+        """
+        trans_files = list(transformer_output_path.glob("**/*.parquet"))
+        if trans_files:
+            dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
+            df_rec_in = pd.concat(dfs_trans, ignore_index=True)
+            keep = [
+                c for c in ["text_hash", "patient_id", "note_text", "recognizer_results_json"] if c in df_rec_in.columns
+            ]
+            df_rec_in = df_rec_in[keep].copy()
+        else:
+            logger.info("No transformer output found; using input data for recognizer")
+            df_rec_in = df_input.copy()
+            if "recognizer_results_json" not in df_rec_in.columns:
+                df_rec_in["recognizer_results_json"] = "[]"
+
+        if "patient_identifiers" in df_input.columns:
+            id_map = df_input.drop_duplicates(subset="text_hash").set_index("text_hash")["patient_identifiers"]
+            df_rec_in["patient_identifiers"] = df_rec_in["text_hash"].map(id_map).fillna("{}")
+        elif "patient_identifiers" not in df_rec_in.columns:
+            df_rec_in["patient_identifiers"] = "{}"
+        return df_rec_in
 
     def _get_text_source(
         self,
@@ -1708,13 +1628,10 @@ def run_transformer_simple(
     bucket_name: str | None = None,
     project_id: str | None = None,
     num_gpus: int | None = None,
-    batch_size: int = 512,
-    chunk_size: int | None = None,
+    batch_size: int = 8,
     chunk_overlap: int | None = None,
     num_cpus: int | None = None,
     object_store_gb: int | None = None,
-    compile_model: bool | None = None,
-    compile_cache_path: str | None = None,
     num_agg_actors: int | None = None,
 ) -> dict[str, Any]:
     """
@@ -1727,13 +1644,10 @@ def run_transformer_simple(
         bucket_name: Optional GCS bucket for model loading
         project_id: Optional GCP project ID
         num_gpus: Number of GPU actors
-        batch_size: Batch size for map_batches (chunks per GPU call)
-        chunk_size: Maximum chunk size in tokens (default: from model config)
-        chunk_overlap: Overlap between chunks in tokens (default: from model config)
+        batch_size: Batch size for map_batches (whole notes per actor call)
+        chunk_overlap: Token overlap between adjacent windows (default: from model config)
         num_cpus: CPUs
         object_store_gb: Object store size GB
-        compile_model: If True, apply torch.compile with mega-cache
-        compile_cache_path: Path to compiled cache .bin file
         num_agg_actors: Number of CPU actors for BIO aggregation (auto if None)
 
     Returns:
@@ -1754,56 +1668,8 @@ def run_transformer_simple(
             project_id=project_id,
             num_gpus=num_gpus,
             batch_size=batch_size,
-            chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            compile_model=compile_model,
-            compile_cache_path=compile_cache_path,
             num_agg_actors=num_agg_actors,
-        )
-    finally:
-        runner.shutdown()
-
-
-def run_reassembly_simple(
-    input_path: str,
-    output_path: str,
-    model_name: str,
-    num_actors: int | None = None,
-    batch_size: int = 500,
-    num_cpus: int | None = None,
-    object_store_gb: int | None = None,
-) -> dict[str, Any]:
-    """
-    Simple function to run chunk-to-document reassembly job.
-
-    Input parquet files must have one row per document with chunks_json
-    column (pre-grouped, e.g. via BigQuery ARRAY_AGG or
-    reassemble_document_predictions_local).
-
-    Args:
-        input_path: Path to parquet files with pre-grouped chunks.
-        output_path: Output directory for document-level results.
-        model_name: Transformer model name.
-        num_actors: Number of actors.
-        batch_size: Batch size.
-        num_cpus: CPUs for Ray.
-        object_store_gb: Object store size GB.
-
-    Returns:
-        Processing statistics.
-    """
-    runner = LocalJobRunner(
-        num_cpus=num_cpus,
-        object_store_gb=object_store_gb,
-    )
-
-    try:
-        return runner.run_reassembly(
-            input_path=input_path,
-            output_path=output_path,
-            model_name=model_name,
-            num_actors=num_actors,
-            batch_size=batch_size,
         )
     finally:
         runner.shutdown()

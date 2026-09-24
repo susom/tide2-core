@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import threading
+from typing import ClassVar
 
 import httpx
 import openai
@@ -47,8 +48,8 @@ class LlmModel:
     # Class-level locks for different providers
     _auth_lock = threading.Lock()
     _aiplatform_lock = threading.Lock()
-    _credentials_cache = {}
-    _aiplatform_initialized = {}
+    _credentials_cache: ClassVar[dict] = {}
+    _aiplatform_initialized: ClassVar[dict] = {}
 
     def __init__(
         self,
@@ -105,7 +106,7 @@ class LlmModel:
                 try:
                     if hasattr(creds, "valid") and creds.valid:
                         return creds, token
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     # If validation fails, refresh credentials
                     logger.debug("Credential validation check failed, will refresh: %s", e)
 
@@ -177,7 +178,6 @@ class LlmModel:
             if token_limit is not None and token_limit > 0:
                 return token_limit
             logger.info(f"Model {self.model_name} does not have input_token_limit parameter or it is zero/null")
-            return None
 
         except Exception as e:
             logger.warning(f"Failed to get model input token limit for {self.model_name}: {e}")
@@ -223,7 +223,7 @@ class LlmModel:
         logger.error("Response is not a string. Expected a string response.")
         raise TypeError("Response is not a string. Expected a string response.")
 
-    def get_response(self, prompt: str, parse_json=True) -> list[dict] | str | None:
+    def get_response(self, prompt: str, parse_json=True) -> list[dict] | str | None:  # noqa: PLR0915
         """
         Get a response from the model based on the provider type.
 
@@ -282,13 +282,13 @@ class LlmModel:
             response_text = response.text
 
         elif self.provider_type.lower() == "llama":
-            MAAS_ENDPOINT = f"{self.region}-aiplatform.googleapis.com"
+            maas_endpoint = f"{self.region}-aiplatform.googleapis.com"
             base_url = (
-                f"https://{MAAS_ENDPOINT}/v1beta1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi"
+                f"https://{maas_endpoint}/v1beta1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi"
             )
 
             # Thread-safe credential acquisition
-            creds, access_token = self._get_authenticated_credentials()
+            _creds, access_token = self._get_authenticated_credentials()
 
             client = openai.OpenAI(
                 base_url=base_url,
@@ -317,13 +317,13 @@ class LlmModel:
             # Vertex's OpenAI-compatible endpoint uses a per-region host
             # ({region}-aiplatform.googleapis.com), except for region="global"
             # which is served from the unprefixed aiplatform.googleapis.com host.
-            ENDPOINT = (
+            endpoint = (
                 "aiplatform.googleapis.com" if self.region == "global" else f"{self.region}-aiplatform.googleapis.com"
             )
-            BASE_URL = f"https://{ENDPOINT}/v1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi/chat/completions"
+            base_url = f"https://{endpoint}/v1/projects/{self.project_id}/locations/{self.region}/endpoints/openapi/chat/completions"
 
             # Thread-safe credential acquisition
-            creds, access_token = self._get_authenticated_credentials()
+            _creds, access_token = self._get_authenticated_credentials()
 
             # Prepare headers
             headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
@@ -334,18 +334,18 @@ class LlmModel:
             # Make the request
             try:
                 with httpx.Client() as client:
-                    response = client.post(BASE_URL, headers=headers, json=payload, timeout=30.0)
+                    response = client.post(base_url, headers=headers, json=payload, timeout=30.0)
                     response.raise_for_status()
                     response = response.json()
                     response_text = response["choices"][0]["message"]["content"]
 
-            except httpx.RequestError as e:
-                logger.error(f"Request error: {e}")
-                raise e
+            except httpx.RequestError:
+                logger.exception("Request error")
+                raise
 
             except httpx.HTTPStatusError as e:
-                logger.error(f"HTTP error {e.response.status_code}: {e.response.text}")
-                raise e
+                logger.exception(f"HTTP error {e.response.status_code}: {e.response.text}")
+                raise
 
         elif self.provider_type.lower() == "anthropic":
             if not self.model_name:
@@ -429,8 +429,8 @@ class LlmModel:
                         response_text = str(prediction)
                 else:
                     response_text = str(response)
-            except (KeyError, IndexError, AttributeError) as e:
-                logger.error(f"Error parsing medgemma response: {e}")
+            except (KeyError, IndexError, AttributeError):
+                logger.exception("Error parsing medgemma response")
                 response_text = str(response)
         else:
             raise ValueError(f"Unsupported provider type: {self.provider_type}. Supported providers are 'google'.")
@@ -486,6 +486,4 @@ class LlmModel:
             return 0
 
         char_count = len(text)
-        estimated_tokens = max(1, round(char_count / chars_per_token))
-
-        return estimated_tokens
+        return max(1, round(char_count / chars_per_token))
