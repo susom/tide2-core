@@ -172,6 +172,10 @@ def configure_data_context(
     # aborting the entire job. Failed blocks are skipped in the output.
     ctx.max_errored_blocks = max_errored_blocks
 
+    # Use datasource v1 for Parquet to enable SplitBlocks so override_num_blocks
+    # properly splits single-file inputs across actors without single-worker starvation.
+    ctx.use_datasource_v2 = False
+
     logger.info(
         f"DataContext configured: verbose_progress={verbose_progress}, "
         f"block_size={target_min_block_size_mb}-{target_max_block_size_mb}MB, "
