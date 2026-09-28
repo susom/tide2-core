@@ -26,6 +26,7 @@ Examples:
 import hashlib
 import json
 import logging
+import os
 import shutil
 import time
 from pathlib import Path
@@ -129,6 +130,10 @@ class LocalJobRunner:
         """Initialize Ray."""
         if self._initialized:
             return
+
+        # Disable uv runtime_env isolation hook so local workers directly inherit
+        # the active environment without redundant per-worker venv creation
+        os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
 
         # When dashboard is enabled, bind to 0.0.0.0 so it's accessible
         # from outside Docker containers
@@ -756,7 +761,19 @@ class LocalJobRunner:
             # Guard against silent total failure: Ray's max_errored_blocks and the
             # supervisor's _failed_batch fallback can turn every dropped batch into a
             # successful-looking 0-row write. Surface that as a hard error instead.
-            output_rows = processed.count()
+            import pyarrow.dataset as _pad
+
+            try:
+                output_files = list(output_dir.glob("*.parquet"))
+                if output_files:
+                    output_rows = _pad.dataset(output_files).count_rows()
+                elif hasattr(processed, "count"):
+                    output_rows = processed.count()
+                else:
+                    output_rows = 0
+            except Exception:
+                output_rows = processed.count() if hasattr(processed, "count") else 0
+
             if output_rows == 0 and len(input_files) > 0:
                 raise RuntimeError(
                     "Anonymizer wrote 0 rows from non-empty input — all batches failed. "
@@ -1171,6 +1188,8 @@ class LocalJobRunner:
         df_input.to_parquet(transformer_input_path, index=False)
         logger.info(f"Pipeline input: {len(df_input)} notes")
 
+        self._init_ray()
+
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
         # ------------------------------------------------------------------
@@ -1211,7 +1230,8 @@ class LocalJobRunner:
         r_num_actors = TARGET_NODE_CPU_ACTORS if available_cpus >= TARGET_NODE_CPUS else max(1, int(available_cpus - 2))
         r_kwargs: dict[str, Any] = dict(r_kw)
         r_kwargs.setdefault("num_actors", r_num_actors)
-        r_kwargs.setdefault("num_cpus", 1.0)
+        r_kwargs.setdefault("num_cpus", 0)
+        r_kwargs.setdefault("worker_num_cpus", 1.0)
         r_kwargs.setdefault("override_num_blocks", 32)
 
         rec_input_path = transformer_output_path if run_transformer else transformer_input_path
@@ -1380,7 +1400,8 @@ class LocalJobRunner:
             )
             a_kwargs: dict[str, Any] = dict(a_kw)
             a_kwargs.setdefault("num_actors", a_num_actors)
-            a_kwargs.setdefault("num_cpus", 1.0)
+            a_kwargs.setdefault("num_cpus", 0)
+            a_kwargs.setdefault("worker_num_cpus", 1.0)
             a_kwargs.setdefault("override_num_blocks", 32)
 
             anon_input_path = (
