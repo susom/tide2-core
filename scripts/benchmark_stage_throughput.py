@@ -131,7 +131,7 @@ class ResourceSampler:
             "--format=csv,noheader,nounits",
         ]
         try:
-            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)  # noqa: S603 # nosec B603 # fixed nvidia-smi arg list, no shell
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)  # nosec B603 # fixed nvidia-smi arg list, no shell
             util, mem, power = (x.strip() for x in out.stdout.strip().split(","))
             return float(util), float(mem), float(power)
         except Exception:
@@ -336,7 +336,7 @@ def main() -> int:
 
     start = time.time()
     with ResourceSampler(interval=args.sample_interval) as sampler, log_path.open("w") as log:
-        proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)  # noqa: S603 # nosec B603 # operator-built CLI, no shell
+        proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, check=False)  # nosec B603 # operator-built CLI, no shell
     wall = time.time() - start
     ok = proc.returncode == 0
 
