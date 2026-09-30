@@ -196,7 +196,63 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 ```
 
+#### Execution modes: `discrete` (default) vs `streamed`
+
+`tide2-runner run pipeline --execution-mode {discrete,streamed}` (and
+`LocalJobRunner.run_pipeline(execution_mode=...)`) chooses how the three stages
+are executed. **`discrete` is the default and the production mode; nothing about
+it changed.**
+
+| | `discrete` (default) | `streamed` |
+|---|---|---|
+| Ray Data executions | one per stage | one for the whole pipeline |
+| Stage boundary | Parquet on disk | blocks in the object store |
+| GPU/CPU overlap | none (stages are sequential) | yes — the GPU stage overlaps the CPU stages |
+| Files written | `01_`, `02_`, `04_`, `06_` | `06_anonymizer_output` only |
+| Row-level resume (`--no-checkpoint` off) | yes | **no** — a mid-run failure re-runs GPU inference |
+| Multi-machine (stage 1 on a GPU box, 2/3 elsewhere) | yes — this is the point of the mode | no, refused |
+| Nodes with ≤ 4 CPUs | supported (see below) | refused |
+| `--llm-recognizer-mode merge` | yes | falls back to discrete |
+| `--produce-visualizer-json` | yes | falls back to discrete |
+| Return shape | per-stage manifests | `operator_stats` + row counts |
+
+Use `streamed` for development, benchmarks, and single-box batches, where one
+cluster does all three stages. Stay on `discrete` for production, for anything
+multi-machine, for long-running or unattended jobs (you want resume), and on
+small boxes.
+
+The stages **pipeline**; they do not fuse. Ray only fuses `TaskPool → TaskPool`
+and `TaskPool → ActorPool`, and all three stages are actor pools, so they remain
+three operators streaming concurrently with blocks crossing the object store.
+The win is trading Parquet write+read for object-store transfer, plus overlap,
+plus paying Ray Data execution setup once instead of three times.
+
+Two consequences worth planning for:
+
+- **CPU admission.** All three pools are resident at once, so their minimum
+  reservations must fit on one node or nothing schedules. Streamed uses
+  autoscaling pools (`min_size`/`max_size`) and checks the budget against the
+  largest node *before* execution, raising a message that names the offending
+  operators instead of hanging at `0/1`. The check is a heuristic; the
+  execution-level no-progress guard is the real backstop.
+- **Memory.** `note_text` stays in the object store across all three operators,
+  so size `--object-store-gb` for it. If the object store overflows, Ray spills
+  — in plaintext — to its local spill directory. That is the same clinical text
+  already present on the host in memory, in the input Parquet, and (in discrete
+  mode) in the `02_`/`04_` intermediates, so plan host disk accordingly and
+  dispose of the host's storage under the same rules as the output directory.
+
+```bash
+# Chain the stages in one execution on a single box
+tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
+    --model StanfordAIMI/stanford-deidentifier-v2 --execution-mode streamed
+```
+
 #### Why small boxes deadlock (and how to size knobs by hardware)
+
+This section is about **`discrete` mode**, which is fully supported on ≲4-CPU
+boxes and always has been. `streamed` is refused there outright — do not try to
+size these knobs for it.
 
 Ray Data runs every operator of a stage concurrently and, under Ray 2.55's
 reservation allocator, must reserve a minimum CPU slice for **every** eligible
@@ -465,6 +521,13 @@ Pages artifact.
 - Format-preserving encryption maintains data format during encryption
 - Key management supports generation, storage, and rotation
 - Anonymization strategies are designed to prevent re-identification
+- `--execution-mode streamed` keeps raw `note_text` in Ray's object store for the
+  whole run and may spill it, in plaintext, to Ray's local spill directory. The
+  host is the trust boundary in either mode — it already holds the input Parquet
+  and, in `discrete` mode, the `02_`/`04_` intermediates — so size host disk for
+  it and dispose of the host's storage under the same rules as the output
+  directory. If you point Ray's spill directory at a network mount or an
+  object-store FUSE path, that data leaves the host; keep it on local storage.
 
 ## Contributing
 

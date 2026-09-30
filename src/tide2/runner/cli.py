@@ -327,6 +327,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 llm_recognizer_mode=llm_mode,
                 llm_recognizer_kwargs=llm_kw if llm_kw else None,
                 hardware_autotune=getattr(args, "hardware_autotune", None) is not False,
+                execution_mode=getattr(args, "execution_mode", None) or "discrete",
             )
         else:
             print(f"Unknown job type: {args.job_type}")
@@ -583,6 +584,16 @@ Examples:
         # a YAML `hardware_autotune: false` is honoured; unset resolves to True.
         default=None,
         help="Disable automatic hardware-based setting recommendations (default: enabled)",
+    )
+    run_p.add_argument(
+        "--execution-mode",
+        choices=["discrete", "streamed"],
+        default=None,
+        help="Pipeline execution mode (pipeline jobs, default: discrete). 'discrete' runs each stage as its "
+        "own Ray Data execution with a Parquet boundary between them — required for multi-machine runs, "
+        "for ≲4-CPU boxes, and for row-level resume. 'streamed' chains the stages into one execution on a "
+        "single node, skipping the intermediate Parquet round-trips and overlapping GPU with CPU; it has no "
+        "row-level resume and writes only 06_anonymizer_output",
     )
     run_p.add_argument("--dry-run", action="store_true", help="Validate setup without processing")
     run_p.add_argument("--include-dashboard", action="store_true", help="Enable Ray dashboard (port 8265)")
