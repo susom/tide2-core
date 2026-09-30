@@ -24,40 +24,33 @@ from tide2.runner.fault_tolerance import configure_data_context
 logger = logging.getLogger(__name__)
 
 
-def _warn_deprecated_chunk_size(args: argparse.Namespace) -> None:
-    """Emit a DeprecationWarning if --chunk-size was passed (transformer/pipeline).
+# Flags that are parsed for backward compatibility but no longer do anything.
+# dest -> the message explaining what replaced it.
+_DEPRECATED_FLAGS: dict[str, str] = {
+    "chunk_size": (
+        "--chunk-size is deprecated and ignored: the per-window token budget is now the "
+        "model's real context window (MODEL_MAX_LENGTH). Remove it; use --chunk-overlap "
+        "to control window overlap."
+    ),
+    "batch_timeout": (
+        "--batch-timeout is deprecated and ignored: per-batch killing has been replaced "
+        "by Ray Data's execution-level no-progress timeout (--no-progress-timeout)."
+    ),
+}
 
-    The per-window token budget is now the model's real context window
-    (``MODEL_MAX_LENGTH``); ``--chunk-size`` no longer has any effect and is
-    ignored. ``--chunk-overlap`` still controls the token overlap between windows.
+
+def _warn_deprecated_flags(args: argparse.Namespace) -> None:
+    """Emit a DeprecationWarning for every no-op flag present in *args*.
+
+    Args:
+        args: Parsed CLI namespace; each dest in :data:`_DEPRECATED_FLAGS` that
+            was actually supplied produces one warning.
     """
-    if getattr(args, "chunk_size", None) is not None:
-        import warnings
+    import warnings
 
-        warnings.warn(
-            "--chunk-size is deprecated and ignored: the per-window token budget is now the "
-            "model's real context window (MODEL_MAX_LENGTH). Remove it; use --chunk-overlap "
-            "to control window overlap.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-
-def _warn_deprecated_batch_timeout(args: argparse.Namespace) -> None:
-    """Emit a DeprecationWarning if --batch-timeout was passed.
-
-    The per-batch timeout has been replaced by Ray Data's execution-level
-    no-progress timeout (--no-progress-timeout); --batch-timeout is a no-op.
-    """
-    if getattr(args, "batch_timeout", None) is not None:
-        import warnings
-
-        warnings.warn(
-            "--batch-timeout is deprecated and ignored: per-batch killing has been replaced "
-            "by Ray Data's execution-level no-progress timeout (--no-progress-timeout).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    for dest, message in _DEPRECATED_FLAGS.items():
+        if getattr(args, dest, None) is not None:
+            warnings.warn(message, DeprecationWarning, stacklevel=2)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -89,7 +82,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     dry_run = getattr(args, "dry_run", False)
 
-    _warn_deprecated_batch_timeout(args)
+    _warn_deprecated_flags(args)
     if no_prog is not None:
         configure_data_context(no_progress_timeout_s=no_prog)
 
@@ -143,7 +136,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             if not args.model:
                 print("Error: --model is required for transformer jobs")
                 sys.exit(1)
-            _warn_deprecated_chunk_size(args)
             transformer_kwargs: dict = {}
             for attr, key in [
                 ("num_gpus", "num_gpus"),
@@ -216,7 +208,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 sys.exit(1)
 
             # Build per-stage kwargs from CLI flags
-            _warn_deprecated_chunk_size(args)
             t_kw: dict = {}
             for attr, key in [
                 ("num_gpus", "num_gpus"),

@@ -47,6 +47,7 @@ from .fault_tolerance import GracefulShutdown
 from .fault_tolerance import configure_data_context
 from .fault_tolerance import get_ray_remote_args_cpu
 from .fault_tolerance import get_ray_remote_args_gpu
+from .hardware import alive_node_cpus
 from .hardware import apply_recommendations
 from .hardware import detect_hardware
 from .hardware import recommend_object_store_gb
@@ -288,8 +289,28 @@ def validate_stage_columns(
 
 
 def _alive_node_cpus() -> list[float]:
-    """CPU capacity of each alive node in the cluster."""
-    return [float(n.get("Resources", {}).get("CPU", 0.0)) for n in ray.nodes() if n.get("Alive")]
+    """CPU capacity of each alive node in the cluster.
+
+    Goes through :mod:`tide2.runner.hardware`, which is the only module that
+    reads ``ray.nodes()`` directly.
+    """
+    return alive_node_cpus()
+
+
+def _log_execution_timeout(stage: str, ctx: Any, extra: str = "") -> None:
+    """Log a Ray Data no-progress timeout uniformly for every stage.
+
+    Args:
+        stage: Human-readable stage name for the message.
+        ctx: The Ray ``DataContext`` the stage ran under.
+        extra: Optional sentence appended for stage-specific guidance.
+    """
+    logger.exception(
+        "%s failed due to execution timeout (no_progress_timeout_s=%s).%s",
+        stage,
+        getattr(ctx, "execution_no_progress_timeout_s", None),
+        f" {extra}" if extra else "",
+    )
 
 
 def check_streamed_admission(pool_minimums: dict[str, float]) -> float:
@@ -818,10 +839,7 @@ class LocalJobRunner:
             }
 
         except ray.data.exceptions.ExecutionTimeoutError:
-            logger.exception(
-                "Recognition failed due to execution timeout (no_progress_timeout_s=%s)",
-                getattr(ctx, "execution_no_progress_timeout_s", None),
-            )
+            _log_execution_timeout("Recognition", ctx)
             raise
         except Exception:
             logger.exception("Recognition failed")
@@ -1037,10 +1055,7 @@ class LocalJobRunner:
             }
 
         except ray.data.exceptions.ExecutionTimeoutError:
-            logger.exception(
-                "LLM Recognition failed due to execution timeout (no_progress_timeout_s=%s)",
-                getattr(ctx, "execution_no_progress_timeout_s", None),
-            )
+            _log_execution_timeout("LLM Recognition", ctx)
             raise
         except Exception:
             logger.exception("LLM Recognition failed")
@@ -1269,10 +1284,7 @@ class LocalJobRunner:
             }
 
         except ray.data.exceptions.ExecutionTimeoutError:
-            logger.exception(
-                "Anonymization failed due to execution timeout (no_progress_timeout_s=%s)",
-                getattr(ctx, "execution_no_progress_timeout_s", None),
-            )
+            _log_execution_timeout("Anonymization", ctx)
             raise
         except Exception:
             logger.exception("Anonymization failed")
@@ -2355,10 +2367,10 @@ class LocalJobRunner:
                 "operator_stats": operator_stats,
             }
         except ray.data.exceptions.ExecutionTimeoutError:
-            logger.exception(
-                "Streamed pipeline failed due to execution timeout (no_progress_timeout_s=%s). "
+            _log_execution_timeout(
+                "Streamed pipeline",
+                ctx,
                 "A 0/1 deadlock surfaces here: the named operator is the one that never started.",
-                getattr(ctx, "execution_no_progress_timeout_s", None),
             )
             raise
         except Exception:

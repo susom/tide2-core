@@ -20,6 +20,28 @@ DEPRECATED_MODEL_NAME = "20260211_debertav3_finetuned"
 CANONICAL_MODEL_NAME = "stanford-med-hdr/tide2-sentry-clinical-ner"
 
 
+def warn_if_deprecated_model(model_name: str | None, stacklevel: int = 3) -> None:
+    """Emit the deprecation warning when *model_name* is the retired alias.
+
+    Single source of the warning text so every caller (config loading, the
+    hardware recommender) says the same thing.
+
+    Args:
+        model_name: Model name to check; ``None`` and current names are no-ops.
+        stacklevel: Stack level to attribute the warning to, relative to the
+            caller of this function.
+    """
+    if model_name != DEPRECATED_MODEL_NAME:
+        return
+    warnings.warn(
+        f"Model '{DEPRECATED_MODEL_NAME}' is deprecated and will be removed in a future release. "
+        f"Use '{CANONICAL_MODEL_NAME}' instead. The model checkpoint is identical, "
+        "but the explanation string in recognizer results will change upon switching.",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
+
+
 def load_model_config(model_name: str) -> dict[str, Any]:
     """Load model configuration from the BERT transformer configuration file.
 
@@ -33,14 +55,7 @@ def load_model_config(model_name: str) -> dict[str, Any]:
         KeyError: If the model_name is not found in the configuration file
         FileNotFoundError: If the configuration file doesn't exist
     """
-    if model_name == DEPRECATED_MODEL_NAME:
-        warnings.warn(
-            f"Model '{DEPRECATED_MODEL_NAME}' is deprecated and will be removed in a future release. "
-            f"Use '{CANONICAL_MODEL_NAME}' instead. The model checkpoint is identical, "
-            "but the explanation string in recognizer results will change upon switching.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    warn_if_deprecated_model(model_name, stacklevel=3)
 
     config_path_str = get_resource_path(BERT_TRANSFORMER_CONFIG_FILE)
     config_path = Path(config_path_str)
