@@ -29,7 +29,7 @@ def _compute_expected_hash(salt: str | None, study_id: str | None, entity: str |
 
 def _get_worker_instance(acc_num_salt: str = "test_salt", acc_num_study_id: str = "test_study"):
     """Instantiate underlying worker class directly without Ray cluster."""
-    worker_cls = AnonymizerWorker.__ray_metadata__.modified_class
+    worker_cls = getattr(getattr(AnonymizerWorker, "__ray_metadata__", None), "modified_class", AnonymizerWorker)
     return worker_cls(
         salt=b"0" * 32,
         key=b"1" * 32,
@@ -298,7 +298,9 @@ class TestAnonymizerWorkerRayWorkflow:
 
     def test_remote_worker_execution(self):
         """Remote Ray actor processes note and preserves patient_uid scoping."""
-        worker = AnonymizerWorker.remote(
+        from tide2.actors.anonymizer import AnonymizerWorkerActor
+
+        worker = AnonymizerWorkerActor.remote(
             salt=b"0" * 32,
             key=b"1" * 32,
             acc_num_salt="ray_salt",

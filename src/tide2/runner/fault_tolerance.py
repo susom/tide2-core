@@ -130,12 +130,13 @@ def configure_data_context(
     target_min_block_size_mb: int = 1,
     read_op_min_num_blocks: int = 2000,
     max_errored_blocks: int = 100,
+    no_progress_timeout_s: float = 600.0,
 ) -> ray.data.DataContext:
     """
     Configure Ray Data context for optimal batch processing.
 
     This configures native Ray Data features for progress tracking,
-    memory management, and execution behavior.
+    memory management, execution behavior, and hang detection.
 
     Args:
         verbose_progress: Show detailed progress bars per operator.
@@ -147,11 +148,27 @@ def configure_data_context(
         max_errored_blocks: Maximum number of blocks that can error before
             aborting the dataset execution (default 100). Prevents node-level
             OOM kills from aborting the entire job.
+        no_progress_timeout_s: Execution-level hang detection timeout in seconds
+            (default 600.0, ~10x the slowest stage). Pass -1 to disable the
+            no-progress guard. 0 is invalid and raises ValueError.
+            Note: Ray Data's NoProgressGuard is execution-level (clock resets whenever
+            any operator moves a block or emits output) and is automatically
+            disabled by Ray if the execution topology contains an AllToAllOperator
+            or HashShufflingOperatorBase.
 
     Returns:
         Configured DataContext instance.
     """
+    if no_progress_timeout_s == 0:
+        raise ValueError(
+            "no_progress_timeout_s=0 is invalid. Pass -1 to disable the "
+            "no-progress guard, or a positive number of seconds."
+        )
+
     ctx = ray.data.DataContext.get_current()
+
+    # Hang detection guard
+    ctx.execution_no_progress_timeout_s = no_progress_timeout_s
 
     # Progress tracking
     ctx.execution_options.verbose_progress = verbose_progress
@@ -180,7 +197,8 @@ def configure_data_context(
         f"DataContext configured: verbose_progress={verbose_progress}, "
         f"block_size={target_min_block_size_mb}-{target_max_block_size_mb}MB, "
         f"read_op_min_num_blocks={read_op_min_num_blocks}, "
-        f"max_errored_blocks={max_errored_blocks}"
+        f"max_errored_blocks={max_errored_blocks}, "
+        f"no_progress_timeout_s={no_progress_timeout_s}"
     )
 
     return ctx

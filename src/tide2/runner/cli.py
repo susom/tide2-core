@@ -19,6 +19,8 @@ import logging
 import sys
 from pathlib import Path
 
+from tide2.runner.fault_tolerance import configure_data_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,6 +38,23 @@ def _warn_deprecated_chunk_size(args: argparse.Namespace) -> None:
             "--chunk-size is deprecated and ignored: the per-window token budget is now the "
             "model's real context window (MODEL_MAX_LENGTH). Remove it; use --chunk-overlap "
             "to control window overlap.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+
+def _warn_deprecated_batch_timeout(args: argparse.Namespace) -> None:
+    """Emit a DeprecationWarning if --batch-timeout was passed.
+
+    The per-batch timeout has been replaced by Ray Data's execution-level
+    no-progress timeout (--no-progress-timeout); --batch-timeout is a no-op.
+    """
+    if getattr(args, "batch_timeout", None) is not None:
+        import warnings
+
+        warnings.warn(
+            "--batch-timeout is deprecated and ignored: per-batch killing has been replaced "
+            "by Ray Data's execution-level no-progress timeout (--no-progress-timeout).",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -66,6 +85,11 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
 
     dry_run = getattr(args, "dry_run", False)
+
+    _warn_deprecated_batch_timeout(args)
+    no_prog = getattr(args, "no_progress_timeout_s", None)
+    if no_prog is not None:
+        configure_data_context(no_progress_timeout_s=no_prog)
 
     # Collect optional kwargs — only pass if explicitly set so runner uses its defaults
     optional_kwargs: dict = {}
@@ -362,7 +386,17 @@ Examples:
     run_p.add_argument("--output", "-o", help="Output path")
     run_p.add_argument("--num-actors", type=int, help="Number of actors (auto-detect if not set)")
     run_p.add_argument("--batch-size", type=int, help="Batch size per actor (default: 150 recognizer, 200 anonymizer)")
-    run_p.add_argument("--batch-timeout", type=int, help="Batch timeout in seconds (default: 120, recognizer only)")
+    run_p.add_argument(
+        "--batch-timeout",
+        type=int,
+        help="DEPRECATED and ignored: per-batch timeout replaced by execution-level --no-progress-timeout",
+    )
+    run_p.add_argument(
+        "--no-progress-timeout",
+        dest="no_progress_timeout_s",
+        type=float,
+        help="Execution-level timeout in seconds for Ray Data hang detection (default: 600, -1 disables)",
+    )
     run_p.add_argument("--num-cpus", type=int, help="Total CPUs for Ray cluster")
     run_p.add_argument(
         "--num-gpus",

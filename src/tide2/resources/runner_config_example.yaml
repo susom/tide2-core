@@ -34,11 +34,12 @@ read_cpus: 0.25
 read_op_min_num_blocks: 200
 target_max_block_size_mb: 128
 target_min_block_size_mb: 1
+# no_progress_timeout_s: 600.0  # Ray Data execution-level hang guard (seconds; -1 disables)
 
 # =========================================================================
 # Recognizer-specific
 # =========================================================================
-# batch_timeout: 120
+# batch_timeout: 120  # Deprecated and ignored; replaced by no_progress_timeout_s
 
 # =========================================================================
 # Anonymizer-specific
