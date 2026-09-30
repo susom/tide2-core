@@ -11,6 +11,10 @@
 mode: vm
 input: /mnt/gcs/standalone_anonymizer/input
 output: /mnt/gcs/standalone_anonymizer/output
+# Size unset knobs from the detected hardware profile (default: true). Values set
+# anywhere in this file always win. Set to false to run the pre-autotune defaults —
+# benchmarks should, so their settings do not change with the host.
+hardware_autotune: true
 
 # =========================================================================
 # Ray cluster tuning (all job types)
@@ -22,9 +26,13 @@ object_store_gb: 100
 # =========================================================================
 # Actor tuning (recognizer, anonymizer, pipeline)
 # =========================================================================
-num_actors: 100
+# num_actors / cpus_per_actor are left unset on purpose: the hardware recommender
+# sizes them from the detected node shape. The previous example here asked for
+# 100 actors x 2 CPUs against num_cpus: 224 — a supervisor-era pairing that
+# over-subscribes the cluster. Uncomment only to override the recommendation.
+# num_actors: 200
+# cpus_per_actor: 1
 batch_size: 200
-cpus_per_actor: 2
 
 # =========================================================================
 # Read tuning (recognizer, anonymizer)

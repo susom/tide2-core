@@ -7,6 +7,7 @@ from the BERT transformer configuration file.
 
 import json
 import logging
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,9 @@ from tide2.utils.resource_utils import BERT_TRANSFORMER_CONFIG_FILE
 from tide2.utils.resource_utils import get_resource_path
 
 logger = logging.getLogger(__name__)
+
+DEPRECATED_MODEL_NAME = "20260211_debertav3_finetuned"
+CANONICAL_MODEL_NAME = "stanford-med-hdr/tide2-sentry-clinical-ner"
 
 
 def load_model_config(model_name: str) -> dict[str, Any]:
@@ -29,6 +33,15 @@ def load_model_config(model_name: str) -> dict[str, Any]:
         KeyError: If the model_name is not found in the configuration file
         FileNotFoundError: If the configuration file doesn't exist
     """
+    if model_name == DEPRECATED_MODEL_NAME:
+        warnings.warn(
+            f"Model '{DEPRECATED_MODEL_NAME}' is deprecated and will be removed in a future release. "
+            f"Use '{CANONICAL_MODEL_NAME}' instead. The model checkpoint is identical, "
+            "but the explanation string in recognizer results will change upon switching.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     config_path_str = get_resource_path(BERT_TRANSFORMER_CONFIG_FILE)
     config_path = Path(config_path_str)
 
