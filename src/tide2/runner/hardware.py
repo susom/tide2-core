@@ -54,14 +54,20 @@ and output is byte-identical for callers who do not switch names.
 
 import logging
 import os
-import warnings
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
+
+from tide2.transformers.config import CANONICAL_MODEL_NAME
+from tide2.transformers.config import DEPRECATED_MODEL_NAME
+from tide2.transformers.config import warn_if_deprecated_model
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_MODEL = "stanford-med-hdr/tide2-sentry-clinical-ner"
-DEPRECATED_MODEL = "20260211_debertav3_finetuned"
+# The model registry owns these names and the deprecation warning text; this
+# module only keys ``MEASURED_MODELS`` off them.
+CANONICAL_MODEL = CANONICAL_MODEL_NAME
+DEPRECATED_MODEL = DEPRECATED_MODEL_NAME
 VRAM_MARGIN_GB = 1.0
 
 # The reference box: 16 vCPU / 1x L4 24 GB / 64 GB RAM. Every measured number in this
@@ -210,6 +216,7 @@ def classify_profile(node: NodeShape | None, homogeneous: bool = True) -> str:
     return "gpu-server" if gpu_present else "large-cpu"
 
 
+@lru_cache(maxsize=1)
 def _detect_system_ram_gb() -> float:
     """Detect system RAM in GB using psutil if available."""
     try:
@@ -221,8 +228,13 @@ def _detect_system_ram_gb() -> float:
         return 0.0
 
 
+@lru_cache(maxsize=1)
 def _detect_local_gpu_info() -> tuple[float, str | None, float | None]:
-    """Detect local GPU count, name, and VRAM in GB using PyTorch."""
+    """Detect local GPU count, name, and VRAM in GB using PyTorch.
+
+    Cached: the driver's devices are fixed for the process, and the probe
+    initializes a CUDA context, so it must happen at most once.
+    """
     try:
         import torch
 
@@ -258,6 +270,18 @@ def _ray_alive_nodes() -> list[dict[str, Any]]:
     except Exception:
         logger.debug("ray.nodes() unavailable; treating the cluster as one node", exc_info=True)
         return []
+
+
+def alive_node_cpus() -> list[float]:
+    """CPU capacity of each alive Ray node.
+
+    Exposed so callers that only need per-node CPU capacity don't have to read
+    ``ray.nodes()`` themselves — this module owns that probe.
+
+    Returns:
+        One CPU count per alive node; empty when Ray is unavailable.
+    """
+    return [float(n.get("Resources", {}).get("CPU", 0.0)) for n in _ray_alive_nodes()]
 
 
 def _shapes_from_ray_nodes(nodes_data: list[dict[str, Any]]) -> list[NodeShape]:
@@ -370,13 +394,7 @@ def _resolve_measured_batch_sizes(
 
     lookup_model = model_name
     if model_name == DEPRECATED_MODEL:
-        warnings.warn(
-            f"Model '{DEPRECATED_MODEL}' is deprecated and will be removed in a future release. "
-            f"Use '{CANONICAL_MODEL}' instead. The model checkpoint is identical, "
-            "but the explanation string in recognizer results will change upon switching.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
+        warn_if_deprecated_model(model_name, stacklevel=4)
         # Alias only for this lookup: the two registry entries stay distinct so the
         # deprecated key keeps returning its own DEFAULT_EXPLANATION.
         lookup_model = CANONICAL_MODEL
@@ -591,19 +609,15 @@ def apply_recommendations(
             "override_num_blocks": 16,
         }
 
-    legacy_recognizer = {
+    # Both CPU stages shipped with the same pre-recommender defaults.
+    legacy_cpu_stage = {
         "num_actors": legacy_rec_actors,
         "num_cpus": 0,
         "worker_num_cpus": 1.0,
         "override_num_blocks": 32,
     }
-
-    legacy_anonymizer = {
-        "num_actors": legacy_rec_actors,
-        "num_cpus": 0,
-        "worker_num_cpus": 1.0,
-        "override_num_blocks": 32,
-    }
+    legacy_recognizer = dict(legacy_cpu_stage)
+    legacy_anonymizer = dict(legacy_cpu_stage)
 
     legacy_runner = {
         "no_progress_timeout_s": 600,

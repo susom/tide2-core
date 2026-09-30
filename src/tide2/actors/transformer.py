@@ -69,6 +69,15 @@ _DEFAULT_GPU_BATCH_SIZE = 64
 _DEFAULT_WINDOW_OVERLAP = 40
 
 
+# Span-level IoU above which two aggregated entities are considered the same
+# detection (window overlap produces near-identical spans).
+_SPAN_DEDUP_IOU = 0.5
+
+# Columns carried through every transformer-side stage untouched when present.
+# Mirrors ``runner.local_runner.StageColumns.optional``.
+PASSTHROUGH_COLS = ("patient_identifiers", "patient_uid", "jitter", "row_id")
+
+
 def _numpy_default(obj: Any) -> Any:
     """json.dumps default handler for numpy scalar types."""
     if isinstance(obj, np.integer):
@@ -76,6 +85,79 @@ def _numpy_default(obj: Any) -> Any:
     if isinstance(obj, np.floating):
         return float(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _copy_passthrough(batch: dict[str, Any], res: dict[str, list[Any]], *, empty: bool = False) -> None:
+    """Copy the optional passthrough columns from *batch* into *res* in place.
+
+    Args:
+        batch: Incoming Ray Data batch.
+        res: Output batch being built; mutated in place.
+        empty: When True, emit empty lists instead of copying values (used for
+            the empty-batch path, which must still declare the columns).
+    """
+    for col in PASSTHROUGH_COLS:
+        if col in batch:
+            res[col] = [] if empty else list(batch[col])
+
+
+def format_note_entities(raw_tokens: list[dict], note_text: str, recognizer_name: str) -> tuple[str, int]:
+    """Aggregate one note's raw BIO tokens into ``recognizer_results_json``.
+
+    aggregate BIO tokens → dedup overlapping spans (IoU 0.5) → Presidio shape.
+    Reproduces the span-level output the old chunk→reassembly path produced, and
+    is shared by the inference actor's fused path and the standalone
+    :class:`BIOAggregationActor` so the two emit an identical schema.
+
+    Args:
+        raw_tokens: Raw BIO token dicts for a single note, document-relative.
+        note_text: The note's full text, used to slice ``matched_pattern``.
+        recognizer_name: Canonical Presidio recognizer name to stamp on entities.
+
+    Returns:
+        A ``(recognizer_results_json, entity_count)`` pair.
+    """
+    if not raw_tokens or not note_text:
+        return "[]", 0
+
+    # Remove duplicate raw tokens (window overlap produces them). Uses the
+    # stable fixed-schema key (``_RAW_PRED_KEYS``) rather than dict-insertion
+    # order, so dedup is deterministic regardless of JSON key ordering. The key
+    # includes ``index`` so identical spans from different windows survive to
+    # here — the span-level IoU dedup below collapses them.
+    raw_tokens = _dedupe_raw_predictions(raw_tokens)
+
+    # BIO tokens → aggregated spans (document-relative offsets already).
+    aggregated = aggregate_bio_tokens(raw_tokens, note_text)
+
+    # Normalize to the {entity,...} shape deduplicate_overlapping_entities and
+    # the formatter expect (aggregate_bio_tokens emits ``entity_group``).
+    entities = [
+        {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"]} for s in aggregated
+    ]
+    entities = deduplicate_overlapping_entities(entities, iou_threshold=_SPAN_DEDUP_IOU)
+
+    ner_results = []
+    for e in entities:
+        start = e["start"]
+        end = e["end"]
+        matched_text = note_text[start:end] if start < len(note_text) else ""
+        ner_results.append(
+            {
+                "entity_type": e["entity"],
+                "start": start,
+                "end": end,
+                "score": e["score"],
+                "analysis_explanation": None,
+                "recognition_metadata": {
+                    "recognizer_name": recognizer_name,
+                    "matched_pattern": matched_text,
+                    "recognizer_identifier": f"{recognizer_name}_{id(e)}",
+                },
+            }
+        )
+
+    return json.dumps(ner_results, ensure_ascii=False), len(ner_results)
 
 
 class TransformerInferenceActor:
@@ -222,7 +304,7 @@ class TransformerInferenceActor:
         """Get the model pipeline (for backwards compatibility)."""
         return self._core.pipeline
 
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
         Process a batch of **whole notes** through transformer inference (raw tokens).
 
@@ -269,9 +351,7 @@ class TransformerInferenceActor:
                 res["processing_timestamp"] = []
             else:
                 res["predictions_raw_json"] = []
-            for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
-                if col in batch:
-                    res[col] = []
+            _copy_passthrough(batch, res, empty=True)
             return res
 
         # Filter out None/empty texts
@@ -290,9 +370,7 @@ class TransformerInferenceActor:
                 res["processing_timestamp"] = [timestamp] * batch_size
             else:
                 res["predictions_raw_json"] = ["[]"] * batch_size
-            for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
-                if col in batch:
-                    res[col] = list(batch[col])
+            _copy_passthrough(batch, res)
             return res
 
         valid_texts = [note_texts[i] for i in valid_indices]
@@ -339,45 +417,13 @@ class TransformerInferenceActor:
                 "predictions_raw_json": predictions_raw_json_list,
             }
 
-        for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
-            if col in batch:
-                res[col] = list(batch[col])
+        _copy_passthrough(batch, res)
 
         return res
 
     def _format_note(self, raw_tokens: list[dict], note_text: str) -> tuple[str, int]:
-        """Aggregate one note's raw BIO tokens into recognizer_results_json."""
-        if not raw_tokens or not note_text:
-            return "[]", 0
-
-        raw_tokens = _dedupe_raw_predictions(raw_tokens)
-        aggregated = aggregate_bio_tokens(raw_tokens, note_text)
-        entities = [
-            {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"]} for s in aggregated
-        ]
-        entities = deduplicate_overlapping_entities(entities, iou_threshold=0.5)
-
-        ner_results = []
-        for e in entities:
-            start = e["start"]
-            end = e["end"]
-            matched_text = note_text[start:end] if note_text and start < len(note_text) else ""
-            ner_results.append(
-                {
-                    "entity_type": e["entity"],
-                    "start": start,
-                    "end": end,
-                    "score": e["score"],
-                    "analysis_explanation": None,
-                    "recognition_metadata": {
-                        "recognizer_name": self._recognizer_name,
-                        "matched_pattern": matched_text,
-                        "recognizer_identifier": f"{self._recognizer_name}_{id(e)}",
-                    },
-                }
-            )
-
-        return json.dumps(ner_results, ensure_ascii=False), len(ner_results)
+        """Aggregate one note's raw BIO tokens into ``recognizer_results_json``."""
+        return format_note_entities(raw_tokens, note_text, self._recognizer_name)
 
     def _log_gpu_mem(self, stage: str) -> None:
         """Log per-``__call__`` GPU memory when ``TIDE2_LOG_GPU_MEM`` is set.
@@ -572,53 +618,9 @@ class BIOAggregationActor:
         self._recognizer_name = format_transformer_recognizer_name(model_name)
 
     def _format_note(self, raw_json: str, note_text: str) -> tuple[str, int]:
-        """Aggregate one note's raw BIO tokens into ``recognizer_results_json``.
-
-        aggregate BIO tokens → dedup overlapping spans (IoU 0.5) → Presidio shape.
-        Reproduces the span-level output the old chunk→reassembly path produced.
-        """
+        """Decode one note's serialized raw BIO tokens and aggregate them."""
         raw_tokens = json.loads(raw_json) if raw_json else []
-        if not raw_tokens or not note_text:
-            return "[]", 0
-
-        # Remove duplicate raw tokens (window overlap produces them). Uses the
-        # stable fixed-schema key (``_RAW_PRED_KEYS``) rather than dict-insertion
-        # order, so dedup is deterministic regardless of JSON key ordering. The key
-        # includes ``index`` so identical spans from different windows survive to
-        # here — the span-level IoU dedup below collapses them.
-        raw_tokens = _dedupe_raw_predictions(raw_tokens)
-
-        # BIO tokens → aggregated spans (document-relative offsets already).
-        aggregated = aggregate_bio_tokens(raw_tokens, note_text)
-
-        # Normalize to the {entity,...} shape deduplicate_overlapping_entities and
-        # the formatter expect (aggregate_bio_tokens emits ``entity_group``).
-        entities = [
-            {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"]} for s in aggregated
-        ]
-        entities = deduplicate_overlapping_entities(entities, iou_threshold=0.5)
-
-        ner_results = []
-        for e in entities:
-            start = e["start"]
-            end = e["end"]
-            matched_text = note_text[start:end] if note_text and start < len(note_text) else ""
-            ner_results.append(
-                {
-                    "entity_type": e["entity"],
-                    "start": start,
-                    "end": end,
-                    "score": e["score"],
-                    "analysis_explanation": None,
-                    "recognition_metadata": {
-                        "recognizer_name": self._recognizer_name,
-                        "matched_pattern": matched_text,
-                        "recognizer_identifier": f"{self._recognizer_name}_{id(e)}",
-                    },
-                }
-            )
-
-        return json.dumps(ner_results, ensure_ascii=False), len(ner_results)
+        return format_note_entities(raw_tokens, note_text, self._recognizer_name)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Aggregate raw BIO tokens into document-level recognizer results."""
@@ -638,9 +640,7 @@ class BIOAggregationActor:
                 "entity_count": [],
                 "processing_timestamp": [],
             }
-            for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
-                if col in batch:
-                    res[col] = []
+            _copy_passthrough(batch, res, empty=True)
             return res
 
         timestamp = datetime.now(tz=UTC).isoformat()
@@ -663,9 +663,7 @@ class BIOAggregationActor:
             "entity_count": entity_counts,
             "processing_timestamp": [timestamp] * batch_size,
         }
-        for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
-            if col in batch:
-                res[col] = list(batch[col])
+        _copy_passthrough(batch, res)
         return res
 
 

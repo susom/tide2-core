@@ -20,10 +20,8 @@ Output columns:
     - processing_timestamp: ISO timestamp of processing
 """
 
-import contextlib
 import hashlib
 import logging
-import math
 import os
 import secrets
 from datetime import UTC
@@ -31,9 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import orjson
-import pandas as pd
 import ray
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
@@ -50,6 +46,7 @@ from tide2.anonymizers import presidio_patches
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
 logger = logging.getLogger(__name__)
@@ -57,30 +54,10 @@ logger = logging.getLogger(__name__)
 # Key size requirements
 REQUIRED_KEY_SIZE = 32
 
-# Per-note timeout - worker is killed if exceeded
-# 60s is sufficient based on benchmarks; anything longer indicates a hang
-NOTE_PROCESSING_TIMEOUT_SECONDS = 60
-
 # Chunk size for anonymization: notes longer than this are split into chunks
 # to avoid O(n*m) string concatenation in Presidio's TextReplaceBuilder.
 # Must match or exceed recognizer chunk size so entities don't cross boundaries.
 MAX_ANON_CHUNK_SIZE = 100_000
-
-
-def _is_null(value: Any) -> bool:
-    """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
-    if value is None:
-        return True
-    with contextlib.suppress(Exception):
-        res = pd.isna(value)
-        if isinstance(res, (bool, np.bool_)):
-            return bool(res)
-    with contextlib.suppress(TypeError, ValueError):
-        if isinstance(value, float) and math.isnan(value):
-            return True
-        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
-            return True
-    return False
 
 
 class AnonymizerWorker:
@@ -266,7 +243,7 @@ class AnonymizerWorker:
 
         # Convert numeric patient_uid to string, map null/NaN/nan/none to None
         clean_patient_uid: str | None = None
-        if not _is_null(patient_uid):
+        if not is_null(patient_uid):
             val_str = str(patient_uid).strip()
             if val_str.lower() not in ("nan", "none", "null", ""):
                 clean_patient_uid = val_str
@@ -325,7 +302,7 @@ class AnonymizerWorker:
         Returns:
             Integer jitter value in days.
         """
-        if _is_null(patient_uid):
+        if is_null(patient_uid):
             return secrets.randbelow(357) - 178  # Random between -178 and +178
         val_str = str(patient_uid).strip()
         if val_str.lower() in ("nan", "none", "null", ""):
@@ -466,7 +443,7 @@ class AnonymizerWorker:
             Dictionary with processing results for this note.
         """
         # Compute jitter from patient ID if not provided or if NaN
-        jitter_missing = _is_null(jitter)
+        jitter_missing = is_null(jitter)
         if jitter_missing:
             if self.jitter_required:
                 raise ValueError(f"Jitter value is required but missing for note {original_text_hash[:16]}")

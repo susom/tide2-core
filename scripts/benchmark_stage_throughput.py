@@ -60,6 +60,10 @@ import threading
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from parquet_utils import _resolve_parquet_files
+
 DEFAULT_MODEL = "stanford-med-hdr/tide2-sentry-clinical-ner"
 
 
@@ -91,18 +95,6 @@ def count_content_tokens(input_path: str, model_name: str, text_column: str = "n
         enc = tok(texts, add_special_tokens=False)["input_ids"]
         total += sum(len(ids) for ids in enc)
     return total
-
-
-def _resolve_parquet_files(path: str) -> list[Path]:
-    """Return parquet files from a file, directory, or ``*.parquet`` glob."""
-    p = Path(path)
-    if p.is_file():
-        return [p]
-    if p.is_dir():
-        return sorted(p.rglob("*.parquet"))
-    return sorted(
-        Path(p.anchor if p.is_absolute() else ".").glob(str(p.relative_to(p.anchor) if p.is_absolute() else p))
-    )
 
 
 # --------------------------------------------------------------------------- #

@@ -23,13 +23,11 @@ Thread/Process Safety:
 import hashlib
 import json
 import logging
-import math
 import time as _time
 from datetime import UTC
 from datetime import datetime
 from typing import Any
 
-import numpy as np
 import orjson
 import ray
 from presidio_analyzer import AnalyzerEngine
@@ -56,6 +54,7 @@ from tide2.recognizers import UrlRecognizer
 from tide2.recognizers import create_cached_recognizer
 from tide2.recognizers import create_recognizers_for_patient
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
 
@@ -98,13 +97,25 @@ class _DeduplicateLogFilter(logging.Filter):
         return True
 
 
+# One filter per process, matching the "once per process" contract above. Every
+# worker constructed in this process installs the same instance, so restarted or
+# pooled workers don't stack a new filter (and a new seen-set) on the shared
+# loggers each time.
+_DEDUPLICATE_LOG_FILTER = _DeduplicateLogFilter()
+_DEDUPLICATE_LOG_TARGETS = ("presidio-analyzer", "tide2")
+
+
+def _install_deduplicate_log_filter() -> None:
+    """Attach the process-wide dedup filter to the noisy loggers, at most once."""
+    for name in _DEDUPLICATE_LOG_TARGETS:
+        target = logging.getLogger(name)
+        if _DEDUPLICATE_LOG_FILTER not in target.filters:
+            target.addFilter(_DEDUPLICATE_LOG_FILTER)
+
+
 # Threshold constants for logging
 LONG_NOTE_CHAR_THRESHOLD = 100_000
 SLOW_PROCESSING_SECONDS = 10
-
-# Per-note timeout - worker is killed if exceeded
-# 60s is sufficient based on benchmarks; anything longer indicates a hang
-NOTE_PROCESSING_TIMEOUT_SECONDS = 60
 
 # Long note chunking parameters
 # Notes longer than this will be processed in chunks to avoid memory issues
@@ -145,21 +156,6 @@ ALL_SUPPORTED_ENTITIES = [
 ]
 
 logger = logging.getLogger(__name__)
-
-
-def _is_null(value: Any) -> bool:
-    """Check if a value is null/NaN (handles numpy NaN, None, and pandas NA)."""
-    if value is None:
-        return True
-    try:
-        # Handle numpy/pandas null values
-        if isinstance(value, float) and math.isnan(value):
-            return True
-        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
-            return True
-    except (TypeError, ValueError):
-        pass
-    return False
 
 
 class NoOpContextEnhancer(ContextAwareEnhancer):
@@ -271,9 +267,7 @@ class RecognizerWorker:
         )
 
         # Attach deduplicate log filter to suppress repeated Presidio warnings
-        log_filter = _DeduplicateLogFilter()
-        logging.getLogger("presidio-analyzer").addFilter(log_filter)
-        logging.getLogger("tide2").addFilter(log_filter)
+        _install_deduplicate_log_filter()
 
         logger.info("RecognizerWorker initialized with optimized AnalyzerEngine")
 
@@ -302,7 +296,7 @@ class RecognizerWorker:
         start_time = _time.time()
 
         # Handle empty/null notes
-        if not note_text or _is_null(note_text):
+        if not note_text or is_null(note_text):
             return {
                 "text_hash": text_hash,
                 "recognizer_results_json": "[]",
@@ -363,12 +357,12 @@ class RecognizerWorker:
         ad_hoc_recognizers = []
 
         # Add cached DL results recognizer if available
-        if cached_results and not _is_null(cached_results):
+        if cached_results and not is_null(cached_results):
             cached_recognizer = create_cached_recognizer(results=cached_results)
             ad_hoc_recognizers.append(cached_recognizer)
 
         # Add known values recognizers if patient PHI is available
-        if patient_identifiers and not _is_null(patient_identifiers):
+        if patient_identifiers and not is_null(patient_identifiers):
             try:
                 if isinstance(patient_identifiers, dict):
                     phi_dict = patient_identifiers
@@ -531,9 +525,9 @@ class RecognizerWorker:
                     patient_identifiers=patient_identifiers,
                 )
                 p_uid = patient_uids_col[i]
-                p_uid = str(text_hash) if _is_null(p_uid) or str(p_uid).strip() == "" else str(p_uid)
+                p_uid = str(text_hash) if is_null(p_uid) or str(p_uid).strip() == "" else str(p_uid)
 
-                if has_row_id and not _is_null(row_ids_col[i]):
+                if has_row_id and not is_null(row_ids_col[i]):
                     r_id = row_ids_col[i]
                 else:
                     r_id = hashlib.sha256(f"{text_hash}:{p_uid}".encode()).hexdigest()

@@ -9,6 +9,7 @@ the Ray actor.
 import logging
 import socket
 import threading
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from typing import NamedTuple
@@ -751,7 +752,7 @@ class TransformerCore:
             )
         return value
 
-    @property
+    @cached_property
     def model_max_length(self) -> int:
         """The model's real tokenized context window (from ``MODEL_MAX_LENGTH``).
 
@@ -760,7 +761,7 @@ class TransformerCore:
         """
         return self._resolve_model_max_length()
 
-    @property
+    @cached_property
     def num_special_tokens(self) -> int:
         """Special tokens the tokenizer adds around a single sequence.
 
@@ -772,7 +773,7 @@ class TransformerCore:
         self._ensure_pipeline_loaded()
         return int(self._tokenizer.num_special_tokens_to_add(pair=False))
 
-    @property
+    @cached_property
     def token_budget(self) -> int:
         """Per-window content-token budget: context window minus special tokens.
 

@@ -22,18 +22,17 @@ Concurrency:
 
 import json
 import logging
-import math
 import time as _time
 from datetime import UTC
 from datetime import datetime
 from typing import Any
 
-import numpy as np
 import ray
 from presidio_analyzer import RecognizerResult
 
 from tide2.recognizers.llm_json_recognizer import LlmJsonRecognizer
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
 # Chunking parameters for long notes
@@ -42,20 +41,6 @@ DEFAULT_CONTEXT_LENGTH = 128_000  # Default context window in tokens if not spec
 LLM_CHUNK_OVERLAP = 2_000  # Character overlap to avoid missing entities at boundaries
 
 logger = logging.getLogger(__name__)
-
-
-def _is_null(value: Any) -> bool:
-    """Check if a value is null/NaN (handles numpy NaN, None, and pandas NA)."""
-    if value is None:
-        return True
-    try:
-        if isinstance(value, float) and math.isnan(value):
-            return True
-        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
-            return True
-    except (TypeError, ValueError):
-        pass
-    return False
 
 
 class LlmRecognizerWorker:
@@ -204,7 +189,7 @@ class LlmRecognizerWorker:
 
             try:
                 # Handle empty/null notes
-                if not note_text or _is_null(note_text):
+                if not note_text or is_null(note_text):
                     out_text_hashes.append(text_hash)
                     results_json_list.append("[]")
                     entity_counts.append(0)
