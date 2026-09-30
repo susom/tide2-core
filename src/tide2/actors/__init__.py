@@ -1,13 +1,21 @@
 """
 Unified Ray actors for batch processing.
 
-This module provides Ray actors for recognition, anonymization, and transformer
-inference that work across all execution modes: local, VM, and cluster.
+This module provides Ray actors and worker classes for recognition,
+anonymization, and transformer inference that work across all execution modes:
+local, VM, and cluster.
 
-Actors:
-    RecognizerActor: PII/PHI recognition using Presidio AnalyzerEngine
-    AnonymizerActor: Anonymization using Presidio AnonymizerEngine with HIPS
+Ray Data UDFs:
+    RecognizerActor: Plain RecognizerWorker class passed to map_batches()
+    AnonymizerActor: Plain AnonymizerWorker class passed to map_batches()
+    LlmRecognizerActor: Plain LlmRecognizerWorker class passed to map_batches()
     TransformerInferenceActor: GPU-based transformer NER inference
+
+Note on .remote():
+    RecognizerActor, AnonymizerActor, and LlmRecognizerActor are plain callable
+    classes driven directly by Ray Data map_batches(). Calling .remote() on them
+    is not supported; use RecognizerWorkerActor, AnonymizerWorkerActor, or
+    LlmRecognizerWorkerActor if direct Ray remote actor spawning is required.
 
 Factory Functions:
     create_anonymizer_actor: Create AnonymizerActor with keys (bytes or file paths)

@@ -219,10 +219,28 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
   `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
   transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
   caps the actor's torch threads).
-- **Recognizer / anonymizer stages**: `--cpus-per-actor` (supervisor), `--worker-num-cpus`
-  (worker actor), `--read-cpus`, `--write-cpus`. Each pool slot needs supervisor +
-  worker CPUs, so budget both.
+- **Recognizer / anonymizer stages**: `--worker-num-cpus` (CPUs per worker actor),
+  `--read-cpus`, `--write-cpus`. Note: `--cpus-per-actor` is deprecated in favor of
+  `--worker-num-cpus`; both are additively resolved so existing configurations
+  reserve identical slot CPUs. Do not confuse actor CPUs (`--cpus-per-actor` /
+  `--worker-num-cpus`) with total cluster CPUs (`--num-cpus`).
 - **All stages on C ≲ 4**: add `--no-checkpoint`.
+
+### What happens when a run wedges
+
+Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
+
+- **Default timeout**: 600 seconds (~10× the slowest stage). If no operator in the
+  pipeline moves a block or emits an output for 600s, Ray Data raises `ExecutionTimeoutError`
+  and the run fails immediately rather than silently dropping rows.
+- **Raising or disabling the timeout**: For long wait times (e.g. cluster capacity delays
+  or unusually slow UDFs), raise the timeout via `--no-progress-timeout <seconds>`
+  (or in YAML config `no_progress_timeout_s: <seconds>`). Set `-1` to disable the guard.
+- **Legacy per-batch timeout**: `--batch-timeout` (formerly 120s) is deprecated and a no-op;
+  individual slow notes no longer cause entire batches to be discarded.
+- **Caveat on shuffle operators**: Ray Data's `NoProgressGuard` automatically disables itself
+  if the plan topology contains an `AllToAllOperator` or `HashShufflingOperatorBase`. Standard
+  pipeline stages and checkpointed pipelines retain active guard protection on primary execution.
 
 
 ### Interactive Visualizer

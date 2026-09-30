@@ -58,14 +58,11 @@ def _is_null(value: Any) -> bool:
     return False
 
 
-@ray.remote
 class LlmRecognizerWorker:
     """
-    Ray Actor that does the actual LLM-based recognition processing.
+    Worker class that executes LLM-based recognition directly under Ray Data.
 
     This worker holds the LlmJsonRecognizer state and processes batches of notes.
-    It is managed by LlmRecognizerSupervisor which handles timeouts by killing
-    and respawning this worker if a batch hangs.
     """
 
     def __init__(
@@ -255,29 +252,29 @@ class LlmRecognizerWorker:
                 )
                 continue
 
+        batch_timestamp = datetime.now(UTC).isoformat()
         return {
             "text_hash": out_text_hashes,
             "recognizer_results_json": results_json_list,
             "entity_count": entity_counts,
+            "processing_timestamp": [batch_timestamp] * len(out_text_hashes),
             "processing_status": processing_statuses,
             "error_message": error_messages,
         }
 
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+        """Process a batch of notes directly under Ray Data map_batches."""
+        return self.process_batch(batch)
+
 
 class LlmRecognizerSupervisor:
     """
-    Supervisor actor that wraps LlmRecognizerWorker with batch-level timeout.
+    Deprecated supervisor shim for backwards compatibility.
 
-    This actor is used by Ray Data's map_batches(). It sends the entire batch
-    to the worker in a single remote call to avoid per-note IPC overhead.
-    If the batch times out, the worker is killed and respawned.
-
-    The default batch_timeout is higher than RecognizerSupervisor (300s vs 120s)
-    because LLM API calls are slower than regex — a single note can take 1-5
-    seconds per LLM call, and with retries/chunking it could be longer.
+    Delegates directly to LlmRecognizerWorker in-process. Ray Data now drives
+    LlmRecognizerWorker directly with hang protection provided by Ray Data's
+    execution-level no-progress timeout.
     """
-
-    BATCH_TIMEOUT_SECONDS = 300
 
     def __init__(
         self,
@@ -290,12 +287,12 @@ class LlmRecognizerSupervisor:
         endpoint_id: int | None = None,
         max_retries: int = 3,
         context_length: int = DEFAULT_CONTEXT_LENGTH,
-        batch_timeout: int = BATCH_TIMEOUT_SECONDS,
+        batch_timeout: int | None = None,
         prompt_name: str = "phi_detection",
         worker_num_cpus: int | float | None = None,
     ) -> None:
         """
-        Initialize supervisor with a worker actor.
+        Initialize supervisor shim (deprecated).
 
         Args:
             project_id: Google Cloud project ID or project number.
@@ -306,120 +303,37 @@ class LlmRecognizerSupervisor:
             region: Cloud region for the API.
             endpoint_id: Optional Vertex AI endpoint ID.
             max_retries: Maximum retry attempts for failed LLM requests.
-            context_length: Model context window in tokens. Used to derive the
-                maximum chunk size for long notes (context_length * 4 chars/token).
-            batch_timeout: Seconds before a batch is killed and marked failed.
-            prompt_name: Name of the prompt config in resources/llm_prompts/ (default: "phi_detection").
-            worker_num_cpus: CPUs to reserve for each worker actor. None = Ray default (1).
-                Set to 0 for I/O-bound oversubscription (logical scheduling only).
+            context_length: Model context window in tokens.
+            batch_timeout: Deprecated and ignored.
+            prompt_name: Name of the prompt config in resources/llm_prompts/.
+            worker_num_cpus: Deprecated and ignored.
         """
-        self.batch_timeout = batch_timeout
-        self._worker_num_cpus = worker_num_cpus
-        self._worker_kwargs = {
-            "project_id": project_id,
-            "provider_type": provider_type,
-            "model_name": model_name,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "region": region,
-            "endpoint_id": endpoint_id,
-            "max_retries": max_retries,
-            "context_length": context_length,
-            "prompt_name": prompt_name,
-        }
-        self.worker = self._spawn_worker()
-        self.worker_kills = 0
-        logger.info(
-            "LlmRecognizerSupervisor initialized with %ds batch timeout, model=%s, worker_num_cpus=%s",
-            self.batch_timeout,
-            model_name,
-            self._worker_num_cpus,
+        import warnings
+
+        warnings.warn(
+            "LlmRecognizerSupervisor is deprecated and will be removed in a future release. "
+            "Pass LlmRecognizerWorker (or LlmRecognizerActor) directly to map_batches.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.worker = LlmRecognizerWorker(
+            project_id=project_id,
+            provider_type=provider_type,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            region=region,
+            endpoint_id=endpoint_id,
+            max_retries=max_retries,
+            context_length=context_length,
+            prompt_name=prompt_name,
         )
 
-    def _spawn_worker(self):
-        cls = LlmRecognizerWorker
-        if self._worker_num_cpus is not None:
-            cls = cls.options(num_cpus=self._worker_num_cpus)
-        return cls.remote(**self._worker_kwargs)
-
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """
-        Process a batch of notes via a single remote call to worker.
-
-        Sends the entire batch to worker.process_batch() in one ray.get().
-        If timeout occurs, kills worker, respawns, and returns empty batch.
-
-        Args:
-            batch: Dictionary with columnar data from Ray Data.
-
-        Returns:
-            Dictionary with processed results in columnar format.
-        """
-        cols = BatchColumns(batch)
-        batch_size = len(cols["note_text"])
-        batch_timestamp = datetime.now(UTC).isoformat()
-
-        try:
-            ref = self.worker.process_batch.remote(batch)
-            result = ray.get(ref, timeout=self.batch_timeout)
-
-        except ray.exceptions.GetTimeoutError:
-            logger.warning(
-                "Batch timeout after %ds (%d notes), killing worker",
-                self.batch_timeout,
-                batch_size,
-            )
-            ray.kill(self.worker)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"BatchTimeout: exceeded {self.batch_timeout}s for {batch_size} notes",
-            )
-
-        except ray.exceptions.ActorDiedError as e:
-            logger.warning(
-                "Worker died processing batch of %d notes, respawning",
-                batch_size,
-            )
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"ActorDiedError: {str(e)[:400]}",
-            )
-
-        except Exception as e:
-            logger.exception("Error processing batch of %d notes", batch_size)
-
-            return self._failed_batch(
-                batch,
-                f"{type(e).__name__}: {str(e)[:400]}",
-            )
-
-        else:
-            # Add timestamp column (use actual result size since failed notes are skipped)
-            result_size = len(result["text_hash"])
-            result["processing_timestamp"] = [batch_timestamp] * result_size
-            return result
-
-    def _failed_batch(self, batch: dict[str, Any], error: str) -> dict[str, list[Any]]:
-        """Log failure and return empty result so failed notes are not checkpointed."""
-        cols = BatchColumns(batch)
-        text_hashes = list(cols["text_hash"])
-        for th in text_hashes:
-            logger.error("Note %s failed: %s (will retry on next run)", th, error)
-        return {
-            "text_hash": [],
-            "recognizer_results_json": [],
-            "entity_count": [],
-            "processing_timestamp": [],
-            "processing_status": [],
-            "error_message": [],
-        }
+        """Delegate batch processing directly to in-process worker."""
+        return self.worker.process_batch(batch)
 
 
-# Backwards compatibility alias
-LlmRecognizerActor = LlmRecognizerSupervisor
+# Backwards compatibility aliases
+LlmRecognizerActor = LlmRecognizerWorker
+LlmRecognizerWorkerActor = ray.remote(LlmRecognizerWorker)

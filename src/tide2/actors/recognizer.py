@@ -106,13 +106,6 @@ SLOW_PROCESSING_SECONDS = 10
 # 60s is sufficient based on benchmarks; anything longer indicates a hang
 NOTE_PROCESSING_TIMEOUT_SECONDS = 60
 
-
-class NoteProcessingTimeoutError(Exception):
-    """Raised when note processing exceeds the timeout limit."""
-
-    pass
-
-
 # Long note chunking parameters
 # Notes longer than this will be processed in chunks to avoid memory issues
 MAX_NOTE_CHUNK_SIZE = 100_000  # 100KB per chunk
@@ -207,14 +200,11 @@ class NoOpContextEnhancer(ContextAwareEnhancer):
         return raw_results
 
 
-@ray.remote
 class RecognizerWorker:
     """
-    Ray Actor that does the actual recognition processing.
+    Worker class that executes recognition processing directly under Ray Data.
 
-    This worker holds the AnalyzerEngine state and processes individual notes.
-    It is managed by RecognizerSupervisor which handles timeouts by killing
-    and respawning this worker if a note hangs.
+    This worker holds the AnalyzerEngine state and processes batches of notes.
 
     Attributes:
         analyzer: The Presidio AnalyzerEngine instance with regex recognizers.
@@ -562,6 +552,7 @@ class RecognizerWorker:
                 logger.exception("Error processing note %s in batch, skipping (will retry on next run)", text_hash)
                 continue
 
+        batch_timestamp = datetime.now(UTC).isoformat()
         res = {
             "text_hash": out_text_hashes,
             "note_text": out_note_texts,
@@ -569,6 +560,7 @@ class RecognizerWorker:
             "row_id": out_row_ids,
             "recognizer_results_json": results_json_list,
             "entity_count": entity_counts,
+            "processing_timestamp": [batch_timestamp] * len(out_text_hashes),
             "processing_status": processing_statuses,
             "error_message": error_messages,
         }
@@ -576,127 +568,47 @@ class RecognizerWorker:
             res["jitter"] = out_jitters
         return res
 
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+        """Process a batch of notes directly under Ray Data map_batches."""
+        return self.process_batch(batch)
+
 
 class RecognizerSupervisor:
     """
-    Supervisor actor that wraps RecognizerWorker with batch-level timeout.
+    Deprecated supervisor shim for backwards compatibility.
 
-    This actor is used by Ray Data's map_batches(). It sends the entire batch
-    to the worker in a single remote call to avoid per-note IPC overhead.
-    If the batch times out, the worker is killed and respawned.
+    Delegates directly to RecognizerWorker in-process. Ray Data now drives
+    RecognizerWorker directly with hang protection provided by Ray Data's
+    execution-level no-progress timeout.
     """
-
-    # Batch timeout: generous enough for large/slow batches, short enough to detect hangs.
-    # At ~50ms/note, 100 notes = 5s expected. 120s allows for outlier notes.
-    BATCH_TIMEOUT_SECONDS = 120
 
     def __init__(
         self,
-        batch_timeout: int = BATCH_TIMEOUT_SECONDS,
+        batch_timeout: int | None = None,
         worker_num_cpus: int | float | None = None,
     ) -> None:
         """
-        Initialize supervisor with a worker actor.
+        Initialize supervisor shim (deprecated).
 
         Args:
-            batch_timeout: Seconds before a batch is killed and marked failed.
-            worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
-                default (1). Set lower to fit small boxes.
+            batch_timeout: Deprecated and ignored.
+            worker_num_cpus: Deprecated and ignored.
         """
-        self.batch_timeout = batch_timeout
-        self._worker_num_cpus = worker_num_cpus
-        self.worker = self._spawn_worker()
-        self.worker_kills = 0
-        logger.info(
-            f"RecognizerSupervisor initialized with {self.batch_timeout}s batch timeout, "
-            f"worker_num_cpus={self._worker_num_cpus}"
-        )
+        import warnings
 
-    def _spawn_worker(self) -> ray.actor.ActorHandle:
-        """Create a new RecognizerWorker, applying the CPU override when set."""
-        cls = RecognizerWorker
-        if self._worker_num_cpus is not None:
-            cls = cls.options(num_cpus=self._worker_num_cpus)
-        return cls.remote()
+        warnings.warn(
+            "RecognizerSupervisor is deprecated and will be removed in a future release. "
+            "Pass RecognizerWorker (or RecognizerActor) directly to map_batches.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.worker = RecognizerWorker()
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """
-        Process a batch of notes via a single remote call to worker.
-
-        Sends the entire batch to worker.process_batch() in one ray.get().
-        If timeout occurs, kills worker, respawns, and marks all notes as failed.
-
-        Args:
-            batch: Dictionary with columnar data from Ray Data.
-
-        Returns:
-            Dictionary with processed results in columnar format.
-        """
-        cols = BatchColumns(batch)
-        batch_size = len(cols["note_text"])
-        batch_timestamp = datetime.now(UTC).isoformat()
-
-        try:
-            ref = self.worker.process_batch.remote(batch)
-            result = ray.get(ref, timeout=self.batch_timeout)
-
-            # Add timestamp column (use actual result size since failed notes are skipped)
-            result_size = len(result["text_hash"])
-            result["processing_timestamp"] = [batch_timestamp] * result_size
-
-        except ray.exceptions.GetTimeoutError:
-            logger.warning(f"Batch timeout after {self.batch_timeout}s ({batch_size} notes), killing worker")
-            ray.kill(self.worker)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"BatchTimeout: exceeded {self.batch_timeout}s for {batch_size} notes",
-            )
-
-        except ray.exceptions.ActorDiedError as e:
-            logger.warning("Worker died processing batch of %d notes, respawning", batch_size)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"ActorDiedError: {str(e)[:400]}",
-            )
-
-        except Exception as e:
-            logger.exception("Error processing batch of %d notes", batch_size)
-
-            return self._failed_batch(
-                batch,
-                f"{type(e).__name__}: {str(e)[:400]}",
-            )
-
-        else:
-            return result
-
-    def _failed_batch(self, batch: dict[str, Any], error: str) -> dict[str, list[Any]]:
-        """Log failure and return empty result so failed notes are not checkpointed."""
-        cols = BatchColumns(batch)
-        text_hashes = list(cols["text_hash"])
-        for th in text_hashes:
-            logger.error("Note %s failed: %s (will retry on next run)", th, error)
-        res = {
-            "text_hash": [],
-            "note_text": [],
-            "patient_uid": [],
-            "row_id": [],
-            "recognizer_results_json": [],
-            "entity_count": [],
-            "processing_timestamp": [],
-            "processing_status": [],
-            "error_message": [],
-        }
-        if "jitter" in cols:
-            res["jitter"] = []
-        return res
+        """Delegate batch processing directly to in-process worker."""
+        return self.worker.process_batch(batch)
 
 
-# Backwards compatibility alias
-RecognizerActor = RecognizerSupervisor
+# Backwards compatibility aliases
+RecognizerActor = RecognizerWorker
+RecognizerWorkerActor = ray.remote(RecognizerWorker)

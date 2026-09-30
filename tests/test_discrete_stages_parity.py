@@ -235,6 +235,8 @@ def test_recognizer_worker_process_batch_passthrough():
     assert res["row_id"] == ["R456"]
     assert res["jitter"] == [5]
     assert res["text_hash"] == ["h1"]
+    assert "processing_timestamp" in res
+    assert len(res["processing_timestamp"]) == 1
 
 
 # ---------------------------------------------------------------------------

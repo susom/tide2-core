@@ -36,6 +36,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import ray
 import ray.data
+import ray.data.exceptions
 from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
@@ -54,6 +55,53 @@ logger = logging.getLogger(__name__)
 KEY_SIZE_BYTES = 32
 TARGET_NODE_CPUS = 16
 TARGET_NODE_CPU_ACTORS = 14
+DEFAULT_RECOGNITION_BATCH_TIMEOUT = 120
+DEFAULT_LLM_BATCH_TIMEOUT = 300
+
+
+def _resolve_slot_cpus(
+    num_cpus: int | float | None,
+    worker_num_cpus: int | float | None,
+    stage_name: str = "",
+) -> tuple[float, dict[str, Any], dict[str, Any]]:
+    """Resolve pool slot CPU reservation, preserving pre-collapse accounting.
+
+    Before removing the supervisor tier, each pool slot reserved ``num_cpus`` for
+    the supervisor actor plus ``worker_num_cpus`` (defaulting to 1.0) for the
+    spawned worker actor. To maintain exact cluster resource allocation across
+    all existing callers and configurations, this helper adds the two values together:
+        slot_cpus = float(num_cpus or 0.0) + (1.0 if worker_num_cpus is None else float(worker_num_cpus))
+
+    Args:
+        num_cpus: CPUs per actor/slot (deprecated).
+        worker_num_cpus: CPUs reserved for the worker actor.
+        stage_name: Name of the pipeline stage for logging/warnings.
+
+    Returns:
+        Tuple of (slot_cpus, ray_remote_args, resolved_config_dict).
+    """
+    if num_cpus is not None:
+        import warnings
+
+        warnings.warn(
+            f"{stage_name + ': ' if stage_name else ''}`num_cpus` (or `--cpus-per-actor` / YAML `cpus_per_actor`) "
+            "for stage actors is deprecated in favor of `worker_num_cpus`. "
+            "Total reserved CPUs per pool slot remain identical via additive resolution. "
+            "(Note: runner cluster-level `LocalJobRunner(num_cpus=...)` is unchanged.)",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    slot_cpus = float(num_cpus or 0.0) + (1.0 if worker_num_cpus is None else float(worker_num_cpus))
+    ray_remote_args = get_ray_remote_args_cpu(num_cpus=slot_cpus)
+    resolved = {
+        "stage": stage_name,
+        "input_num_cpus": num_cpus,
+        "input_worker_num_cpus": worker_num_cpus,
+        "resolved_slot_cpus": slot_cpus,
+        "ray_remote_args": ray_remote_args,
+    }
+    return slot_cpus, ray_remote_args, resolved
 
 
 def _configure_checkpoint(
@@ -181,10 +229,10 @@ class LocalJobRunner:
     def _auto_num_actors(self, fraction: float = 0.45) -> int:
         """Auto-detect number of actors from cluster resources.
 
-        Uses 0.45 of available CPUs by default because the supervisor/worker
-        pattern doubles the actual process count (each supervisor spawns a
-        remote worker actor). On a 224-CPU machine this yields ~100 supervisors
-        + ~100 workers = ~200 processes.
+        Uses 0.45 of available CPUs by default (provisional pending Plan 2).
+        With direct worker actors in Ray Data, this reserves a conservative
+        fraction of cluster CPU capacity to ensure concurrent read/write and
+        ancillary tasks have ample headroom.
         """
         cpus = ray.cluster_resources().get("CPU", 4)
         return max(1, int(cpus * fraction))
@@ -227,7 +275,7 @@ class LocalJobRunner:
 
         return num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors
 
-    def run_recognition(
+    def run_recognition(  # noqa: PLR0915
         self,
         input_path: str | list[str],
         output_path: str,
@@ -297,6 +345,24 @@ class LocalJobRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         shutdown = GracefulShutdown()
 
+        # Warn if batch_timeout was passed
+        if batch_timeout != DEFAULT_RECOGNITION_BATCH_TIMEOUT:
+            import warnings
+
+            warnings.warn(
+                "`batch_timeout` is deprecated and ignored; Ray Data's execution-level "
+                "no-progress timeout now guards against hangs.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        # Resolve slot CPU reservation
+        _slot_cpus, ray_remote_args, resolved_cpus = _resolve_slot_cpus(
+            num_cpus=num_cpus,
+            worker_num_cpus=worker_num_cpus,
+            stage_name="run_recognition",
+        )
+
         # Resolve input files
         input_files = resolve_input_files(input_path)
         if not input_files:
@@ -320,12 +386,16 @@ class LocalJobRunner:
         ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
+        ctx = ray.data.DataContext.get_current()
         logger.info("Recognition job starting")
         logger.info(f"  Input: {input_path}")
         logger.info(f"  Output: {output_path}")
-        logger.info(f"  Actors: {num_actors}, Batch size: {batch_size}, CPUs/actor: {num_cpus}")
-
-        ray_remote_args = get_ray_remote_args_cpu(num_cpus=num_cpus)
+        logger.info(
+            f"  Actors: {num_actors}, Batch size: {batch_size}, "
+            f"Slot CPUs: {_slot_cpus} (from num_cpus={num_cpus}, worker_num_cpus={worker_num_cpus}), "
+            f"no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}"
+        )
+        logger.info(f"  Resolved CPU config: {resolved_cpus}")
 
         try:
             logger.info(f"Processing {len(input_files)} files in single streaming pipeline")
@@ -347,7 +417,6 @@ class LocalJobRunner:
             # _configure_checkpoint for why enable_checkpoint=False is REQUIRED on
             # tiny clusters (≲4 CPUs, e.g. 2-CPU Colab) and why disabling
             # op_resource_reservation_enabled does NOT help.
-            ctx = ray.data.DataContext.get_current()
             _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column="text_hash")
 
             # Single streaming pipeline — no repartition, no segment loop.
@@ -366,10 +435,6 @@ class LocalJobRunner:
                 RecognizerActor,
                 batch_size=batch_size,
                 compute=ray.data.ActorPoolStrategy(size=num_actors),
-                fn_constructor_kwargs={
-                    "batch_timeout": batch_timeout,
-                    "worker_num_cpus": worker_num_cpus,
-                },
                 **ray_remote_args,
             )
             processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
@@ -387,6 +452,12 @@ class LocalJobRunner:
                 "batch_size": batch_size,
             }
 
+        except ray.data.exceptions.ExecutionTimeoutError:
+            logger.exception(
+                "Recognition failed due to execution timeout (no_progress_timeout_s=%s)",
+                getattr(ctx, "execution_no_progress_timeout_s", None),
+            )
+            raise
         except Exception:
             logger.exception("Recognition failed")
             raise
@@ -485,6 +556,24 @@ class LocalJobRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         shutdown = GracefulShutdown()
 
+        # Warn if batch_timeout was passed
+        if batch_timeout != DEFAULT_LLM_BATCH_TIMEOUT:
+            import warnings
+
+            warnings.warn(
+                "`batch_timeout` is deprecated and ignored; Ray Data's execution-level "
+                "no-progress timeout now guards against hangs.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+        # Resolve slot CPU reservation
+        _slot_cpus, ray_remote_args, resolved_cpus = _resolve_slot_cpus(
+            num_cpus=num_cpus,
+            worker_num_cpus=worker_num_cpus,
+            stage_name="run_llm_recognition",
+        )
+
         # Resolve input files
         input_files = resolve_input_files(input_path)
         if not input_files:
@@ -500,13 +589,17 @@ class LocalJobRunner:
         required_cols = ["text_hash", "note_text"]
         columns = detect_columns(input_files[0], required_cols, [])
 
+        ctx = ray.data.DataContext.get_current()
         logger.info("LLM Recognition job starting")
         logger.info(f"  Input: {input_path}")
         logger.info(f"  Output: {output_path}")
         logger.info(f"  Model: {model_name} (provider: {provider_type}, prompt: {prompt_name})")
-        logger.info(f"  Actors: {num_actors}, Batch size: {batch_size}, CPUs/actor: {num_cpus}")
-
-        ray_remote_args = get_ray_remote_args_cpu(num_cpus=num_cpus)
+        logger.info(
+            f"  Actors: {num_actors}, Batch size: {batch_size}, "
+            f"Slot CPUs: {_slot_cpus} (from num_cpus={num_cpus}, worker_num_cpus={worker_num_cpus}), "
+            f"no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}"
+        )
+        logger.info(f"  Resolved CPU config: {resolved_cpus}")
 
         try:
             logger.info(f"Processing {len(input_files)} files in single streaming pipeline")
@@ -531,7 +624,6 @@ class LocalJobRunner:
             # _configure_checkpoint for why this must be disabled on tiny clusters
             # (the checkpoint shuffle deadlocks Ray 2.55's reservation allocator, and
             # disabling op_resource_reservation_enabled does NOT help).
-            ctx = ray.data.DataContext.get_current()
             _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column="text_hash")
 
             # Single streaming pipeline
@@ -558,8 +650,6 @@ class LocalJobRunner:
                     "region": region,
                     "endpoint_id": endpoint_id,
                     "max_retries": max_retries,
-                    "batch_timeout": batch_timeout,
-                    "worker_num_cpus": worker_num_cpus,
                 },
                 **ray_remote_args,
             )
@@ -581,6 +671,12 @@ class LocalJobRunner:
                 "provider_type": provider_type,
             }
 
+        except ray.data.exceptions.ExecutionTimeoutError:
+            logger.exception(
+                "LLM Recognition failed due to execution timeout (no_progress_timeout_s=%s)",
+                getattr(ctx, "execution_no_progress_timeout_s", None),
+            )
+            raise
         except Exception:
             logger.exception("LLM Recognition failed")
             raise
@@ -681,6 +777,13 @@ class LocalJobRunner:
         output_dir.mkdir(parents=True, exist_ok=True)
         shutdown = GracefulShutdown()
 
+        # Resolve slot CPU reservation
+        _slot_cpus, ray_remote_args, resolved_cpus = _resolve_slot_cpus(
+            num_cpus=num_cpus,
+            worker_num_cpus=worker_num_cpus,
+            stage_name="run_anonymization",
+        )
+
         # Resolve input files
         input_files = resolve_input_files(input_path)
         if not input_files:
@@ -696,10 +799,16 @@ class LocalJobRunner:
         optional_cols = ["patient_uid", "patient_id", "jitter", "row_id"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
+        ctx = ray.data.DataContext.get_current()
         logger.info("Anonymization job starting")
         logger.info(f"  Input: {input_path}")
         logger.info(f"  Output: {output_path}")
-        logger.info(f"  Actors: {num_actors}, Batch size: {batch_size}, CPUs/actor: {num_cpus}")
+        logger.info(
+            f"  Actors: {num_actors}, Batch size: {batch_size}, "
+            f"Slot CPUs: {_slot_cpus} (from num_cpus={num_cpus}, worker_num_cpus={worker_num_cpus}), "
+            f"no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}"
+        )
+        logger.info(f"  Resolved CPU config: {resolved_cpus}")
 
         # Create actor class with keys
         AnonymizerActor = create_anonymizer_actor_class(  # noqa: N806 # its a type
@@ -710,8 +819,6 @@ class LocalJobRunner:
             jitter_required=jitter_required,
             worker_num_cpus=worker_num_cpus,
         )
-
-        ray_remote_args = get_ray_remote_args_cpu(num_cpus=num_cpus)
 
         try:
             logger.info(f"Processing {len(input_files)} files in single streaming pipeline")
@@ -734,7 +841,6 @@ class LocalJobRunner:
             # _configure_checkpoint for why this must be disabled on tiny clusters
             # (the checkpoint shuffle deadlocks Ray 2.55's reservation allocator, and
             # disabling op_resource_reservation_enabled does NOT help).
-            ctx = ray.data.DataContext.get_current()
             id_col = "row_id" if "row_id" in columns else "text_hash"
             _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=id_col)
 
@@ -758,9 +864,9 @@ class LocalJobRunner:
             )
             processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
-            # Guard against silent total failure: Ray's max_errored_blocks and the
-            # supervisor's _failed_batch fallback can turn every dropped batch into a
-            # successful-looking 0-row write. Surface that as a hard error instead.
+            # Guard against silent total failure: Ray's max_errored_blocks can turn
+            # every dropped batch into a successful-looking 0-row write.
+            # Surface that as a hard error instead.
             import pyarrow.dataset as _pad
 
             try:
@@ -794,6 +900,12 @@ class LocalJobRunner:
                 "output_rows": output_rows,
             }
 
+        except ray.data.exceptions.ExecutionTimeoutError:
+            logger.exception(
+                "Anonymization failed due to execution timeout (no_progress_timeout_s=%s)",
+                getattr(ctx, "execution_no_progress_timeout_s", None),
+            )
+            raise
         except Exception:
             logger.exception("Anonymization failed")
             raise
@@ -1230,6 +1342,8 @@ class LocalJobRunner:
         r_num_actors = TARGET_NODE_CPU_ACTORS if available_cpus >= TARGET_NODE_CPUS else max(1, int(available_cpus - 2))
         r_kwargs: dict[str, Any] = dict(r_kw)
         r_kwargs.setdefault("num_actors", r_num_actors)
+        # Note: with direct worker actors, worker_num_cpus=1.0 is the single CPU knob per slot.
+        # num_cpus=0 is preserved for additive resolution compatibility (0 + 1.0 = 1.0).
         r_kwargs.setdefault("num_cpus", 0)
         r_kwargs.setdefault("worker_num_cpus", 1.0)
         r_kwargs.setdefault("override_num_blocks", 32)
@@ -1400,6 +1514,8 @@ class LocalJobRunner:
             )
             a_kwargs: dict[str, Any] = dict(a_kw)
             a_kwargs.setdefault("num_actors", a_num_actors)
+            # Note: with direct worker actors, worker_num_cpus=1.0 is the single CPU knob per slot.
+            # num_cpus=0 is preserved for additive resolution compatibility (0 + 1.0 = 1.0).
             a_kwargs.setdefault("num_cpus", 0)
             a_kwargs.setdefault("worker_num_cpus", 1.0)
             a_kwargs.setdefault("override_num_blocks", 32)

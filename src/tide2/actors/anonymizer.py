@@ -67,12 +67,6 @@ NOTE_PROCESSING_TIMEOUT_SECONDS = 60
 MAX_ANON_CHUNK_SIZE = 100_000
 
 
-class NoteProcessingTimeoutError(Exception):
-    """Raised when note processing exceeds the timeout limit."""
-
-    pass
-
-
 def _is_null(value: Any) -> bool:
     """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
     if value is None:
@@ -89,14 +83,11 @@ def _is_null(value: Any) -> bool:
     return False
 
 
-@ray.remote
 class AnonymizerWorker:
     """
-    Ray Actor that does the actual anonymization processing.
+    Worker class that executes anonymization processing directly under Ray Data.
 
-    This worker holds the AnonymizerEngine state and processes individual notes.
-    It is managed by AnonymizerSupervisor which handles timeouts by killing
-    and respawning this worker if a note hangs.
+    This worker holds the AnonymizerEngine state and processes batches of notes.
 
     Attributes:
         anonymizer_engine: The Presidio AnonymizerEngine instance.
@@ -615,12 +606,14 @@ class AnonymizerWorker:
                 )
                 continue
 
+        batch_timestamp = datetime.now(UTC).isoformat()
         result = {
             "text_hash": original_text_hashes,
             "patient_uid": patient_uids,
             "anonymized_note_text": anonymized_texts,
             "anonymizer_results_json": anonymizer_results_json_list,
             "entity_count": entity_counts,
+            "processing_timestamp": [batch_timestamp] * len(original_text_hashes),
             "processing_status": processing_statuses,
             "error_message": error_messages,
         }
@@ -629,18 +622,19 @@ class AnonymizerWorker:
             result["row_id"] = row_ids
         return result
 
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+        """Process a batch of notes directly under Ray Data map_batches."""
+        return self.process_batch(batch)
+
 
 class AnonymizerSupervisor:
     """
-    Supervisor that wraps AnonymizerWorker with batch-level timeout.
+    Deprecated supervisor shim for backwards compatibility.
 
-    This class is used by Ray Data's map_batches(). It sends the entire batch
-    to the worker in a single remote call to avoid per-note IPC overhead.
-    If the batch times out, the worker is killed and respawned.
+    Delegates directly to AnonymizerWorker in-process. Ray Data now drives
+    AnonymizerWorker directly with hang protection provided by Ray Data's
+    execution-level no-progress timeout.
     """
-
-    # Batch timeout: generous enough for large/slow batches, short enough to detect hangs.
-    BATCH_TIMEOUT_SECONDS = 120
 
     def __init__(
         self,
@@ -648,137 +642,47 @@ class AnonymizerSupervisor:
         key: bytes,
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
-        timeout: int = NOTE_PROCESSING_TIMEOUT_SECONDS,
+        timeout: int | None = None,
         jitter_required: bool = False,
         worker_num_cpus: int | float | None = None,
     ) -> None:
         """
-        Initialize supervisor with a worker actor.
+        Initialize supervisor shim (deprecated).
 
         Args:
             salt: 32-byte salt for HIPS anonymizers.
             key: 32-byte key for HIPS anonymizers.
             acc_num_salt: Salt for accession number hashing.
             acc_num_study_id: Study ID for accession number hashing.
-            timeout: Legacy per-note timeout (kept for backwards compatibility).
+            timeout: Deprecated and ignored.
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
-            worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
-                default (1). Set lower to fit small boxes.
+            worker_num_cpus: Deprecated and ignored.
         """
-        self.salt = salt
-        self.key = key
-        self.acc_num_salt = acc_num_salt
-        self.acc_num_study_id = acc_num_study_id
-        self.timeout = timeout
-        self.jitter_required = jitter_required
-        self._worker_num_cpus = worker_num_cpus
-        self.worker = self._spawn_worker()
-        self.worker_kills = 0
-        logger.info(
-            f"AnonymizerSupervisor initialized with {self.BATCH_TIMEOUT_SECONDS}s batch timeout, "
-            f"worker_num_cpus={self._worker_num_cpus}"
-        )
+        import warnings
 
-    def _spawn_worker(self) -> ray.actor.ActorHandle:
-        """Create a new AnonymizerWorker actor, applying the CPU override when set."""
-        cls = AnonymizerWorker
-        if self._worker_num_cpus is not None:
-            cls = cls.options(num_cpus=self._worker_num_cpus)
-        return cls.remote(
-            salt=self.salt,
-            key=self.key,
-            acc_num_salt=self.acc_num_salt,
-            acc_num_study_id=self.acc_num_study_id,
-            jitter_required=self.jitter_required,
+        warnings.warn(
+            "AnonymizerSupervisor is deprecated and will be removed in a future release. "
+            "Pass AnonymizerWorker (or AnonymizerActor) directly to map_batches.",
+            DeprecationWarning,
+            stacklevel=2,
         )
-
-    @staticmethod
-    def compute_text_hash(text: str) -> str:
-        """Compute SHA256 hash of text."""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        self.worker = AnonymizerWorker(
+            salt=salt,
+            key=key,
+            acc_num_salt=acc_num_salt,
+            acc_num_study_id=acc_num_study_id,
+            jitter_required=jitter_required,
+        )
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """
-        Process a batch of notes via a single remote call to worker.
-
-        Sends the entire batch to worker.process_batch() in one ray.get().
-        If timeout occurs, kills worker, respawns, and marks all notes as failed.
-
-        Args:
-            batch: Dictionary with columnar data from Ray Data.
-
-        Returns:
-            Dictionary with processed results in columnar format.
-        """
-        cols = BatchColumns(batch)
-        batch_size = len(cols["note_text"])
-        batch_timestamp = datetime.now(UTC).isoformat()
-
-        try:
-            ref = self.worker.process_batch.remote(batch)
-            result = ray.get(ref, timeout=self.BATCH_TIMEOUT_SECONDS)
-
-            # Add timestamp column (use actual result size since failed notes are skipped)
-            result_size = len(result["text_hash"])
-            result["processing_timestamp"] = [batch_timestamp] * result_size
-
-        except ray.exceptions.GetTimeoutError:
-            logger.warning(f"Batch timeout after {self.BATCH_TIMEOUT_SECONDS}s ({batch_size} notes), killing worker")
-            ray.kill(self.worker)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"BatchTimeout: exceeded {self.BATCH_TIMEOUT_SECONDS}s for {batch_size} notes",
-            )
-
-        except ray.exceptions.ActorDiedError as e:
-            logger.warning("Worker died anonymizing batch of %d notes, respawning", batch_size)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"ActorDiedError: {str(e)[:400]}",
-            )
-
-        except Exception as e:
-            logger.exception("Error anonymizing batch of %d notes", batch_size)
-
-            return self._failed_batch(
-                batch,
-                f"{type(e).__name__}: {str(e)[:400]}",
-            )
-
-        else:
-            return result
-
-    def _failed_batch(self, batch: dict[str, Any], error: str) -> dict[str, list[Any]]:
-        """Log failure and return empty result so failed notes are not checkpointed."""
-        cols = BatchColumns(batch)
-        for note_text in cols["note_text"]:
-            th = self.compute_text_hash(note_text)
-            logger.error("Note %s failed: %s (will retry on next run)", th[:16], error)
-        result = {
-            "text_hash": [],
-            "patient_uid": [],
-            "anonymized_note_text": [],
-            "anonymizer_results_json": [],
-            "entity_count": [],
-            "processing_timestamp": [],
-            "processing_status": [],
-            "error_message": [],
-        }
-        # Preserve row_id column in output schema when input has it
-        if "row_id" in batch:
-            result["row_id"] = []
-        return result
+        """Delegate batch processing directly to in-process worker."""
+        return self.worker.process_batch(batch)
 
 
-# Backwards compatibility alias
-AnonymizerActor = AnonymizerSupervisor
+# Backwards compatibility aliases
+AnonymizerActor = AnonymizerWorker
+AnonymizerWorkerActor = ray.remote(AnonymizerWorker)
 
 
 def _load_key_material(key_material: bytes | str | os.PathLike) -> bytes:
@@ -797,9 +701,9 @@ def create_anonymizer_actor(
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
     worker_num_cpus: int | float | None = None,
-) -> type[AnonymizerSupervisor]:
+) -> type[AnonymizerWorker]:
     """
-    Factory function to create an AnonymizerSupervisor class with specific keys.
+    Factory function to create an AnonymizerWorker subclass with specific keys.
 
     This unified factory accepts keys as either raw bytes or file paths,
     making it work for both local/batch processing and cluster modes.
@@ -811,8 +715,8 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
-        worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
-            default (1). Set lower to fit small boxes.
+        worker_num_cpus: Accepted for backwards compatibility (ignored).
+            Pool slot CPU reservations are configured at the runner level.
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -827,12 +731,13 @@ def create_anonymizer_actor(
         # Mixed
         Actor = create_anonymizer_actor(Path("/keys/salt.key"), key_bytes)
     """
+    del worker_num_cpus  # Unused, retained for signature compatibility
     # Load key material (handles both bytes and file paths)
     salt_bytes = _load_key_material(salt)
     key_bytes = _load_key_material(key)
 
-    class ConfiguredAnonymizerActor(AnonymizerSupervisor):
-        """Pre-configured AnonymizerSupervisor with captured key material."""
+    class ConfiguredAnonymizerActor(AnonymizerWorker):
+        """Pre-configured AnonymizerWorker with captured key material."""
 
         def __init__(self):
             super().__init__(
@@ -841,7 +746,6 @@ def create_anonymizer_actor(
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
                 jitter_required=jitter_required,
-                worker_num_cpus=worker_num_cpus,
             )
 
     return ConfiguredAnonymizerActor
