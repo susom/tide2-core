@@ -16,6 +16,17 @@ output: /mnt/gcs/standalone_anonymizer/output
 # benchmarks should, so their settings do not change with the host.
 hardware_autotune: true
 
+# Pipeline execution mode (pipeline jobs only). Default and production value is
+# "discrete": every stage is its own Ray Data execution with a Parquet boundary
+# between them. That boundary is what lets the GPU stage run on one machine and
+# the CPU stages elsewhere as independent jobs, and it is what row-level resume
+# (enable_checkpoint) is keyed to — so multi-machine, unattended, and ≲4-CPU runs
+# must stay here. "streamed" chains the stages into one single-node execution:
+# faster for development, benchmarks and single-box batches, but no resume, only
+# 06_anonymizer_output is written, and note_text stays in the object store (and
+# may spill to local disk) for the whole run.
+execution_mode: discrete
+
 # =========================================================================
 # Ray cluster tuning (all job types)
 # =========================================================================

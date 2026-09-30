@@ -29,8 +29,11 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from typing import Literal
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -140,6 +143,206 @@ def _configure_checkpoint(
         )
     else:
         ctx.checkpoint_config = None
+
+
+@dataclass(frozen=True)
+class StageColumns:
+    """Static column contract for one pipeline stage.
+
+    Replaces ``detect_columns``' Parquet-footer sniffing on the streamed path,
+    where a chained stage has no file to read. ``requires`` must be present on
+    the stage's input, ``optional`` is passed through when present, and
+    ``produces`` is what the stage adds to (or replaces in) its output.
+    """
+
+    requires: frozenset[str]
+    optional: frozenset[str]
+    produces: frozenset[str]
+
+    def available_after(self, upstream: frozenset[str]) -> frozenset[str]:
+        """Columns available downstream of this stage given ``upstream`` columns."""
+        return (upstream & (self.requires | self.optional)) | self.produces
+
+
+#: Column contracts, mirroring the actor implementations in ``tide2.actors``.
+TRANSFORMER_STAGE_COLUMNS = StageColumns(
+    requires=frozenset({"text_hash", "note_text"}),
+    optional=frozenset({"patient_id", "patient_identifiers", "patient_uid", "jitter", "row_id"}),
+    produces=frozenset({"text_hash", "patient_id", "note_text", "recognizer_results_json"}),
+)
+RECOGNIZER_STAGE_COLUMNS = StageColumns(
+    requires=frozenset({"text_hash", "note_text"}),
+    optional=frozenset(
+        {"patient_identifiers", "recognizer_results_json", "patient_id", "patient_uid", "jitter", "row_id"}
+    ),
+    produces=frozenset(
+        {
+            "text_hash",
+            "note_text",
+            "patient_uid",
+            "row_id",
+            "recognizer_results_json",
+            "entity_count",
+            "processing_timestamp",
+            "processing_status",
+            "error_message",
+        }
+    ),
+)
+LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
+    requires=frozenset({"text_hash", "note_text"}),
+    optional=frozenset(),
+    produces=frozenset(
+        {"text_hash", "note_text", "recognizer_results_json", "entity_count", "processing_status", "error_message"}
+    ),
+)
+ANONYMIZER_STAGE_COLUMNS = StageColumns(
+    requires=frozenset({"text_hash", "note_text", "recognizer_results_json"}),
+    optional=frozenset({"patient_uid", "patient_id", "jitter", "row_id"}),
+    produces=frozenset(
+        {
+            "text_hash",
+            "patient_uid",
+            "anonymized_note_text",
+            "anonymizer_results_json",
+            "entity_count",
+            "processing_timestamp",
+            "processing_status",
+            "error_message",
+        }
+    ),
+)
+
+#: Columns the final sink is allowed to carry. Raw ``note_text`` is deliberately
+#: absent — see ``run_pipeline``'s invariants.
+FINAL_OUTPUT_COLUMNS = frozenset(
+    {
+        "text_hash",
+        "patient_uid",
+        "row_id",
+        "anonymized_note_text",
+        "anonymizer_results_json",
+        "entity_count",
+        "processing_timestamp",
+        "processing_status",
+        "error_message",
+    }
+)
+
+#: A node with at most this many CPUs cannot hold three concurrent actor pools.
+MIN_STREAMED_NODE_CPUS = 4
+
+#: Fraction of input rows that may be dropped before the streamed path warns.
+STREAMED_DROP_WARN_FRACTION = 0.01
+
+
+def _streamed_source_columns(contracts: list[tuple[str, "StageColumns"]]) -> frozenset[str]:
+    """Columns the source dataset must carry for a chained plan.
+
+    Only the first stage reads from the source; everything after it reads that
+    stage's output. Projecting the source to this set is both a memory control
+    (``note_text`` is the bulk of every block, and blocks now live in the object
+    store across all three operators) and a leakage control.
+    """
+    if not contracts:
+        return frozenset()
+    first = contracts[0][1]
+    return first.requires | first.optional
+
+
+def validate_stage_columns(
+    source_columns: Iterable[str],
+    stages: list[tuple[str, StageColumns]],
+) -> frozenset[str]:
+    """Validate a chained plan's column contracts against the source columns.
+
+    Walks the ``stages`` in order, threading each stage's ``available_after``
+    set into the next, and raises before a single operator is built. This runs
+    entirely on the static contracts plus the *source* column list, so it never
+    calls ``Dataset.schema()`` on a lazy mid-plan dataset (which can execute
+    upstream operators and silently defeat pipelining).
+
+    Args:
+        source_columns: Columns present on the source dataset.
+        stages: ``(stage_name, contract)`` pairs in execution order.
+
+    Returns:
+        The columns available after the last stage, including pass-through
+        columns a stage forwards but does not itself produce (``row_id``,
+        ``patient_uid``, ``jitter``).
+
+    Raises:
+        ValueError: If a stage's required columns are not available, naming the
+            stage and the missing columns.
+    """
+    available = frozenset(source_columns)
+    for name, contract in stages:
+        missing = contract.requires - available
+        if missing:
+            raise ValueError(
+                f"Stage {name!r} requires column(s) {sorted(missing)} which are not available at that point "
+                f"in the chain. Available: {sorted(available)}."
+            )
+        available = contract.available_after(available)
+    return available
+
+
+def _alive_node_cpus() -> list[float]:
+    """CPU capacity of each alive node in the cluster."""
+    return [float(n.get("Resources", {}).get("CPU", 0.0)) for n in ray.nodes() if n.get("Alive")]
+
+
+def check_streamed_admission(pool_minimums: dict[str, float]) -> float:
+    """Fail fast instead of deadlocking when the chained plan cannot be scheduled.
+
+    A chained plan holds every operator's pool resident at once. Under Ray
+    2.55+'s ``ReservationOpResourceAllocator`` the per-operator reservations must
+    all fit on a single node or nothing schedules and the run hangs at ``0/1``.
+    This converts that silent hang into an error.
+
+    This is a **heuristic**: the allocator reserves via
+    ``op_resource_reservation_ratio`` rather than literally summing pool
+    minimums, so it can pass and still be tight. The real backstop is the
+    execution-level no-progress guard (``no_progress_timeout_s``), which fires on
+    a ``0/1`` deadlock because that is pure no-progress.
+
+    Args:
+        pool_minimums: Operator name → minimum CPUs it reserves.
+
+    Returns:
+        The CPU capacity of the largest alive node.
+
+    Raises:
+        ValueError: If the cluster is multi-node, the largest node has
+            ≤ ``MIN_STREAMED_NODE_CPUS`` CPUs, or the minimums do not fit.
+    """
+    node_cpus = _alive_node_cpus()
+    if not node_cpus:
+        raise ValueError("No alive Ray nodes found; cannot admit a streamed plan.")
+    if len(node_cpus) > 1:
+        raise ValueError(
+            f"execution_mode='streamed' is single-node only; found {len(node_cpus)} alive nodes "
+            f"({node_cpus} CPUs). Use execution_mode='discrete', which is the multi-node path."
+        )
+    largest = max(node_cpus)
+    if largest <= MIN_STREAMED_NODE_CPUS:
+        raise ValueError(
+            f"execution_mode='streamed' needs more than {MIN_STREAMED_NODE_CPUS} CPUs on a single node "
+            f"(largest node has {largest}). Use execution_mode='discrete' with the small-box recipe "
+            "(fractional CPU knobs AND enable_checkpoint=False) — see README, 'Why small boxes deadlock'."
+        )
+
+    total_min = sum(pool_minimums.values())
+    budget = largest - 1.0
+    if total_min > budget:
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(pool_minimums.items()))
+        raise ValueError(
+            f"Streamed plan reserves a minimum of {total_min} CPUs ({breakdown}) but the node has "
+            f"{largest} CPUs (usable budget {budget}). Lower the per-operator minimums "
+            "(read_cpus, write_cpus, transformer_cpus, num_cpus/worker_num_cpus) or use "
+            "execution_mode='discrete'."
+        )
+    return largest
 
 
 class LocalJobRunner:
@@ -305,6 +508,138 @@ class LocalJobRunner:
 
         return num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors
 
+    # ------------------------------------------------------------------
+    # Stage builders
+    #
+    # Each builder resolves the actor class / pool / resources, calls
+    # ``map_batches``, and returns the new lazy ``Dataset``. They deliberately
+    # touch nothing else — no DataContext, no checkpoints, no filesystem, no
+    # timing — so the same call can be used by a discrete stage (read →
+    # build → write) and by the streamed path (build → build → build → write).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _actor_pool(num_actors: int, pool_min_size: int | None) -> "ray.data.ActorPoolStrategy":
+        """Fixed pool for discrete stages, autoscaling pool for chained plans.
+
+        ``pool_min_size=None`` reproduces the discrete path exactly
+        (``size=num_actors``). Passing a minimum switches to
+        ``min_size``/``max_size`` so idle pools release CPUs to the busy one as
+        the bottleneck shifts from GPU to CPU — required when three pools are
+        resident at once.
+        """
+        if pool_min_size is None:
+            return ray.data.ActorPoolStrategy(size=num_actors)
+        return ray.data.ActorPoolStrategy(min_size=min(pool_min_size, num_actors), max_size=num_actors)
+
+    def build_recognizer_stage(
+        self,
+        ds: Dataset,
+        *,
+        batch_size: int,
+        num_actors: int,
+        ray_remote_args: dict[str, Any],
+        pool_min_size: int | None = None,
+    ) -> Dataset:
+        """Append the regex/rule-based recognizer operator to ``ds``."""
+        from tide2.actors import RecognizerActor
+
+        return ds.map_batches(
+            RecognizerActor,
+            batch_size=batch_size,
+            compute=self._actor_pool(num_actors, pool_min_size),
+            **ray_remote_args,
+        )
+
+    def build_llm_recognizer_stage(
+        self,
+        ds: Dataset,
+        *,
+        batch_size: int,
+        num_actors: int,
+        ray_remote_args: dict[str, Any],
+        fn_constructor_kwargs: dict[str, Any],
+        pool_min_size: int | None = None,
+    ) -> Dataset:
+        """Append the LLM recognizer operator to ``ds``.
+
+        This stage is network-bound with its own retry behaviour: it *reserves*
+        CPU but barely uses any, so in a chained plan keep its slot reservation
+        small (e.g. ``num_cpus=0.25``) and size its pool independently of the
+        CPU budget.
+        """
+        from tide2.actors import LlmRecognizerActor
+
+        return ds.map_batches(
+            LlmRecognizerActor,
+            batch_size=batch_size,
+            compute=self._actor_pool(num_actors, pool_min_size),
+            fn_constructor_kwargs=fn_constructor_kwargs,
+            **ray_remote_args,
+        )
+
+    def build_anonymizer_stage(
+        self,
+        ds: Dataset,
+        *,
+        actor_cls: type,
+        batch_size: int,
+        num_actors: int,
+        ray_remote_args: dict[str, Any],
+        pool_min_size: int | None = None,
+    ) -> Dataset:
+        """Append the anonymizer operator to ``ds``.
+
+        ``actor_cls`` comes from ``create_anonymizer_actor_class`` (it closes
+        over the salt/key), so the builder never handles key material.
+        """
+        return ds.map_batches(
+            actor_cls,
+            batch_size=batch_size,
+            compute=self._actor_pool(num_actors, pool_min_size),
+            **ray_remote_args,
+        )
+
+    def build_transformer_stage(
+        self,
+        ds: Dataset,
+        *,
+        transformer_actor: type,
+        model_name: str,
+        batch_size: int,
+        num_transformer_actors: int,
+        ray_remote_args_transformer: dict[str, Any],
+        num_agg_actors: int,
+        agg_num_cpus: float,
+        pool_min_size: int = 1,
+    ) -> Dataset:
+        """Append the transformer inference (and optional BIO aggregation) operators.
+
+        When ``num_agg_actors == 0`` the actor aggregates BIO tokens in place and
+        a single operator is appended; otherwise a second CPU operator is chained
+        on, which streams concurrently with the GPU one.
+        """
+        ds_raw = ds.map_batches(
+            transformer_actor,
+            batch_size=batch_size,
+            batch_format="numpy",
+            compute=ray.data.ActorPoolStrategy(min_size=pool_min_size, max_size=num_transformer_actors),
+            **ray_remote_args_transformer,
+        )
+        if num_agg_actors == 0:
+            return ds_raw
+
+        from tide2.actors import BIOAggregationActor
+
+        return ds_raw.map_batches(
+            BIOAggregationActor,
+            batch_size=batch_size,
+            batch_format="numpy",
+            compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
+            fn_constructor_kwargs={"model_name": model_name},
+            **get_ray_remote_args_cpu(num_cpus=agg_num_cpus),
+        )
+
     def run_recognition(  # noqa: PLR0915
         self,
         input_path: str | list[str],
@@ -357,8 +692,6 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
-        from tide2.actors import RecognizerActor
-
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -463,11 +796,11 @@ class LocalJobRunner:
                 override_num_blocks=num_blocks,
                 ray_remote_args={"num_cpus": read_cpus},
             )
-            processed = ds.map_batches(
-                RecognizerActor,
+            processed = self.build_recognizer_stage(
+                ds,
                 batch_size=batch_size,
-                compute=ray.data.ActorPoolStrategy(size=num_actors),
-                **ray_remote_args,
+                num_actors=num_actors,
+                ray_remote_args=ray_remote_args,
             )
             processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
@@ -570,8 +903,6 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
-        from tide2.actors import LlmRecognizerActor
-
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -669,10 +1000,11 @@ class LocalJobRunner:
                 override_num_blocks=num_blocks,
                 ray_remote_args={"num_cpus": read_cpus},
             )
-            processed = ds.map_batches(
-                LlmRecognizerActor,
+            processed = self.build_llm_recognizer_stage(
+                ds,
                 batch_size=batch_size,
-                compute=ray.data.ActorPoolStrategy(size=num_actors),
+                num_actors=num_actors,
+                ray_remote_args=ray_remote_args,
                 fn_constructor_kwargs={
                     "project_id": project_id,
                     "provider_type": provider_type,
@@ -685,7 +1017,6 @@ class LocalJobRunner:
                     "endpoint_id": endpoint_id,
                     "max_retries": max_retries,
                 },
-                **ray_remote_args,
             )
             processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
@@ -892,11 +1223,12 @@ class LocalJobRunner:
                 override_num_blocks=num_blocks,
                 ray_remote_args={"num_cpus": read_cpus},
             )
-            processed = ds.map_batches(
-                AnonymizerActor,
+            processed = self.build_anonymizer_stage(
+                ds,
+                actor_cls=AnonymizerActor,
                 batch_size=batch_size,
-                compute=ray.data.ActorPoolStrategy(size=num_actors),
-                **ray_remote_args,
+                num_actors=num_actors,
+                ray_remote_args=ray_remote_args,
             )
             processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
@@ -1068,7 +1400,6 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
-        from tide2.actors import BIOAggregationActor
         from tide2.actors import create_transformer_actor
         from tide2.transformers.config import load_model_config
 
@@ -1179,30 +1510,19 @@ class LocalJobRunner:
             # in CPU mode; GPU pinning (num_gpus=1 or fractional) is preserved in GPU mode.
             ray_remote_args_transformer["num_cpus"] = transformer_cpus
 
-        ds_raw = ds.map_batches(
-            transformer_actor,
+        # Phase 3 (unless aggregate_in_actor): CPU aggregation -> dedup -> Presidio
+        # format, producing document-ready recognizer_results_json (runs concurrently
+        # with the GPU via streaming). Folds in the old separate reassembly stage.
+        ds_predictions = self.build_transformer_stage(
+            ds,
+            transformer_actor=transformer_actor,
+            model_name=model_name,
             batch_size=batch_size,
-            batch_format="numpy",
-            compute=ray.data.ActorPoolStrategy(min_size=1, max_size=num_transformer_actors),
-            **ray_remote_args_transformer,
+            num_transformer_actors=num_transformer_actors,
+            ray_remote_args_transformer=ray_remote_args_transformer,
+            num_agg_actors=num_agg_actors,
+            agg_num_cpus=agg_num_cpus,
         )
-
-        if aggregate_in_actor:
-            ds_predictions = ds_raw
-        else:
-            # Phase 3: CPU aggregation -> dedup -> Presidio format, producing
-            # document-ready recognizer_results_json (runs concurrently with GPU via
-            # streaming). Folds in the old separate reassembly stage.
-            ray_remote_args_cpu = get_ray_remote_args_cpu(num_cpus=agg_num_cpus)
-
-            ds_predictions = ds_raw.map_batches(
-                BIOAggregationActor,
-                batch_size=batch_size,
-                batch_format="numpy",
-                compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
-                fn_constructor_kwargs={"model_name": model_name},
-                **ray_remote_args_cpu,
-            )
 
         # Phase 4: Write document-level recognizer results (fully streaming, no groupby)
         ds_predictions.write_parquet(output_path, compression="zstd", ray_remote_args={"num_cpus": write_cpus})
@@ -1242,12 +1562,48 @@ class LocalJobRunner:
         llm_recognizer_mode: str = "off",
         llm_recognizer_kwargs: dict[str, Any] | None = None,
         hardware_autotune: bool = True,
+        execution_mode: Literal["discrete", "streamed"] = "discrete",
     ) -> dict[str, Any]:
         """
         Run the full de-identification pipeline (transformer → recognizer → anonymizer).
 
         Designed for small datasets. Each stage can be toggled independently.
         When a stage is skipped, its output from a previous run is expected on disk.
+
+        Execution modes
+        ---------------
+        ``execution_mode="discrete"`` (default) runs each stage as its own Ray
+        Data execution, writing its output to Parquet before the next stage
+        reads it. That per-stage boundary is what lets the GPU stage run on one
+        machine and the CPU stages elsewhere as independent jobs, so **discrete
+        is the mode for production and for anything multi-machine**, and it is
+        the only mode supported on ≲4-CPU boxes.
+
+        ``execution_mode="streamed"`` chains the stages into a single Ray Data
+        execution: blocks cross the object store instead of Parquet, and the GPU
+        stage overlaps the CPU stages. It is a **single-cluster optimization**
+        for development, benchmarks, and single-box batches. Trade-offs:
+
+        - **No row-level resume.** Row-level checkpointing is keyed to one
+          ``id_column`` and one sink, which a chained plan does not have, and
+          its sort+repartition re-triggers the small-box deadlock. A mid-run
+          failure re-runs GPU inference. Long-running or unattended jobs should
+          stay on discrete.
+        - Only ``06_anonymizer_output`` is written; the ``01_``/``02_``/``04_``
+          intermediates are not.
+        - ``note_text`` stays resident in the object store across all three
+          operators and may spill (in plaintext) to Ray's local spill directory.
+          Size ``object_store_gb`` and host disk accordingly, and dispose of the
+          host's storage under the same rules as the output directory.
+        - The return dict has a different shape — discriminate on the
+          ``execution_mode`` key, which both modes now set.
+
+        Streamed **falls back to discrete, with a warning and a corrected
+        ``execution_mode`` in the returned manifest**, when ``enable_checkpoint``
+        is explicitly requested, when ``llm_recognizer_mode="merge"``, when
+        ``produce_visualizer_json=True``, or when there is nothing to chain. It
+        **raises** on multi-node clusters and on nodes with ≤4 CPUs, where a
+        chained plan cannot be scheduled (see ``check_streamed_admission``).
 
         Args:
             input_data: Path to input parquet file, or a DataFrame.
@@ -1280,12 +1636,14 @@ class LocalJobRunner:
                 max_tokens, num_actors, batch_size.
             hardware_autotune: Enable hardware autotuning of per-stage settings.
                 When False, today's defaults run and recommendations are not applied.
+            execution_mode: "discrete" (default) or "streamed" — see above.
 
         Returns:
-            Dictionary with per-stage statistics and output paths.
+            Dictionary with per-stage statistics and output paths in discrete
+            mode; in streamed mode, ``{"execution_mode", "total_elapsed_seconds",
+            "input_rows", "output_rows", "dropped_rows", "output_dir",
+            "operator_stats"}``. Both carry ``execution_mode``.
         """
-        from tide2.utils.text_processing import compute_text_hash
-
         start_time = time.time()
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
@@ -1315,28 +1673,54 @@ class LocalJobRunner:
         # ------------------------------------------------------------------
         # Prepare input DataFrame
         # ------------------------------------------------------------------
-        df_input = pd.read_parquet(input_data) if isinstance(input_data, str) else input_data.copy()
+        df_input = self._prepare_pipeline_input(input_data)
 
-        # Normalize column names to lowercase so that e.g. "JITTER" from BQ works
-        df_input.columns = df_input.columns.str.lower()
+        # ------------------------------------------------------------------
+        # Execution mode: resolve fallbacks before anything is written
+        # ------------------------------------------------------------------
+        if execution_mode not in ("discrete", "streamed"):
+            raise ValueError(f"execution_mode must be 'discrete' or 'streamed', got {execution_mode!r}")
 
-        if "note_text" not in df_input.columns:
-            raise ValueError("Input data must contain a 'note_text' column")
+        if execution_mode == "streamed":
+            reason = self._streamed_fallback_reason(
+                llm_recognizer_mode=llm_recognizer_mode,
+                produce_visualizer_json=produce_visualizer_json,
+                stage_kwargs=(t_kw, r_kw, a_kw, dict(llm_kw)),
+                run_anonymizer=run_anonymizer,
+                run_transformer=run_transformer,
+                run_recognizer=run_recognizer,
+            )
+            if reason is not None:
+                logger.warning(
+                    "%s Falling back to discrete execution: running the three stages sequentially, each "
+                    "serialized to Parquet before the next begins. This is slower than streamed mode "
+                    "(expect roughly the discrete baseline) because stage output is written to and re-read "
+                    "from disk instead of staying in memory. Pass enable_checkpoint=False (and drop the "
+                    "other listed options) for streamed execution.",
+                    reason,
+                )
+                execution_mode = "discrete"
 
-        if "text_hash" not in df_input.columns:
-            df_input["text_hash"] = df_input["note_text"].apply(compute_text_hash)
+        if execution_mode == "streamed":
+            return self._run_pipeline_streamed(
+                df_input=df_input,
+                output_path=output_path,
+                model_name=model_name,
+                run_transformer=run_transformer,
+                run_recognizer=run_recognizer,
+                run_anonymizer=run_anonymizer,
+                salt_hex=salt_hex,
+                key_hex=key_hex,
+                transformer_kwargs=t_kw,
+                recognizer_kwargs=r_kw,
+                anonymizer_kwargs=a_kw,
+                llm_recognizer_mode=llm_recognizer_mode,
+                llm_recognizer_kwargs=dict(llm_kw),
+                hardware_autotune=hardware_autotune,
+                start_time=start_time,
+            )
 
-        # Ensure patient_id exists (use text_hash as fallback)
-        if "patient_id" not in df_input.columns:
-            df_input["patient_id"] = df_input["text_hash"]
-
-        if "patient_uid" not in df_input.columns:
-            df_input["patient_uid"] = df_input["patient_id"]
-
-        if "row_id" not in df_input.columns:
-            df_input["row_id"] = (
-                df_input["text_hash"] + ":" + df_input["patient_uid"].fillna("None").astype(str)
-            ).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+        results["execution_mode"] = "discrete"
 
         # Write transformer input (with all columns needed across downstream stages)
         df_input.to_parquet(transformer_input_path, index=False)
@@ -1345,27 +1729,7 @@ class LocalJobRunner:
         self._init_ray()
 
         # Resolve settings via hardware recommender
-        hw = detect_hardware()
-        rec = recommend_settings(hw, model_name=model_name)
-        runner_kw: dict[str, Any] = {
-            # Seeded from the constructor so an explicitly supplied timeout is
-            # reported as USER and never overridden by a recommendation.
-            "no_progress_timeout_s": self.no_progress_timeout_s,
-            "object_store_gb": self.object_store_gb,
-        }
-        applied = apply_recommendations(
-            rec,
-            transformer=t_kw,
-            recognizer=r_kw,
-            anonymizer=a_kw,
-            runner=runner_kw,
-            hardware_autotune=hardware_autotune,
-        )
-        logger.info("\n" + render_settings_table(applied))
-
-        # Make the resolved timeout sticky: every stage below reconfigures the
-        # DataContext and would otherwise reset it to the library default.
-        self.no_progress_timeout_s = runner_kw.get("no_progress_timeout_s")
+        self._apply_pipeline_recommendations(model_name, t_kw, r_kw, a_kw, hardware_autotune)
 
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
@@ -1592,6 +1956,417 @@ class LocalJobRunner:
         logger.info(f"Pipeline complete in {results['total_elapsed_seconds']:.1f}s")
         return results
 
+    # ------------------------------------------------------------------
+    # Streamed execution
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _streamed_fallback_reason(
+        *,
+        llm_recognizer_mode: str,
+        produce_visualizer_json: bool,
+        stage_kwargs: tuple[dict[str, Any], ...],
+        run_transformer: bool,
+        run_recognizer: bool,
+        run_anonymizer: bool,
+    ) -> str | None:
+        """Return why streamed cannot be used here, or None if it can.
+
+        These are *fallbacks*, not errors: refusing to run because the caller
+        asked for resume (or for the visualizer) would be the wrong trade. The
+        hard refusals — multi-node and ≤4-CPU nodes — live in
+        ``check_streamed_admission``, because they cannot be satisfied at all.
+        """
+        if llm_recognizer_mode == "merge":
+            return (
+                "llm_recognizer_mode='merge' requires discrete execution: chaining it would consume the "
+                "shared transformer prefix twice (re-running GPU inference) and needs a row_id join that "
+                "streamed mode does not yet implement."
+            )
+        if produce_visualizer_json:
+            return (
+                "produce_visualizer_json=True requires discrete execution: the visualizer's recognizer JSON "
+                "needs the pre-anonymization recognizer_results_json, which the anonymizer does not carry "
+                "into the final output and which streamed mode writes no intermediate for."
+            )
+        if any(kw.get("enable_checkpoint") is True for kw in stage_kwargs):
+            return "enable_checkpoint=True requires discrete execution: a chained plan has no per-stage sink to key row-level resume on."
+        if not (run_transformer or run_recognizer or run_anonymizer) and llm_recognizer_mode == "off":
+            return "No stages are enabled, so there is nothing to chain."
+        return None
+
+    def _apply_pipeline_recommendations(
+        self,
+        model_name: str,
+        t_kw: dict[str, Any],
+        r_kw: dict[str, Any],
+        a_kw: dict[str, Any],
+        hardware_autotune: bool,
+    ) -> None:
+        """Fill per-stage kwargs in place from the hardware recommender."""
+        hw = detect_hardware()
+        rec = recommend_settings(hw, model_name=model_name)
+        runner_kw: dict[str, Any] = {
+            # Seeded from the constructor so an explicitly supplied timeout is
+            # reported as USER and never overridden by a recommendation.
+            "no_progress_timeout_s": self.no_progress_timeout_s,
+            "object_store_gb": self.object_store_gb,
+        }
+        applied = apply_recommendations(
+            rec,
+            transformer=t_kw,
+            recognizer=r_kw,
+            anonymizer=a_kw,
+            runner=runner_kw,
+            hardware_autotune=hardware_autotune,
+        )
+        logger.info("\n" + render_settings_table(applied))
+
+        # Make the resolved timeout sticky: every stage below reconfigures the
+        # DataContext and would otherwise reset it to the library default.
+        self.no_progress_timeout_s = runner_kw.get("no_progress_timeout_s")
+
+    def _resolve_streamed_transformer_actor(
+        self,
+        model_name: str,
+        t_kw: dict[str, Any],
+    ) -> tuple[type, int, int, dict[str, Any]]:
+        """Resolve the transformer actor class and its pool/resource settings.
+
+        Mirrors ``run_transformer``'s driver-side resolution (model config
+        validation, window overlap, GPU/actor counts, model download) without
+        touching the DataContext, checkpoints, or the filesystem.
+
+        Returns:
+            ``(actor_class, num_transformer_actors, num_agg_actors, ray_remote_args)``
+        """
+        from tide2.actors import create_transformer_actor
+        from tide2.transformers.config import load_model_config
+
+        model_config = load_model_config(model_name)
+        _mml = model_config.get("MODEL_MAX_LENGTH")
+        if not isinstance(_mml, int) or _mml <= 0:
+            raise ValueError(
+                f"Model {model_name!r} config is missing a valid 'MODEL_MAX_LENGTH' (got {_mml!r}). "
+                "It must be a positive integer equal to the model's real tokenized context window."
+            )
+        chunk_overlap = t_kw.get("chunk_overlap")
+        if chunk_overlap is None:
+            chunk_overlap = model_config.get("CHUNK_OVERLAP_SIZE", 40)
+
+        num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors = self._resolve_transformer_resources(
+            t_kw.get("num_gpus"), t_kw.get("num_transformer_actors"), t_kw.get("num_agg_actors")
+        )
+
+        model_path = t_kw.get("model_path")
+        if model_path is None:
+            from tide2.utils.gcs_resource_manager import resolve_model_path
+
+            model_path = resolve_model_path(
+                model_name=model_name,
+                bucket_name=t_kw.get("bucket_name"),
+                project_id=t_kw.get("project_id"),
+            )
+
+        actor = create_transformer_actor(
+            model_name=model_name,
+            model_path=model_path,
+            bucket_name=t_kw.get("bucket_name"),
+            project_id=t_kw.get("project_id"),
+            gpu_batch_size=t_kw.get("gpu_batch_size"),
+            window_overlap=chunk_overlap,
+            aggregate_bio=num_agg_actors == 0,
+        )
+
+        ray_remote_args = get_ray_remote_args_gpu(num_gpus=0 if cpu_only_mode else num_gpus)
+        # ``transformer_cpus`` is a *reservation*, not a measured need; the
+        # discrete default starves the CPU pools in a chained plan. In GPU mode
+        # it does not cap torch threads (that path is CPU-mode only), so a low
+        # floor only risks throughput, never correctness.
+        transformer_cpus = t_kw.get("transformer_cpus")
+        if transformer_cpus is None and not cpu_only_mode:
+            transformer_cpus = 1.0
+        if transformer_cpus is not None:
+            ray_remote_args["num_cpus"] = transformer_cpus
+
+        return actor, num_transformer_actors, num_agg_actors, ray_remote_args
+
+    def _run_pipeline_streamed(  # noqa: PLR0915 # one linear plan; splitting it hides the chain
+        self,
+        *,
+        df_input: pd.DataFrame,
+        output_path: Path,
+        model_name: str,
+        run_transformer: bool,
+        run_recognizer: bool,
+        run_anonymizer: bool,
+        salt_hex: str,
+        key_hex: str,
+        transformer_kwargs: dict[str, Any],
+        recognizer_kwargs: dict[str, Any],
+        anonymizer_kwargs: dict[str, Any],
+        llm_recognizer_mode: str,
+        llm_recognizer_kwargs: dict[str, Any],
+        hardware_autotune: bool,
+        start_time: float,
+    ) -> dict[str, Any]:
+        """Chain the enabled stages into a single Ray Data execution.
+
+        See ``run_pipeline``'s docstring for the mode's semantics and
+        trade-offs. This method assumes the fallback checks have already run.
+        """
+        from tide2.actors import create_anonymizer_actor_class
+
+        logger.info(
+            "streamed mode: no row-level resume; a mid-run failure re-runs GPU inference. "
+            "Use execution_mode='discrete' for long-running or unattended jobs."
+        )
+
+        self._init_ray()
+        self._apply_pipeline_recommendations(
+            model_name, transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, hardware_autotune
+        )
+
+        anonymizer_output_path = output_path / "06_anonymizer_output"
+        recognizer_output_path = output_path / "04_recognizer_output"
+
+        use_llm = llm_recognizer_mode == "only"
+        if use_llm and run_transformer:
+            logger.warning("llm_recognizer_mode='only' overrides run_transformer=True; skipping transformer stage")
+        chain_transformer = run_transformer and not use_llm
+        chain_recognizer = run_recognizer and not use_llm
+
+        # --- Column contracts, validated on the source before any operator ---
+        contracts: list[tuple[str, StageColumns]] = []
+        if use_llm:
+            contracts.append(("llm_recognizer", LLM_RECOGNIZER_STAGE_COLUMNS))
+        else:
+            if chain_transformer:
+                contracts.append(("transformer", TRANSFORMER_STAGE_COLUMNS))
+            if chain_recognizer:
+                contracts.append(("recognizer", RECOGNIZER_STAGE_COLUMNS))
+        if run_anonymizer:
+            contracts.append(("anonymizer", ANONYMIZER_STAGE_COLUMNS))
+        final_columns = validate_stage_columns(df_input.columns, contracts)
+
+        # --- Resolve pools and CPU budget, then admit or fail fast ---
+        pool_minimums: dict[str, float] = {}
+        read_cpus = float(transformer_kwargs.get("read_cpus") or recognizer_kwargs.get("read_cpus") or 0.25)
+        write_cpus = float(anonymizer_kwargs.get("write_cpus") or 0.5)
+        pool_minimums["read"] = read_cpus
+        pool_minimums["write"] = write_cpus
+
+        transformer_actor = None
+        if chain_transformer:
+            (
+                transformer_actor,
+                num_transformer_actors,
+                num_agg_actors,
+                t_remote_args,
+            ) = self._resolve_streamed_transformer_actor(model_name, transformer_kwargs)
+            pool_minimums["transformer"] = float(t_remote_args.get("num_cpus", 0.0))
+            if num_agg_actors:
+                pool_minimums["bio_aggregation"] = float(transformer_kwargs.get("agg_num_cpus") or 1.0)
+
+        node_cpus = max(_alive_node_cpus() or [0.0])
+
+        llm_remote_args: dict[str, Any] = {}
+        if use_llm:
+            llm_actors = int(llm_recognizer_kwargs.get("num_actors") or 4)
+            # Network-bound: it reserves CPU but barely uses any, so keep the
+            # slot reservation small and the pool size independent of the budget.
+            llm_remote_args = get_ray_remote_args_cpu(num_cpus=float(llm_recognizer_kwargs.get("num_cpus") or 0.25))
+            pool_minimums["llm_recognizer"] = float(llm_remote_args["num_cpus"])
+
+        if chain_recognizer:
+            r_slot, r_remote_args, _ = _resolve_slot_cpus(
+                num_cpus=recognizer_kwargs.get("num_cpus"),
+                worker_num_cpus=recognizer_kwargs.get("worker_num_cpus"),
+                stage_name="streamed recognizer",
+            )
+            rec_max = int(recognizer_kwargs.get("num_actors") or max(2, int(node_cpus * 0.625)))
+            rec_min = min(2, rec_max)
+            pool_minimums["recognizer"] = r_slot * rec_min
+
+        if run_anonymizer:
+            a_slot, a_remote_args, _ = _resolve_slot_cpus(
+                num_cpus=anonymizer_kwargs.get("num_cpus"),
+                worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
+                stage_name="streamed anonymizer",
+            )
+            anon_max = int(anonymizer_kwargs.get("num_actors") or max(1, int(node_cpus * 0.5)))
+            anon_min = 1
+            pool_minimums["anonymizer"] = a_slot * anon_min
+
+        node_cpus = check_streamed_admission(pool_minimums)
+
+        # --- One DataContext for the whole plan ---
+        # Today each stage method calls configure_data_context with its own
+        # arguments; the context is global and last-call-wins, so in a chained
+        # plan those calls would race. Blocks carry note_text through every
+        # operator here, so keep target_max_block_size modest.
+        target_max_block_size_mb = int(anonymizer_kwargs.get("target_max_block_size_mb") or 64)
+        configure_data_context(
+            **self._data_context_kwargs(
+                verbose_progress=True,
+                target_max_block_size_mb=target_max_block_size_mb,
+                target_min_block_size_mb=int(anonymizer_kwargs.get("target_min_block_size_mb") or 1),
+                read_op_min_num_blocks=int(anonymizer_kwargs.get("read_op_min_num_blocks") or 200),
+            )
+        )
+        ctx = ray.data.DataContext.get_current()
+        ctx.checkpoint_config = None
+
+        num_blocks = next(
+            (
+                int(kw["override_num_blocks"])
+                for kw in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs)
+                if kw.get("override_num_blocks") is not None
+            ),
+            max(32, int(node_cpus * 2)),
+        )
+        num_blocks = min(num_blocks, max(1, len(df_input)))
+
+        logger.info("Streamed pipeline plan:")
+        logger.info(f"  Stages: {[name for name, _ in contracts]}")
+        logger.info(f"  Pool CPU minimums: {pool_minimums} (Σ={sum(pool_minimums.values())}, node CPUs={node_cpus})")
+        logger.info(f"  Source blocks: {num_blocks}, target_max_block_size={target_max_block_size_mb}MB")
+        logger.info(
+            f"  no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}, "
+            f"object_store_gb={self.object_store_gb}, checkpointing=disabled"
+        )
+
+        shutdown = GracefulShutdown()
+        input_rows = len(df_input)
+        try:
+            # ``from_pandas`` yields very few blocks and the first pool starves,
+            # so repartition immediately — the same starvation the discrete path
+            # fixes with override_num_blocks.
+            source_cols = [c for c in df_input.columns if c in _streamed_source_columns(contracts)]
+            ds: Dataset = ray.data.from_pandas(df_input[source_cols]).repartition(num_blocks)
+
+            if use_llm:
+                llm_kwargs = {k: v for k, v in llm_recognizer_kwargs.items() if k not in ("num_actors", "num_cpus")}
+                llm_kwargs.setdefault("provider_type", "google")
+                llm_kwargs.setdefault("model_name", "gemini-2.5-flash")
+                llm_kwargs.setdefault("prompt_name", "phi_detection")
+                ds = self.build_llm_recognizer_stage(
+                    ds,
+                    batch_size=int(llm_recognizer_kwargs.get("batch_size") or 10),
+                    num_actors=llm_actors,
+                    ray_remote_args=llm_remote_args,
+                    fn_constructor_kwargs=llm_kwargs,
+                    pool_min_size=1,
+                )
+            else:
+                if chain_transformer:
+                    assert transformer_actor is not None
+                    ds = self.build_transformer_stage(
+                        ds,
+                        transformer_actor=transformer_actor,
+                        model_name=model_name,
+                        batch_size=int(transformer_kwargs.get("batch_size") or 8),
+                        num_transformer_actors=num_transformer_actors,
+                        ray_remote_args_transformer=t_remote_args,
+                        num_agg_actors=num_agg_actors,
+                        agg_num_cpus=float(transformer_kwargs.get("agg_num_cpus") or 1.0),
+                    )
+                if chain_recognizer:
+                    ds = self.build_recognizer_stage(
+                        ds,
+                        batch_size=int(recognizer_kwargs.get("batch_size") or 150),
+                        num_actors=rec_max,
+                        ray_remote_args=r_remote_args,
+                        pool_min_size=rec_min,
+                    )
+
+            if run_anonymizer:
+                salt_file = output_path / "salt.bin"
+                key_file = output_path / "key.bin"
+                salt_file.write_text(salt_hex)
+                key_file.write_text(key_hex)
+                anonymizer_actor = create_anonymizer_actor_class(
+                    salt=self._load_key(str(salt_file)),
+                    key=self._load_key(str(key_file)),
+                    acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
+                    acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
+                    jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
+                    worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
+                )
+                ds = self.build_anonymizer_stage(
+                    ds,
+                    actor_cls=anonymizer_actor,
+                    batch_size=int(anonymizer_kwargs.get("batch_size") or 200),
+                    num_actors=anon_max,
+                    ray_remote_args=a_remote_args,
+                    pool_min_size=anon_min,
+                )
+                sink_dir = anonymizer_output_path
+                # The anonymizer already emits exactly the final column set, so
+                # this projection is a guard, not a transformation: it is what
+                # keeps raw note_text out of the sink. ``final_columns`` comes
+                # from the contract walk, so it includes pass-throughs such as
+                # ``row_id`` that no stage lists under ``produces``.
+                sink_columns = sorted(FINAL_OUTPUT_COLUMNS & final_columns)
+            else:
+                sink_dir = recognizer_output_path
+                sink_columns = None
+
+            sink_dir.mkdir(parents=True, exist_ok=True)
+            if sink_columns:
+                ds = ds.select_columns(sink_columns)
+            ds.write_parquet(str(sink_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
+
+            # Row reconciliation. Count with pyarrow, never ds.count() — that
+            # re-executes the whole chained plan.
+            import pyarrow.dataset as _pad
+
+            output_files = list(sink_dir.glob("**/*.parquet"))
+            output_rows = _pad.dataset(output_files).count_rows() if output_files else 0
+            if output_rows == 0 and input_rows > 0:
+                raise RuntimeError(
+                    f"Streamed pipeline wrote 0 rows from {input_rows} input rows — all batches failed. "
+                    "Check worker logs for the underlying error."
+                )
+            dropped = input_rows - output_rows
+            if dropped > 0 and dropped / input_rows > STREAMED_DROP_WARN_FRACTION:
+                logger.warning(
+                    "Streamed pipeline dropped %d of %d rows (%.2f%%)",
+                    dropped,
+                    input_rows,
+                    100.0 * dropped / input_rows,
+                )
+
+            try:
+                operator_stats: dict[str, Any] = {"summary": ds.stats()}
+            except Exception:  # pragma: no cover - stats are diagnostic only
+                logger.debug("Could not collect Ray Data stats", exc_info=True)
+                operator_stats = {}
+
+            elapsed = round(time.time() - start_time, 2)
+            logger.info(f"Streamed pipeline complete in {elapsed:.1f}s ({output_rows} rows)")
+            return {
+                "execution_mode": "streamed",
+                "total_elapsed_seconds": elapsed,
+                "input_rows": input_rows,
+                "output_rows": output_rows,
+                "dropped_rows": dropped,
+                "output_dir": str(output_path),
+                "operator_stats": operator_stats,
+            }
+        except ray.data.exceptions.ExecutionTimeoutError:
+            logger.exception(
+                "Streamed pipeline failed due to execution timeout (no_progress_timeout_s=%s). "
+                "A 0/1 deadlock surfaces here: the named operator is the one that never started.",
+                getattr(ctx, "execution_no_progress_timeout_s", None),
+            )
+            raise
+        except Exception:
+            logger.exception("Streamed pipeline failed")
+            raise
+        finally:
+            shutdown.restore_handlers()
+
     def shutdown(self) -> None:
         """Shutdown Ray after job completion."""
         if self._initialized:
@@ -1602,6 +2377,42 @@ class LocalJobRunner:
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _prepare_pipeline_input(input_data: str | pd.DataFrame) -> pd.DataFrame:
+        """Load and normalize the pipeline input DataFrame.
+
+        Lowercases column names (so e.g. ``JITTER`` from BigQuery works) and
+        derives ``text_hash`` / ``patient_id`` / ``patient_uid`` / ``row_id``
+        when absent. Shared verbatim by both execution modes so the normalized
+        frame is identical.
+        """
+        from tide2.utils.text_processing import compute_text_hash
+
+        df_input = pd.read_parquet(input_data) if isinstance(input_data, str) else input_data.copy()
+
+        # Normalize column names to lowercase so that e.g. "JITTER" from BQ works
+        df_input.columns = df_input.columns.str.lower()
+
+        if "note_text" not in df_input.columns:
+            raise ValueError("Input data must contain a 'note_text' column")
+
+        if "text_hash" not in df_input.columns:
+            df_input["text_hash"] = df_input["note_text"].apply(compute_text_hash)
+
+        # Ensure patient_id exists (use text_hash as fallback)
+        if "patient_id" not in df_input.columns:
+            df_input["patient_id"] = df_input["text_hash"]
+
+        if "patient_uid" not in df_input.columns:
+            df_input["patient_uid"] = df_input["patient_id"]
+
+        if "row_id" not in df_input.columns:
+            df_input["row_id"] = (
+                df_input["text_hash"] + ":" + df_input["patient_uid"].fillna("None").astype(str)
+            ).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
+
+        return df_input
 
     def _load_key(self, key_path: str) -> bytes:
         """Load a 32-byte key from a file (hex-encoded)."""
