@@ -40,10 +40,6 @@ class PlanDataset:
     def ops(self):
         return self.state["ops"]
 
-    def repartition(self, num_blocks):
-        self.state["num_blocks"] = num_blocks
-        return PlanDataset(self.state)
-
     def map_batches(self, fn, **kwargs):
         self.state["ops"].append({"fn": fn, **kwargs})
         return PlanDataset(self.state)
@@ -97,9 +93,10 @@ def streamed_env(monkeypatch, tmp_path):
     """Patch out Ray, the model, and the output counting for a plan-only run."""
     state = {}
 
-    def fake_from_pandas(frame):
+    def fake_from_pandas(frame, override_num_blocks=None):
         state["source_columns"] = list(frame.columns)
         state["rows"] = len(frame)
+        state["num_blocks"] = override_num_blocks
         ds = PlanDataset()
         ds.state["rows"] = len(frame)
         state["ds"] = ds
@@ -288,6 +285,19 @@ class TestPlanShape:
         run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
         assert "unused_column" not in streamed_env["source_columns"]
         assert "note_text" in streamed_env["source_columns"]
+
+    def test_source_is_partitioned_without_a_shuffle(self, streamed_env, df):
+        """Blocks come from ``from_pandas(override_num_blocks=...)``, not ``repartition()``.
+
+        ``repartition`` is an all-to-all pass: it would push the whole corpus
+        (``note_text`` included) through the object store before the first stage
+        could start. ``PlanDataset`` deliberately has no ``repartition``, so
+        reintroducing the shuffle raises AttributeError here.
+        """
+        run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
+        assert streamed_env["num_blocks"] is not None
+        assert streamed_env["num_blocks"] >= 1
+        assert not hasattr(streamed_env["ds"], "repartition")
 
     def test_plan_is_never_executed_during_construction(self, streamed_env, df):
         """schema()/count() would execute upstream operators; both explode in the double."""

@@ -2251,11 +2251,14 @@ class LocalJobRunner:
         shutdown = GracefulShutdown()
         input_rows = len(df_input)
         try:
-            # ``from_pandas`` yields very few blocks and the first pool starves,
-            # so repartition immediately — the same starvation the discrete path
-            # fixes with override_num_blocks.
+            # ``from_pandas`` defaults to very few blocks and the first pool
+            # starves, so split the source at creation — the same starvation the
+            # discrete path fixes with override_num_blocks. Passing the block
+            # count here rather than calling ``.repartition()`` avoids an
+            # all-to-all pass that would push the whole corpus (``note_text``
+            # included) through the object store before the first stage starts.
             source_cols = [c for c in df_input.columns if c in _streamed_source_columns(contracts)]
-            ds: Dataset = ray.data.from_pandas(df_input[source_cols]).repartition(num_blocks)
+            ds: Dataset = ray.data.from_pandas(df_input[source_cols], override_num_blocks=num_blocks)
 
             if use_llm:
                 llm_kwargs = {k: v for k, v in llm_recognizer_kwargs.items() if k not in ("num_actors", "num_cpus")}
