@@ -31,19 +31,19 @@ Examples
 --------
     # Transformer on the L4, T precomputed by prep:
     python scripts/benchmark_stage_throughput.py transformer \
-        -i in.parquet -o out --model 20260211_debertav3_finetuned \
+        -i in.parquet -o out --model stanford-med-hdr/tide2-sentry-clinical-ner \
         --tokens 402317 --forwarded-tokens 511488 --gpu-batch-size 128 \
         --label "worst/transformer(L4)" --json-out res.jsonl --md-out res.md
 
     # Same transformer, CPU-only:
     python scripts/benchmark_stage_throughput.py transformer \
-        -i in.parquet -o out --model 20260211_debertav3_finetuned \
+        -i in.parquet -o out --model stanford-med-hdr/tide2-sentry-clinical-ner \
         --tokens 402317 --device cpu --transformer-cpus 15 \
         --label "worst/transformer(CPU)" --json-out res.jsonl --md-out res.md
 
     # Recognizer (T counted from the input if --tokens omitted):
     python scripts/benchmark_stage_throughput.py recognizer \
-        -i rec_in.parquet -o rec_out --model 20260211_debertav3_finetuned \
+        -i rec_in.parquet -o rec_out --model stanford-med-hdr/tide2-sentry-clinical-ner \
         --num-actors 15 --json-out res.jsonl --md-out res.md
 """
 
@@ -60,7 +60,7 @@ import threading
 import time
 from pathlib import Path
 
-DEFAULT_MODEL = "20260211_debertav3_finetuned"
+DEFAULT_MODEL = "stanford-med-hdr/tide2-sentry-clinical-ner"
 
 
 # --------------------------------------------------------------------------- #

@@ -226,6 +226,91 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
   `--worker-num-cpus`) with total cluster CPUs (`--num-cpus`).
 - **All stages on C ≲ 4**: add `--no-checkpoint`.
 
+On a `small-box-*` host the pipeline now applies both fixes for you — see
+*Hardware autotuning* below. The knobs above remain the way to override it.
+
+### Hardware autotuning
+
+`tide2-runner run pipeline` (and `LocalJobRunner.run_pipeline`) detect the cluster
+shape once and recommend per-stage settings from it, replacing the per-call
+hardware guesses that used to be scattered across the runner. `tide2.runner.hardware`
+is the only module that reads `ray.cluster_resources()`, `ray.nodes()`, or `psutil`
+for tuning.
+
+**Recommendations only fill knobs you left unset.** Any value you pass — Python
+kwarg, CLI flag, or YAML key — wins unconditionally and is never overridden,
+clamped, or corrected. Every run logs the resolved table, tagging each knob
+`USER`, `auto`, or `default`:
+
+```text
+Detected: 16 CPU | 1× NVIDIA L4 (22.5 GB) | 62.7 GB RAM | 1 node (homogeneous)
+Profile:  gpu-workstation   Model: stanford-med-hdr/tide2-sentry-clinical-ner (measured, L4)
+
+ stage        knob                     value   source
+ transformer  num_transformer_actors       3   auto
+ transformer  num_gpus                  0.33   auto
+ recognizer   num_actors                  14   auto
+ recognizer   worker_num_cpus            1.0   auto
+ transformer  gpu_batch_size              64   USER
+```
+
+**Opt out** with `--no-hardware-autotune` (CLI), `hardware_autotune: false`
+(YAML), or `hardware_autotune=False` (Python). The table is still logged, but
+nothing is applied and the previous hard-coded defaults run. Benchmark protocols
+should pass it — a benchmark whose settings change with the host is not a
+benchmark.
+
+#### Profiles
+
+Matched on `(gpu_present, cpu_count)` of the **node** shape, never the cluster
+total: fourteen 16-CPU GPU nodes are a `gpu-workstation` fleet, not one
+`large-cpu` box.
+
+| | `cpu ≤ 4` | `4 < cpu < 64` | `cpu ≥ 64` |
+|---|---|---|---|
+| **GPU present** | `small-box-gpu` | `gpu-workstation` ★ | `gpu-server` |
+| **No GPU** | `small-box-cpu` | `cpu-only` | `large-cpu` |
+
+★ the reference box (16 vCPU / 1× L4 24 GB / 64 GB RAM) and the only profile with
+end-to-end measurements behind it.
+
+- `small-box-*` emit fractional CPUs **and** `enable_checkpoint=False` together —
+  both are required to avoid the deadlock described above — plus a 1200 s hang
+  timeout, since cold model load dominates a short run.
+- `large-cpu` and `gpu-server` are **extrapolated** from reference-box ratios
+  (≈ `CPUs − 2` actors per node at 1.0 CPU each), not measured; they log as
+  `(extrapolated, unmeasured)`.
+- A **heterogeneous** cluster (more than one alive node shape) matches `unknown`
+  and emits nothing: averaging two machine types gives numbers correct for
+  neither. The run logs why and today's defaults stand.
+
+#### Batch sizes are recommended only where they were measured
+
+Transformer batch size depends on the *model*, not just the host, so the table is
+keyed by `(model, GPU family)`. **With no measured entry, no `gpu_batch_size` and
+no transformer `batch_size` are emitted** — the existing default stands and the
+table reports `source=default`. CPU-stage recommendations are model-independent
+and still apply. Two guards withhold even a measured entry: the node's VRAM must
+clear the measured peak plus a margin, and the GPU family must match (an L4
+sweep is evidence for an L4, not for a T4 or an A100).
+
+| Model | Measured | Recommends |
+|---|---|---|
+| `stanford-med-hdr/tide2-sentry-clinical-ner` | L4 24 GB (6.77 GB peak) | `gpu_batch_size=64`, `batch_size=512` |
+| `20260211_debertav3_finetuned` | same checkpoint, renamed | same as above; emits a `DeprecationWarning` |
+| all other registry entries | no | nothing |
+
+`20260211_debertav3_finetuned` is the pre-publication name for the canonical
+checkpoint. Both registry entries are kept intact because they differ in
+`DEFAULT_EXPLANATION`, which reaches recognizer output — switching names changes
+that string, so the deprecation warns and redirects rather than collapsing them.
+
+**To add a model**: run the sweep in `scripts/benchmark_stage_throughput.py` on
+the target GPU, record wall time and peak VRAM per batch size, and add one
+`MEASURED_MODELS` row in `src/tide2/runner/hardware.py`. Alias a name only on
+confirmed checkpoint identity (diff the registry entries), never on name
+similarity.
+
 ### What happens when a run wedges
 
 Hang protection operates at the Ray Data execution level via `NoProgressGuard`:

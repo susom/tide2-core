@@ -77,17 +77,19 @@ def cmd_run(args: argparse.Namespace) -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+    no_prog = getattr(args, "no_progress_timeout_s", None)
+
     runner = LocalJobRunner(
         num_cpus=args.num_cpus,
         num_gpus=args.num_gpus,
         object_store_gb=args.object_store_gb,
         include_dashboard=getattr(args, "include_dashboard", False),
+        no_progress_timeout_s=no_prog,
     )
 
     dry_run = getattr(args, "dry_run", False)
 
     _warn_deprecated_batch_timeout(args)
-    no_prog = getattr(args, "no_progress_timeout_s", None)
     if no_prog is not None:
         configure_data_context(no_progress_timeout_s=no_prog)
 
@@ -324,6 +326,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 anonymizer_kwargs=a_kw,
                 llm_recognizer_mode=llm_mode,
                 llm_recognizer_kwargs=llm_kw if llm_kw else None,
+                hardware_autotune=getattr(args, "hardware_autotune", None) is not False,
             )
         else:
             print(f"Unknown job type: {args.job_type}")
@@ -572,6 +575,15 @@ Examples:
         default=None,
         help="LLM prompt name in resources/llm_prompts/ or path to a prompt directory (default: phi_detection)",
     )
+    run_p.add_argument(
+        "--no-hardware-autotune",
+        dest="hardware_autotune",
+        action="store_false",
+        # None (not True) so _apply_config can tell "unset" from "explicitly on" and
+        # a YAML `hardware_autotune: false` is honoured; unset resolves to True.
+        default=None,
+        help="Disable automatic hardware-based setting recommendations (default: enabled)",
+    )
     run_p.add_argument("--dry-run", action="store_true", help="Validate setup without processing")
     run_p.add_argument("--include-dashboard", action="store_true", help="Enable Ray dashboard (port 8265)")
     run_p.add_argument(
@@ -584,12 +596,25 @@ Examples:
 
     # If --config provided on the 'run' command, load YAML and backfill unset args
     if args.command == "run" and getattr(args, "config", None):
-        _apply_config(args)
+        _apply_config(args, run_p)
 
     args.func(args)
 
 
-def _apply_config(args: argparse.Namespace) -> None:
+def _cli_supplied_dests(run_parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    """Return the dests the user actually typed on the command line.
+
+    The parsed value alone cannot tell us this: an explicit
+    ``--no-hardware-autotune`` and an unset ``--produce-visualizer-json`` both read
+    as ``False``. Matching argv against each action's option strings is what keeps
+    "CLI flags always override config values" true for the negative flags.
+    """
+    typed = {token.split("=", 1)[0] for token in argv if token.startswith("-")}
+    # argparse exposes no public accessor for its actions.
+    return {action.dest for action in run_parser._actions if typed.intersection(action.option_strings)}
+
+
+def _apply_config(args: argparse.Namespace, run_parser: argparse.ArgumentParser) -> None:
     """Load YAML config and set any arg that wasn't provided on the command line."""
     import yaml
 
@@ -603,10 +628,9 @@ def _apply_config(args: argparse.Namespace) -> None:
 
     # Map YAML keys (underscore) to argparse dest names
     # YAML uses the same names as argparse dest (e.g. num_actors, batch_size)
+    supplied = _cli_supplied_dests(run_parser, sys.argv[1:])
     for key, value in config.items():
-        current = getattr(args, key, None)
-        # Only backfill if the CLI didn't set it (None for optional args, False for flags)
-        if current is None or (isinstance(current, bool) and not current and isinstance(value, bool)):
+        if key not in supplied:
             setattr(args, key, value)
 
 

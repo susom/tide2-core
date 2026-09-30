@@ -44,6 +44,11 @@ from .fault_tolerance import GracefulShutdown
 from .fault_tolerance import configure_data_context
 from .fault_tolerance import get_ray_remote_args_cpu
 from .fault_tolerance import get_ray_remote_args_gpu
+from .hardware import apply_recommendations
+from .hardware import detect_hardware
+from .hardware import recommend_object_store_gb
+from .hardware import recommend_settings
+from .hardware import render_settings_table
 from .utils import DEFAULT_DASHBOARD_HOST
 from .utils import detect_columns
 from .utils import gpu_worker_runtime_env
@@ -53,8 +58,6 @@ from .utils import resolve_input_files
 logger = logging.getLogger(__name__)
 
 KEY_SIZE_BYTES = 32
-TARGET_NODE_CPUS = 16
-TARGET_NODE_CPU_ACTORS = 14
 DEFAULT_RECOGNITION_BATCH_TIMEOUT = 120
 DEFAULT_LLM_BATCH_TIMEOUT = 300
 
@@ -156,6 +159,7 @@ class LocalJobRunner:
         object_store_gb: int | None = None,
         dashboard_host: str = DEFAULT_DASHBOARD_HOST,
         include_dashboard: bool = False,
+        no_progress_timeout_s: float | None = None,
     ):
         """
         Initialize local job runner.
@@ -166,13 +170,29 @@ class LocalJobRunner:
             object_store_gb: Object store size in GB (default: ~30% of system RAM)
             dashboard_host: Dashboard host
             include_dashboard: Enable Ray dashboard
+            no_progress_timeout_s: Ray Data hang-detection timeout applied to every
+                stage this runner launches. None = Ray Data's default. Stages reset
+                the DataContext per job, so the value is re-applied on each one.
         """
         self.num_cpus = num_cpus
         self.num_gpus = num_gpus
         self.object_store_gb = object_store_gb
         self.dashboard_host = dashboard_host
         self.include_dashboard = include_dashboard
+        self.no_progress_timeout_s = no_progress_timeout_s
         self._initialized = False
+
+    def _data_context_kwargs(self, **overrides: Any) -> dict[str, Any]:
+        """Build ``configure_data_context`` kwargs, carrying the sticky hang timeout.
+
+        Each stage reconfigures the DataContext with its own streaming params, which
+        would otherwise reset ``no_progress_timeout_s`` to the library default and
+        silently discard both the CLI flag and the hardware recommendation.
+        """
+        kwargs: dict[str, Any] = dict(overrides)
+        if self.no_progress_timeout_s is not None:
+            kwargs["no_progress_timeout_s"] = self.no_progress_timeout_s
+        return kwargs
 
     def _init_ray(self) -> None:
         """Initialize Ray."""
@@ -206,14 +226,9 @@ class LocalJobRunner:
         if self.object_store_gb:
             kwargs["object_store_memory"] = self.object_store_gb * 1024**3
         else:
-            # Auto-tune: ~30% of system RAM for object store
-            try:
-                import psutil
-
-                total_ram = psutil.virtual_memory().total
-                kwargs["object_store_memory"] = int(total_ram * 0.3)
-            except ImportError:
-                pass  # Let Ray use its default
+            rec_gb = recommend_object_store_gb(detect_hardware())
+            if rec_gb is not None:
+                kwargs["object_store_memory"] = int(rec_gb * 1024**3)
 
         ray.init(**kwargs)
         logger.info("Ray initialized")
@@ -222,20 +237,25 @@ class LocalJobRunner:
         log_ray_cluster_info()
 
         # Configure Ray Data context
-        configure_data_context(verbose_progress=True)
+        configure_data_context(**self._data_context_kwargs(verbose_progress=True))
 
         self._initialized = True
 
-    def _auto_num_actors(self, fraction: float = 0.45) -> int:
+    def _auto_num_actors(self, fraction: float | None = None) -> int:
         """Auto-detect number of actors from cluster resources.
 
-        Uses 0.45 of available CPUs by default (provisional pending Plan 2).
-        With direct worker actors in Ray Data, this reserves a conservative
-        fraction of cluster CPU capacity to ensure concurrent read/write and
-        ancillary tasks have ample headroom.
+        Args:
+            fraction: Optional fraction override of cluster CPUs. If None,
+                derived from the hardware profile (e.g. ~0.875 on gpu-workstation).
         """
-        cpus = ray.cluster_resources().get("CPU", 4)
-        return max(1, int(cpus * fraction))
+        hw = detect_hardware()
+        if fraction is not None:
+            return max(1, int(hw.cluster_cpu * fraction))
+        rec = recommend_settings(hw)
+        rec_actors = rec.recognizer.get("num_actors")
+        if rec_actors is not None:
+            return int(rec_actors)
+        return max(1, int(hw.cluster_cpu * 0.45))
 
     def _resolve_transformer_resources(
         self,
@@ -248,17 +268,23 @@ class LocalJobRunner:
         Returns:
             Tuple of (num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors)
         """
+        hw = detect_hardware()
+        rec = recommend_settings(hw)
+
         if num_gpus is None:
-            num_gpus = float(ray.cluster_resources().get("GPU", 0))
+            rec_gpus = rec.transformer.get("num_gpus")
+            num_gpus = rec_gpus if rec_gpus is not None else float(hw.cluster_gpu)
 
         cpu_only_mode = num_gpus == 0
-        available_cpus = ray.cluster_resources().get("CPU", 4)
 
         if num_transformer_actors is None:
             # Each transformer actor is memory-intensive (~500MB+ for model)
             # CPU mode: limit actors; GPU mode: scale with GPUs
-            if cpu_only_mode:
-                num_transformer_actors = max(1, int(available_cpus * 0.25))
+            rec_actors = rec.transformer.get("num_transformer_actors")
+            if rec_actors is not None:
+                num_transformer_actors = rec_actors
+            elif cpu_only_mode:
+                num_transformer_actors = max(1, int(hw.cluster_cpu * 0.25))
             elif num_gpus < 1.0 and num_gpus > 0:
                 num_transformer_actors = max(1, round(1.0 / num_gpus))
             else:
@@ -271,7 +297,11 @@ class LocalJobRunner:
             )
 
         if num_agg_actors is None:
-            num_agg_actors = 0 if not cpu_only_mode and num_gpus < 1.0 else max(1, int(available_cpus * 0.3))
+            rec_agg = rec.transformer.get("num_agg_actors")
+            if rec_agg is not None:
+                num_agg_actors = rec_agg
+            else:
+                num_agg_actors = 0 if not cpu_only_mode and num_gpus < 1.0 else max(1, int(hw.cluster_cpu * 0.3))
 
         return num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors
 
@@ -333,10 +363,12 @@ class LocalJobRunner:
 
         # Override DataContext with job-specific streaming params
         configure_data_context(
-            verbose_progress=True,
-            target_max_block_size_mb=target_max_block_size_mb,
-            target_min_block_size_mb=target_min_block_size_mb,
-            read_op_min_num_blocks=read_op_min_num_blocks,
+            **self._data_context_kwargs(
+                verbose_progress=True,
+                target_max_block_size_mb=target_max_block_size_mb,
+                target_min_block_size_mb=target_min_block_size_mb,
+                read_op_min_num_blocks=read_op_min_num_blocks,
+            )
         )
 
         start_time = time.time()
@@ -544,10 +576,12 @@ class LocalJobRunner:
 
         # Override DataContext with job-specific streaming params
         configure_data_context(
-            verbose_progress=True,
-            target_max_block_size_mb=target_max_block_size_mb,
-            target_min_block_size_mb=target_min_block_size_mb,
-            read_op_min_num_blocks=read_op_min_num_blocks,
+            **self._data_context_kwargs(
+                verbose_progress=True,
+                target_max_block_size_mb=target_max_block_size_mb,
+                target_min_block_size_mb=target_min_block_size_mb,
+                read_op_min_num_blocks=read_op_min_num_blocks,
+            )
         )
 
         start_time = time.time()
@@ -761,10 +795,12 @@ class LocalJobRunner:
 
         # Override DataContext with job-specific streaming params
         configure_data_context(
-            verbose_progress=True,
-            target_max_block_size_mb=target_max_block_size_mb,
-            target_min_block_size_mb=target_min_block_size_mb,
-            read_op_min_num_blocks=read_op_min_num_blocks,
+            **self._data_context_kwargs(
+                verbose_progress=True,
+                target_max_block_size_mb=target_max_block_size_mb,
+                target_min_block_size_mb=target_min_block_size_mb,
+                read_op_min_num_blocks=read_op_min_num_blocks,
+            )
         )
 
         start_time = time.time()
@@ -1205,6 +1241,7 @@ class LocalJobRunner:
         anonymizer_kwargs: dict[str, Any] | None = None,
         llm_recognizer_mode: str = "off",
         llm_recognizer_kwargs: dict[str, Any] | None = None,
+        hardware_autotune: bool = True,
     ) -> dict[str, Any]:
         """
         Run the full de-identification pipeline (transformer → recognizer → anonymizer).
@@ -1241,6 +1278,8 @@ class LocalJobRunner:
             llm_recognizer_kwargs: Extra kwargs passed to self.run_llm_recognition().
                 e.g. project_id, model_name, provider_type, context_length,
                 max_tokens, num_actors, batch_size.
+            hardware_autotune: Enable hardware autotuning of per-stage settings.
+                When False, today's defaults run and recommendations are not applied.
 
         Returns:
             Dictionary with per-stage statistics and output paths.
@@ -1265,9 +1304,12 @@ class LocalJobRunner:
             raise ValueError(f"llm_recognizer_mode must be one of {valid_llm_modes}, got '{llm_recognizer_mode}'")
 
         results: dict[str, Any] = {"output_dir": str(output_path)}
-        t_kw = transformer_kwargs or {}
-        r_kw = recognizer_kwargs or {}
-        a_kw = anonymizer_kwargs or {}
+        # Copied, not aliased: apply_recommendations fills these in place, and a
+        # caller's dict must not come back carrying this run's resolved values (a
+        # second call would then read them as explicitly-supplied USER settings).
+        t_kw = dict(transformer_kwargs or {})
+        r_kw = dict(recognizer_kwargs or {})
+        a_kw = dict(anonymizer_kwargs or {})
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------
@@ -1302,21 +1344,33 @@ class LocalJobRunner:
 
         self._init_ray()
 
+        # Resolve settings via hardware recommender
+        hw = detect_hardware()
+        rec = recommend_settings(hw, model_name=model_name)
+        runner_kw: dict[str, Any] = {
+            # Seeded from the constructor so an explicitly supplied timeout is
+            # reported as USER and never overridden by a recommendation.
+            "no_progress_timeout_s": self.no_progress_timeout_s,
+            "object_store_gb": self.object_store_gb,
+        }
+        applied = apply_recommendations(
+            rec,
+            transformer=t_kw,
+            recognizer=r_kw,
+            anonymizer=a_kw,
+            runner=runner_kw,
+            hardware_autotune=hardware_autotune,
+        )
+        logger.info("\n" + render_settings_table(applied))
+
+        # Make the resolved timeout sticky: every stage below reconfigures the
+        # DataContext and would otherwise reset it to the library default.
+        self.no_progress_timeout_s = runner_kw.get("no_progress_timeout_s")
+
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
         # ------------------------------------------------------------------
-        available_gpus = ray.cluster_resources().get("GPU", 0)
         t_kwargs: dict[str, Any] = dict(t_kw)
-        if available_gpus > 0:
-            t_kwargs.setdefault("num_transformer_actors", 3)
-            t_kwargs.setdefault("transformer_cpus", 4.0)
-            t_kwargs.setdefault("num_gpus", 0.33)
-            t_kwargs.setdefault("batch_size", 512)
-            t_kwargs.setdefault("gpu_batch_size", 64)
-            t_kwargs.setdefault("override_num_blocks", 16)
-            t_kwargs.setdefault("num_agg_actors", 0)
-        else:
-            t_kwargs.setdefault("override_num_blocks", 16)
 
         if llm_recognizer_mode == "only":
             # In "only" mode, skip transformer entirely — LLM replaces it
@@ -1338,15 +1392,7 @@ class LocalJobRunner:
         # ------------------------------------------------------------------
         # Phase 2: Recognizer (+ optional LLM recognizer)
         # ------------------------------------------------------------------
-        available_cpus = ray.cluster_resources().get("CPU", TARGET_NODE_CPUS)
-        r_num_actors = TARGET_NODE_CPU_ACTORS if available_cpus >= TARGET_NODE_CPUS else max(1, int(available_cpus - 2))
         r_kwargs: dict[str, Any] = dict(r_kw)
-        r_kwargs.setdefault("num_actors", r_num_actors)
-        # Note: with direct worker actors, worker_num_cpus=1.0 is the single CPU knob per slot.
-        # num_cpus=0 is preserved for additive resolution compatibility (0 + 1.0 = 1.0).
-        r_kwargs.setdefault("num_cpus", 0)
-        r_kwargs.setdefault("worker_num_cpus", 1.0)
-        r_kwargs.setdefault("override_num_blocks", 32)
 
         rec_input_path = transformer_output_path if run_transformer else transformer_input_path
 
@@ -1509,16 +1555,7 @@ class LocalJobRunner:
             salt_file.write_text(salt_hex)
             key_file.write_text(key_hex)
 
-            a_num_actors = (
-                TARGET_NODE_CPU_ACTORS if available_cpus >= TARGET_NODE_CPUS else max(1, int(available_cpus - 2))
-            )
             a_kwargs: dict[str, Any] = dict(a_kw)
-            a_kwargs.setdefault("num_actors", a_num_actors)
-            # Note: with direct worker actors, worker_num_cpus=1.0 is the single CPU knob per slot.
-            # num_cpus=0 is preserved for additive resolution compatibility (0 + 1.0 = 1.0).
-            a_kwargs.setdefault("num_cpus", 0)
-            a_kwargs.setdefault("worker_num_cpus", 1.0)
-            a_kwargs.setdefault("override_num_blocks", 32)
 
             anon_input_path = (
                 recognizer_output_path
