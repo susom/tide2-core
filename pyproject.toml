@@ -82,6 +82,7 @@ dependencies = [
     "python-multipart>=0.0.31,<1", # transitive via streamlit; pinned for security (CVE-2026-53538/53539/53540)
     "gitpython>=3.1.59,<4", # transitive via streamlit; pinned for security (multiple CVEs)
     "tornado>=6.5.8,<7", # transitive via streamlit; pinned for security (CVE-2026-82397)
+    "anyio>=4.14.2,<5", # transitive via httpx/starlette; pinned for security
     # Utilities
     "psutil>=7.2,<8",
     "pyyaml>=6.0,<7",
@@ -118,6 +119,7 @@ dev = [
     "jupyter-server>=2.20.0", # transitive via jupyter; pinned for security (CVE-2026-44727)
     "mistune>=3.3.0", # transitive via nbconvert; pinned for security (multiple parser CVEs)
     "bleach>=6.4.0", # transitive via nbconvert; pinned for security (GHSA-gj48-438w-jh9v, GHSA-8rfp-98v4-mmr6)
+    "soupsieve>=2.9.0", # transitive via nbconvert/beautifulsoup4; pinned for security
     "scikit-learn>=1.8,<2",
     "scipy>=1.12,<2",
     "tqdm>=4.67,<5",
@@ -336,6 +338,7 @@ dev = [
     "cython",
     "ipykernel",
     "jupyter",
+    "soupsieve>=2.9.0", # transitive via nbconvert/beautifulsoup4; pinned for security
     { include-group = "evaluation" },
     "keyring>=25.6.0",
     "keyrings-google-artifactregistry-auth>=1.1.2",
