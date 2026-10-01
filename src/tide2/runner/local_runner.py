@@ -2509,17 +2509,29 @@ class LocalJobRunner:
 
         The transformer stage now emits document-level rows directly
         (text_hash, patient_id, note_text, recognizer_results_json) — there is no
-        chunk→reassembly step. This reads that output, keeps the columns the
-        recognizer needs, and attaches patient_identifiers from the pipeline input.
-        Falls back to the raw input when no transformer output exists (e.g. the
-        transformer stage was skipped).
+        chunk→reassembly step. This reads that output, preserves the passthrough
+        columns (patient_identifiers, patient_uid, jitter, row_id), and attaches
+        patient_identifiers from df_input using row_id if missing. Falls back to
+        the raw input when no transformer output exists (e.g. the transformer
+        stage was skipped).
         """
         trans_files = list(transformer_output_path.glob("**/*.parquet"))
         if trans_files:
             dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
             df_rec_in = pd.concat(dfs_trans, ignore_index=True)
             keep = [
-                c for c in ["text_hash", "patient_id", "note_text", "recognizer_results_json"] if c in df_rec_in.columns
+                c
+                for c in [
+                    "text_hash",
+                    "patient_id",
+                    "note_text",
+                    "recognizer_results_json",
+                    "patient_identifiers",
+                    "patient_uid",
+                    "jitter",
+                    "row_id",
+                ]
+                if c in df_rec_in.columns
             ]
             df_rec_in = df_rec_in[keep].copy()
         else:
@@ -2528,9 +2540,14 @@ class LocalJobRunner:
             if "recognizer_results_json" not in df_rec_in.columns:
                 df_rec_in["recognizer_results_json"] = "[]"
 
-        if "patient_identifiers" in df_input.columns:
-            id_map = df_input.drop_duplicates(subset="text_hash").set_index("text_hash")["patient_identifiers"]
-            df_rec_in["patient_identifiers"] = df_rec_in["text_hash"].map(id_map).fillna("{}")
+        if "patient_identifiers" in df_input.columns and "patient_identifiers" not in df_rec_in.columns:
+            # Join by row_id when present in both frames; otherwise fall back to text_hash.
+            if "row_id" in df_input.columns and "row_id" in df_rec_in.columns:
+                id_map = df_input.drop_duplicates(subset="row_id").set_index("row_id")["patient_identifiers"]
+                df_rec_in["patient_identifiers"] = df_rec_in["row_id"].map(id_map).fillna("{}")
+            else:
+                id_map = df_input.drop_duplicates(subset="text_hash").set_index("text_hash")["patient_identifiers"]
+                df_rec_in["patient_identifiers"] = df_rec_in["text_hash"].map(id_map).fillna("{}")
         elif "patient_identifiers" not in df_rec_in.columns:
             df_rec_in["patient_identifiers"] = "{}"
         return df_rec_in
