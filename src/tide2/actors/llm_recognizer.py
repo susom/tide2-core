@@ -32,6 +32,7 @@ from presidio_analyzer import RecognizerResult
 
 from tide2.recognizers.llm_json_recognizer import LlmJsonRecognizer
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
@@ -62,6 +63,7 @@ class LlmRecognizerWorker:
         max_retries: int = 3,
         context_length: int = DEFAULT_CONTEXT_LENGTH,
         prompt_name: str = "phi_detection",
+        **kwargs: Any,
     ) -> None:
         """
         Initialize the worker with an LlmJsonRecognizer.
@@ -78,7 +80,13 @@ class LlmRecognizerWorker:
             context_length: Model context window in tokens. Used to derive the
                 maximum chunk size for long notes (context_length * 4 chars/token).
             prompt_name: Name of the prompt config in resources/llm_prompts/ (default: "phi_detection").
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
+        from tide2.actors import check_deprecated_actor_kwargs
+
+        check_deprecated_actor_kwargs(kwargs, "LlmRecognizerWorker")
+
         self.recognizer = LlmJsonRecognizer(
             project_id=project_id,
             provider_type=provider_type,
@@ -173,15 +181,30 @@ class LlmRecognizerWorker:
             Dictionary with columnar results for successfully processed notes.
         """
         out_text_hashes: list[str] = []
+        out_note_texts: list[str] = []
         results_json_list: list[str] = []
         entity_counts: list[int] = []
         processing_statuses: list[str] = []
         error_messages: list[str | None] = []
+        processed_indices: list[int] = []
 
         cols = BatchColumns(batch)
         batch_size = len(cols["note_text"])
         note_texts = cols["note_text"]
         input_text_hashes = cols["text_hash"]
+
+        if batch_size == 0:
+            res: dict[str, list[Any]] = {
+                "text_hash": [],
+                "note_text": [],
+                "recognizer_results_json": [],
+                "entity_count": [],
+                "processing_timestamp": [],
+                "processing_status": [],
+                "error_message": [],
+            }
+            copy_passthrough(batch, res, empty=True)
+            return res
 
         for i in range(batch_size):
             note_text = note_texts[i]
@@ -191,10 +214,12 @@ class LlmRecognizerWorker:
                 # Handle empty/null notes
                 if not note_text or is_null(note_text):
                     out_text_hashes.append(text_hash)
+                    out_note_texts.append(note_text if note_text is not None else "")
                     results_json_list.append("[]")
                     entity_counts.append(0)
                     processing_statuses.append("success")
                     error_messages.append(None)
+                    processed_indices.append(i)
                     continue
 
                 start_time = _time.time()
@@ -225,10 +250,12 @@ class LlmRecognizerWorker:
                 )
 
                 out_text_hashes.append(text_hash)
+                out_note_texts.append(note_text)
                 results_json_list.append(results_json)
                 entity_counts.append(len(results))
                 processing_statuses.append("success")
                 error_messages.append(None)
+                processed_indices.append(i)
 
             except Exception:
                 logger.exception(
@@ -238,14 +265,17 @@ class LlmRecognizerWorker:
                 continue
 
         batch_timestamp = datetime.now(UTC).isoformat()
-        return {
+        res = {
             "text_hash": out_text_hashes,
+            "note_text": out_note_texts,
             "recognizer_results_json": results_json_list,
             "entity_count": entity_counts,
             "processing_timestamp": [batch_timestamp] * len(out_text_hashes),
             "processing_status": processing_statuses,
             "error_message": error_messages,
         }
+        copy_passthrough(batch, res, indices=processed_indices)
+        return res
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""
@@ -272,9 +302,8 @@ class LlmRecognizerSupervisor:
         endpoint_id: int | None = None,
         max_retries: int = 3,
         context_length: int = DEFAULT_CONTEXT_LENGTH,
-        batch_timeout: int | None = None,
         prompt_name: str = "phi_detection",
-        worker_num_cpus: int | float | None = None,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize supervisor shim (deprecated).
@@ -289,11 +318,13 @@ class LlmRecognizerSupervisor:
             endpoint_id: Optional Vertex AI endpoint ID.
             max_retries: Maximum retry attempts for failed LLM requests.
             context_length: Model context window in tokens.
-            batch_timeout: Deprecated and ignored.
             prompt_name: Name of the prompt config in resources/llm_prompts/.
-            worker_num_cpus: Deprecated and ignored.
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
         import warnings
+
+        from tide2.actors import check_deprecated_actor_kwargs
 
         warnings.warn(
             "LlmRecognizerSupervisor is deprecated and will be removed in a future release. "
@@ -301,6 +332,7 @@ class LlmRecognizerSupervisor:
             DeprecationWarning,
             stacklevel=2,
         )
+        check_deprecated_actor_kwargs(kwargs, "LlmRecognizerSupervisor")
         self.worker = LlmRecognizerWorker(
             project_id=project_id,
             provider_type=provider_type,

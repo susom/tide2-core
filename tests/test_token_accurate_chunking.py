@@ -243,3 +243,113 @@ class TestAggregationFold:
         (e,) = json.loads(out["recognizer_results_json"][0])
         assert e["entity_type"] == "DOCTOR"
         assert e["recognition_metadata"]["matched_pattern"] == "Smith"
+
+    def test_openmed_label_mapping_and_ignore_labels(self):
+        """OpenMed models map lower-case labels to Presidio entities and drop ignore labels."""
+        from tide2.actors.transformer import BIOAggregationActor
+
+        actor = BIOAggregationActor("OpenMed/OpenMed-PII-SuperClinical-Large-434M-v1")
+        note_text = "Jane was born on 1990-01-01 with blood type O positive."
+        raw = json.dumps(
+            [
+                {"entity": "B-first_name", "score": 0.99, "start": 0, "end": 4, "word": "Jane", "index": 1},
+                {
+                    "entity": "B-date_of_birth",
+                    "score": 0.95,
+                    "start": 17,
+                    "end": 27,
+                    "word": "1990-01-01",
+                    "index": 4,
+                },
+                {"entity": "B-blood_type", "score": 0.90, "start": 33, "end": 43, "word": "blood type", "index": 6},
+            ]
+        )
+        results_json, count = actor._format_note(raw, note_text)
+        entities = json.loads(results_json)
+
+        assert count == 2
+        entity_types = {e["entity_type"] for e in entities}
+        assert entity_types == {"PERSON", "DATE_TIME"}
+        assert "blood_type" not in entity_types
+
+
+def test_dense_text_parity_transformers_recognizer_and_actor():
+    """Exact parity between TransformersRecognizer and TransformerInferenceActor on token-dense text."""
+    from tide2.actors.transformer import TransformerInferenceActor
+    from tide2.recognizers.transformers_recognizer import TransformersRecognizer
+
+    dense_text = "Patient #9876-5432: BP 120/80, HR 72, DOCTOR Smith seen on 2026-05-12."
+
+    class _TunableCore:
+        model_name = "StanfordAIMI/stanford-deidentifier-v2"
+        model_max_length = 20
+        num_special_tokens = 2
+        token_budget = 18
+
+        def __init__(self):
+            self.model_path = None
+            self._config = {
+                "MODEL_MAX_LENGTH": 20,
+                "PRESIDIO_SUPPORTED_ENTITIES": ["PATIENT", "DOCTOR", "DATE", "ID"],
+                "LABELS_TO_IGNORE": ["O"],
+                "MODEL_TO_PRESIDIO_MAPPING": {"DOCTOR": "DOCTOR", "PATIENT": "PATIENT"},
+            }
+
+        def tokenize_ragged(self, texts):
+            return {
+                "input_ids": [list(range(len(t))) for t in texts],
+                "offset_mapping": [[(i, i + 1) for i in range(len(t))] for t in texts],
+            }
+
+        def forward_windows(self, windows):
+            preds = []
+            for _ids, offs, text in windows:
+                w_preds = []
+                for idx, (s, e) in enumerate(offs):
+                    sub = text[s:e]
+                    if text[s:].startswith("Smith") and e <= s + len("Smith"):
+                        w_preds.append(
+                            {"entity": "B-DOCTOR", "score": 0.99, "start": s, "end": e, "word": sub, "index": idx}
+                        )
+                preds.append(w_preds)
+            return preds
+
+    core = _TunableCore()
+
+    # Direct actor flow
+    actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
+    actor.model_name = core.model_name
+    actor._core = core
+    actor._token_budget = 18
+    actor._window_overlap = 5
+    actor._num_special_tokens = 2
+    actor._gpu_batch_size = 10
+    actor._handled_oom_count = 0
+    actor._aggregate_bio = True
+    actor._recognizer_name = "TransformersRecognizer[test]"
+    actor._model_to_presidio_mapping = {"DOCTOR": "DOCTOR"}
+    actor._ignore_labels = {"O"}
+
+    actor_raw = actor._run_inference_raw_with_oom_recovery([dense_text])[0]
+    actor_json, actor_count = actor._format_note(actor_raw, dense_text)
+    actor_entities = json.loads(actor_json)
+
+    # Standalone recognizer flow
+    recognizer = TransformersRecognizer.__new__(TransformersRecognizer)
+    recognizer.model_name = core.model_name
+    recognizer.name = "TransformersRecognizer[test]"
+    recognizer._core = core
+    recognizer.supported_entities = ["DOCTOR", "PATIENT"]
+    recognizer.ignore_labels = ["O"]
+    recognizer.model_to_presidio_mapping = {"DOCTOR": "DOCTOR"}
+    recognizer.default_explanation = "Identified as {}"
+    recognizer.text_overlap_length = 5
+    recognizer.id_entity_name = "ID"
+    recognizer.id_score_reduction = 0.5
+
+    rec_results = recognizer._get_ner_results_for_text(dense_text)
+
+    assert len(rec_results) == actor_count == 1
+    assert rec_results[0]["start"] == actor_entities[0]["start"]
+    assert rec_results[0]["end"] == actor_entities[0]["end"]
+    assert rec_results[0]["entity_group"] == actor_entities[0]["entity_type"]

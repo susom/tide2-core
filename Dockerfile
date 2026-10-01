@@ -1,6 +1,6 @@
 # Simple single-stage GPU image that runs `tide2-runner`.
 # hatch-vcs falls back to pyproject's fallback-version, so no .git is needed here.
-FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04
+FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04@sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc
 
 # uv package manager (pinned)
 COPY --from=ghcr.io/astral-sh/uv:0.9.8 /uv /uvx /bin/

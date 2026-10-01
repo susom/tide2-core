@@ -101,7 +101,13 @@ def _copy_passthrough(batch: dict[str, Any], res: dict[str, list[Any]], *, empty
             res[col] = [] if empty else list(batch[col])
 
 
-def format_note_entities(raw_tokens: list[dict], note_text: str, recognizer_name: str) -> tuple[str, int]:
+def format_note_entities(
+    raw_tokens: list[dict],
+    note_text: str,
+    recognizer_name: str,
+    model_to_presidio_mapping: dict[str, str] | None = None,
+    ignore_labels: list[str] | set[str] | None = None,
+) -> tuple[str, int]:
     """Aggregate one note's raw BIO tokens into ``recognizer_results_json``.
 
     aggregate BIO tokens → dedup overlapping spans (IoU 0.5) → Presidio shape.
@@ -113,6 +119,8 @@ def format_note_entities(raw_tokens: list[dict], note_text: str, recognizer_name
         raw_tokens: Raw BIO token dicts for a single note, document-relative.
         note_text: The note's full text, used to slice ``matched_pattern``.
         recognizer_name: Canonical Presidio recognizer name to stamp on entities.
+        model_to_presidio_mapping: Optional dict mapping model labels to Presidio entity types.
+        ignore_labels: Optional labels to ignore during aggregation.
 
     Returns:
         A ``(recognizer_results_json, entity_count)`` pair.
@@ -137,14 +145,24 @@ def format_note_entities(raw_tokens: list[dict], note_text: str, recognizer_name
     ]
     entities = deduplicate_overlapping_entities(entities, iou_threshold=_SPAN_DEDUP_IOU)
 
+    ignore_set = set(ignore_labels) if ignore_labels is not None else None
+    mapping = model_to_presidio_mapping or {}
+
     ner_results = []
     for e in entities:
+        raw_label = e["entity"]
+        if ignore_set is not None and raw_label in ignore_set:
+            continue
+        mapped_label = mapping.get(raw_label, raw_label)
+        if ignore_set is not None and mapped_label in ignore_set:
+            continue
+
         start = e["start"]
         end = e["end"]
         matched_text = note_text[start:end] if start < len(note_text) else ""
         ner_results.append(
             {
-                "entity_type": e["entity"],
+                "entity_type": mapped_label,
                 "start": start,
                 "end": end,
                 "score": e["score"],
@@ -256,10 +274,13 @@ class TransformerInferenceActor:
         # actor so that actors x threads <= total CPUs (no oversubscription).
         # GPU branch keeps torch's default thread behavior untouched.
         if device == "cpu":
-            import ray
+            try:
+                import ray
 
-            assigned = ray.get_runtime_context().get_assigned_resources()
-            n = int(assigned.get("CPU", 1)) or 1
+                assigned = ray.get_runtime_context().get_assigned_resources()
+                n = int(assigned.get("CPU", 1)) or 1
+            except Exception:
+                n = 1
             torch.set_num_threads(n)
             logger.info("CPU inference: capping torch to %d thread(s) per Ray allocation", n)
 
@@ -278,6 +299,9 @@ class TransformerInferenceActor:
         # Store model path and seq_len for backwards compatibility and batch sizing
         self.model_path = self._core.model_path
         self._seq_len = self._core.model_max_length
+
+        self._model_to_presidio_mapping: dict[str, str] = self._core.config.get("MODEL_TO_PRESIDIO_MAPPING", {})
+        self._ignore_labels: set[str] = set(self._core.ignore_labels)
 
         # Per-window content-token budget from the single length authority
         # (:attr:`TransformerCore.token_budget` = real context window minus special
@@ -423,7 +447,13 @@ class TransformerInferenceActor:
 
     def _format_note(self, raw_tokens: list[dict], note_text: str) -> tuple[str, int]:
         """Aggregate one note's raw BIO tokens into ``recognizer_results_json``."""
-        return format_note_entities(raw_tokens, note_text, self._recognizer_name)
+        return format_note_entities(
+            raw_tokens,
+            note_text,
+            self._recognizer_name,
+            model_to_presidio_mapping=getattr(self, "_model_to_presidio_mapping", None),
+            ignore_labels=getattr(self, "_ignore_labels", None),
+        )
 
     def _log_gpu_mem(self, stage: str) -> None:
         """Log per-``__call__`` GPU memory when ``TIDE2_LOG_GPU_MEM`` is set.
@@ -607,20 +637,54 @@ class BIOAggregationActor:
         - processing_timestamp: ISO timestamp of this batch
     """
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        model_to_presidio_mapping: dict[str, str] | None = None,
+        ignore_labels: list[str] | set[str] | None = None,
+    ) -> None:
         """Initialize the aggregation actor.
 
         Args:
             model_name: Transformer model name, used to stamp the canonical
                 Presidio ``recognizer_name`` on every emitted entity.
+            model_to_presidio_mapping: Optional dict mapping model labels to Presidio entities.
+            ignore_labels: Optional set/list of labels to ignore.
         """
         self._model_name = model_name
         self._recognizer_name = format_transformer_recognizer_name(model_name)
+        if model_to_presidio_mapping is not None:
+            self._model_to_presidio_mapping = model_to_presidio_mapping
+        else:
+            try:
+                from tide2.transformers.config import load_model_config
+
+                cfg = load_model_config(model_name)
+                self._model_to_presidio_mapping = cfg.get("MODEL_TO_PRESIDIO_MAPPING", {})
+            except Exception:
+                self._model_to_presidio_mapping = {}
+
+        if ignore_labels is not None:
+            self._ignore_labels = set(ignore_labels)
+        else:
+            try:
+                from tide2.transformers.config import load_model_config
+
+                cfg = load_model_config(model_name)
+                self._ignore_labels = set(cfg.get("LABELS_TO_IGNORE", ["O"]))
+            except Exception:
+                self._ignore_labels = {"O"}
 
     def _format_note(self, raw_json: str, note_text: str) -> tuple[str, int]:
         """Decode one note's serialized raw BIO tokens and aggregate them."""
         raw_tokens = json.loads(raw_json) if raw_json else []
-        return format_note_entities(raw_tokens, note_text, self._recognizer_name)
+        return format_note_entities(
+            raw_tokens,
+            note_text,
+            self._recognizer_name,
+            model_to_presidio_mapping=self._model_to_presidio_mapping,
+            ignore_labels=self._ignore_labels,
+        )
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Aggregate raw BIO tokens into document-level recognizer results."""

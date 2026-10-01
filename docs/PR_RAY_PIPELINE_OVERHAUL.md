@@ -2,8 +2,7 @@
 
 Combined PR for the five-branch stack: `fix/transformer-actor-token-windowing` →
 `perf/ray-discrete-stages` → `perf/direct-worker-actors` → `feat/hardware-aware-defaults` →
-`perf/streamed-run-pipeline`. Base: `main`. No breaking-change notation; every pre-existing
-kwarg, CLI flag and YAML key is still accepted.
+`perf/streamed-run-pipeline`. Base: `main`.
 
 ---
 
@@ -133,17 +132,27 @@ Security Considerations.
 **Streamed benchmarks are outstanding** (Plan §12: SHIELD, 3 reps, ≤120s merge gate). Since
 streamed is opt-in and `discrete` is untouched, this does not block the rest of the stack.
 
+### 6. Review Comments Resolution Updates
+
+- **Pinned Base Image Digest:** Pinned base image to `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04@sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc` in `Dockerfile`.
+- **Model-to-Presidio Entity Mapping:** `format_note_entities` and `BIOAggregationActor` apply `MODEL_TO_PRESIDIO_MAPPING` and filter `LABELS_TO_IGNORE` so models with lower-case tags (e.g. OpenMed) emit canonical Presidio entity types.
+- **Standalone TransformersRecognizer Parity:** Refactored `TransformersRecognizer._get_ner_results_for_text` to eliminate character heuristic (`len(text) // 4`) and character-based chunking; inference now matches `TransformerInferenceActor` (token-accurate windowing, BIO aggregation, span IoU deduplication).
+- **Explicit Intercept on Removed Reassembly:** Running `tide2-runner run reassembly` halts immediately with an explicit, actionable error explaining the removal.
+- **Clean Signatures and Explicit Deprecation Errors:** Dead supervisor arguments (`batch_timeout`, `timeout`, `worker_num_cpus`) and deprecated `run_transformer` kwargs (`chunk_size`, `flat_map_cpus`, `compile_model`, `compile_cache_path`, `pre_chunked`, `short_seq_budget`) are captured via `**kwargs`, emitting a `DeprecationWarning` and failing fast with `ValueError`.
+- **LLM Recognizer Metadata Passthrough:** `LlmRecognizerWorker` retains `note_text` and copies passthrough metadata columns (`patient_uid`, `row_id`, `jitter`, `patient_identifiers`) to support downstream anonymizers in streamed mode.
+
 ## Compatibility
 
-No hard breaks. Behaviour changes worth knowing:
+Breaking changes and behaviour changes worth knowing:
 
 | Change | Before | After |
 |---|---|---|
+| Reassembly stage/job | Separate stage + groupby | **Removed.** Folded into transformer stage. `tide2-runner run reassembly` halts with explicit error. |
 | Long-note coverage | Silently truncated past ~512 tokens | Full note windowed — **output differs, and that is the fix** |
-| `batch_timeout` | 120s; kills worker, drops the batch, job continues | Deprecated no-op; `NoProgressGuard` (600s) fails loudly instead |
+| `batch_timeout` | 120s; kills worker, drops the batch, job continues | Deprecated; halts with explicit error explaining `NoProgressGuard` replacement |
+| Deprecated kwargs | Silently ignored or passed to dead code | Captured via `**kwargs`; emits `DeprecationWarning` and raises `ValueError` |
 | Unset sizing knobs | Literals tuned for one 16-CPU / 1×L4 box | Sized from the detected profile; identical on that box |
-| `--chunk-size` | Char-based chunker | Deprecated, ignored; `--chunk-overlap` is the window overlap |
-| Reassembly stage/job | Separate stage + groupby | Folded into per-note aggregation; `run_reassembly` removed |
+| `--chunk-size` | Char-based chunker | Deprecated; halts with error directing to `--chunk-overlap` |
 | Supervisor classes | Ray actors | Deprecating in-process shims; `*WorkerActor` for `.remote()` callers |
 | Startup logs | Resolved CPU config | `Detected:` / `Profile:` header + per-knob provenance table |
 

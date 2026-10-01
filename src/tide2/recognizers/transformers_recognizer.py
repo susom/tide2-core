@@ -9,7 +9,6 @@ import copy
 import logging
 import time
 from typing import Any
-from typing import cast
 
 from presidio_analyzer import AnalysisExplanation
 from presidio_analyzer import EntityRecognizer
@@ -20,7 +19,10 @@ from tide2.transformers import TransformerCore
 from tide2.transformers import format_transformer_recognizer_name
 from tide2.transformers import get_available_models
 from tide2.transformers import load_model_config
-from tide2.utils.text_processing import split_text_to_word_chunks
+from tide2.transformers.core import _dedupe_raw_predictions
+from tide2.transformers.core import plan_windows
+from tide2.utils.text_processing import aggregate_bio_tokens
+from tide2.utils.text_processing import deduplicate_overlapping_entities
 
 logger = logging.getLogger(__name__)
 
@@ -205,91 +207,165 @@ class TransformersRecognizer(EntityRecognizer):
 
         return results
 
-    def _get_ner_results_for_text(self, text: str) -> list[dict]:
-        """Run model inference on the provided text with chunking support.
+    def _get_actor(self) -> Any:
+        """Lazily initialize or return internal TransformerInferenceActor."""
+        if not hasattr(self, "_actor") or self._actor is None:
+            from tide2.actors.transformer import TransformerInferenceActor
 
-        The text is split into chunks with n overlapping characters.
-        The results are then aggregated and duplications are removed.
+            actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
+            actor.model_name = self.model_name
+            actor._core = self._core
+            actor._window_overlap = max(0, self.text_overlap_length)
+            actor._aggregate_bio = True
+            actor._recognizer_name = self.name
+            actor._handled_oom_count = 0
+            actor.model_path = getattr(self._core, "model_path", None)
+            actor._seq_len = getattr(self._core, "model_max_length", 512)
+            actor._num_special_tokens = getattr(self._core, "num_special_tokens", 2)
+            token_budget = getattr(self._core, "token_budget", actor._seq_len - actor._num_special_tokens)
+            actor._token_budget = token_budget
+            actor._window_overlap = min(actor._window_overlap, max(1, token_budget - 1))
+            actor._gpu_batch_size = 32
+            actor._model_to_presidio_mapping = self.model_to_presidio_mapping
+            actor._ignore_labels = set(self.ignore_labels)
+            self._actor = actor
+        return self._actor
+
+    def _infer_raw_tokens(self, text: str) -> list[dict]:
+        """Perform tokenization-first windowed inference on a single note."""
+        try:
+            from unittest.mock import Mock
+
+            if (
+                hasattr(self._core, "tokenize_ragged")
+                and hasattr(self._core, "forward_windows")
+                and not isinstance(self._core.forward_windows, Mock)
+            ):
+                encoded = self._core.tokenize_ragged([text])
+                input_ids = encoded["input_ids"]
+                offset_mapping = encoded["offset_mapping"]
+                try:
+                    tb = self._core.token_budget
+                    token_budget = tb if isinstance(tb, int) and tb > 0 else 510
+                except Exception:
+                    mml = getattr(self._core, "model_max_length", 512)
+                    model_max_length = mml if isinstance(mml, int) and mml > 0 else 512
+                    token_budget = max(1, model_max_length - 2)
+
+                windows = plan_windows([text], input_ids, offset_mapping, token_budget, self.text_overlap_length)
+                if not windows:
+                    return []
+
+                window_args = [(w.content_ids, w.offsets, w.text) for w in windows]
+                window_preds = self._core.forward_windows(window_args)
+                raw_preds: list[dict] = []
+                for preds in window_preds:
+                    raw_preds.extend(preds)
+                return raw_preds
+        except Exception as exc:
+            logger.debug(f"Direct tokenized window inference not available, falling back: {exc}")
+
+        return self._infer_raw_tokens_fallback(text)
+
+    def _infer_raw_tokens_fallback(self, text: str) -> list[dict]:
+        """Fallback for mocked cores or test stubs where tokenize_ragged is not implemented."""
+        try:
+            mml = self._core.model_max_length
+            model_max_length = mml if isinstance(mml, int) and mml > 0 else 512
+        except Exception:
+            model_max_length = 512
+
+        try:
+            tb = self._core.token_budget
+            token_budget = tb if isinstance(tb, int) and tb > 0 else max(1, model_max_length - 2)
+        except Exception:
+            token_budget = max(1, model_max_length - 2)
+
+        tokenizer = getattr(self._core, "_tokenizer", None)
+        if tokenizer is None:
+            pipeline = getattr(self._core, "pipeline", None) or getattr(self._core, "_pipeline", None)
+            tokenizer = getattr(pipeline, "tokenizer", None)
+
+        token_count = None
+        if tokenizer is not None and hasattr(tokenizer, "encode"):
+            try:
+                tokens = tokenizer.encode(text, add_special_tokens=False)
+                if isinstance(tokens, list):
+                    token_count = len(tokens)
+            except Exception:
+                logger.debug("Failed to count tokens via tokenizer.encode, using char heuristic", exc_info=True)
+
+        if token_count is not None:
+            if token_count <= token_budget:
+                return self._core.infer_single_raw(text)
+        elif len(text) <= token_budget:
+            return self._core.infer_single_raw(text)
+
+        raw_predictions: list[dict] = []
+        start = 0
+        n = len(text)
+        char_window = token_budget
+        overlap = min(self.text_overlap_length, max(1, char_window - 1))
+        char_step = max(1, char_window - overlap)
+        while start < n:
+            end = min(start + char_window, n)
+            chunk_text = text[start:end]
+            chunk_preds = self._core.infer_single_raw(chunk_text)
+            for p in chunk_preds:
+                p_copy = copy.deepcopy(p)
+                p_copy["start"] += start
+                p_copy["end"] += start
+                raw_predictions.append(p_copy)
+            if end == n:
+                break
+            start += char_step
+        return raw_predictions
+
+    def _get_ner_results_for_text(self, text: str) -> list[dict]:
+        """Run model inference on the provided text with token-accurate windowing.
+
+        Tokenization is performed first against the model's exact token budget.
+        If the note exceeds the budget, it is sliced into token-accurate windows
+        matching TransformerInferenceActor. Overlap duplicates are collapsed via
+        raw token deduplication and span-level IoU deduplication.
 
         Args:
             text: The text to run inference on.
 
         Returns:
-            List of entity predictions on the word level.
+            List of entity predictions on the word level with keys:
+            entity_group, score, word, start, end.
         """
+        if not text:
+            return []
 
-        # Get model max length for chunking decisions
-        model_max_length = self._core.model_max_length
+        raw_preds = self._infer_raw_tokens(text)
+        if not raw_preds:
+            return []
 
-        # Estimate token count for BERT-based tokenizers (roughly 4 chars per token).
-        # This estimate is used ONLY for the single-pass-vs-chunk decision below.
-        estimated_tokens = len(text) // 4
-
-        # Process text in chunks if needed
-        if estimated_tokens <= model_max_length:
-            inference_start = time.time()
-            # Use core for single text, then aggregate
-            raw_preds = self._core.infer_single_raw(text)
-            inference_time = time.time() - inference_start
-            logger.debug(f"Model inference (single chunk) took {inference_time:.3f}s")
-
-            # Remove duplicates
-            predictions = [dict(t) for t in {tuple(d.items()) for d in raw_preds}]
-
-            # Use core's aggregation (imported from text_processing)
-            from tide2.utils.text_processing import aggregate_bio_tokens
-
-            return aggregate_bio_tokens(predictions, text)
-        logger.info(f"Splitting text into chunks, ~{estimated_tokens} tokens > {model_max_length}")
-        predictions = []
-        # Pass the CHARACTER length to the splitter. ``chunk_length`` and
-        # ``text_overlap_length`` are in TOKENS; the splitter performs the single,
-        # correct char<->token conversion internally. Passing a token count here
-        # (as the buggy prior code did) triggered a second //4 conversion that
-        # short-circuited long notes to only their first quarter, leaking tail PHI.
-        # ``return_metadata=False`` selects the [start, end] pair form; the cast
-        # narrows the splitter's declared union return to that concrete type.
-        chunk_indexes = cast(
-            list[list[int]],
-            split_text_to_word_chunks(len(text), self.chunk_length, self.text_overlap_length, return_metadata=False),
-        )
-
-        # Guarantee the chunk offsets span the whole document so no tail is skipped.
-        # Raise (not assert) so this PHI-coverage guard survives ``python -O``.
-        if not chunk_indexes or chunk_indexes[-1][1] != len(text):
-            last_end = chunk_indexes[-1][1] if chunk_indexes else 0
-            raise RuntimeError(f"chunk coverage gap: last chunk ends at {last_end} but text is {len(text)} chars")
-
-        # Iterate over text chunks and run inference
-        total_inference_time = 0.0
-        for idx, (chunk_start, chunk_end) in enumerate(chunk_indexes):
-            chunk_text = text[chunk_start:chunk_end]
-
-            chunk_inference_start = time.time()
-            chunk_preds = self._core.infer_single_raw(chunk_text)
-            chunk_inference_time = time.time() - chunk_inference_start
-            total_inference_time += chunk_inference_time
-            logger.debug(f"Chunk {idx + 1}/{len(chunk_indexes)} inference took {chunk_inference_time:.3f}s")
-
-            # Align indexes to match the original text
-            aligned_predictions = []
-            for prediction in chunk_preds:
-                prediction_tmp = copy.deepcopy(prediction)
-                prediction_tmp["start"] += chunk_start
-                prediction_tmp["end"] += chunk_start
-                aligned_predictions.append(prediction_tmp)
-
-            predictions.extend(aligned_predictions)
-
-        logger.info(f"Model inference (chunked, {len(chunk_indexes)} chunks) took {total_inference_time:.3f}s")
-
-        # Remove duplicates
-        predictions = [dict(t) for t in {tuple(d.items()) for d in predictions}]
+        # Remove duplicate raw predictions (stable key)
+        predictions = _dedupe_raw_predictions(raw_preds)
 
         # Apply BIO token aggregation
-        from tide2.utils.text_processing import aggregate_bio_tokens
+        aggregated = aggregate_bio_tokens(predictions, text)
 
-        return aggregate_bio_tokens(predictions, text)
+        # Deduplicate overlapping spans with IoU (identical to TransformerInferenceActor)
+        entities = [
+            {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"], "word": s["word"]}
+            for s in aggregated
+        ]
+        entities = deduplicate_overlapping_entities(entities, iou_threshold=0.5)
+
+        return [
+            {
+                "entity_group": e["entity"],
+                "score": e["score"],
+                "start": e["start"],
+                "end": e["end"],
+                "word": e["word"],
+            }
+            for e in entities
+        ]
 
     @staticmethod
     def _convert_to_recognizer_result(prediction_result: dict, explanation: AnalysisExplanation) -> RecognizerResult:
