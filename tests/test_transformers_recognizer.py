@@ -495,3 +495,34 @@ class TestTransformersRecognizer:
             assert any(tail_name in chunk for chunk in inferred), "tail was never sent to the model"
         finally:
             Path(config_path).unlink()
+
+    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.config.get_resource_path")
+    def test_forward_windows_exception_propagates_without_silent_fallback(self, mock_get_path, mock_resolve_model):
+        """Exceptions from forward_windows (like CUDA OOM) must propagate rather than falling back."""
+        mock_resolve_model.return_value = "/fake/model/path"
+        config_path = create_temp_config(self.mock_config)
+        mock_get_path.return_value = config_path
+
+        try:
+            recognizer = TransformersRecognizer(model_name="TEST_MODEL")
+
+            class TokenizedCore:
+                model_max_length = 512
+                token_budget = 510
+
+                def tokenize_ragged(self, texts):
+                    return {
+                        "input_ids": [[1, 2, 3]],
+                        "offset_mapping": [[(0, 1), (1, 2), (2, 3)]],
+                    }
+
+                def forward_windows(self, windows):
+                    raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 MiB.")
+
+            recognizer._core = TokenizedCore()
+
+            with pytest.raises(RuntimeError, match="CUDA out of memory"):
+                recognizer._infer_raw_tokens("sample text")
+        finally:
+            Path(config_path).unlink()

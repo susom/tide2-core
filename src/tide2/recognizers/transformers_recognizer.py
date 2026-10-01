@@ -233,39 +233,48 @@ class TransformersRecognizer(EntityRecognizer):
 
     def _infer_raw_tokens(self, text: str) -> list[dict]:
         """Perform tokenization-first windowed inference on a single note."""
+        from collections.abc import Mapping
+        from unittest.mock import Mock
+
+        # If core is an explicit test mock without tokenized API, fallback directly
+        if (
+            isinstance(self._core, Mock)
+            or not hasattr(self._core, "tokenize_ragged")
+            or not hasattr(self._core, "forward_windows")
+            or isinstance(getattr(self._core, "forward_windows", None), Mock)
+        ):
+            return self._infer_raw_tokens_fallback(text)
+
         try:
-            from unittest.mock import Mock
+            encoded = self._core.tokenize_ragged([text])
+            if isinstance(encoded, Mock) or (not isinstance(encoded, (dict, Mapping)) and not hasattr(encoded, "keys")):
+                return self._infer_raw_tokens_fallback(text)
+            input_ids = encoded["input_ids"]
+            offset_mapping = encoded["offset_mapping"]
+            if isinstance(input_ids, Mock) or isinstance(offset_mapping, Mock):
+                return self._infer_raw_tokens_fallback(text)
+        except Exception:
+            return self._infer_raw_tokens_fallback(text)
 
-            if (
-                hasattr(self._core, "tokenize_ragged")
-                and hasattr(self._core, "forward_windows")
-                and not isinstance(self._core.forward_windows, Mock)
-            ):
-                encoded = self._core.tokenize_ragged([text])
-                input_ids = encoded["input_ids"]
-                offset_mapping = encoded["offset_mapping"]
-                try:
-                    tb = self._core.token_budget
-                    token_budget = tb if isinstance(tb, int) and tb > 0 else 510
-                except Exception:
-                    mml = getattr(self._core, "model_max_length", 512)
-                    model_max_length = mml if isinstance(mml, int) and mml > 0 else 512
-                    token_budget = max(1, model_max_length - 2)
+        try:
+            tb = self._core.token_budget
+            token_budget = tb if isinstance(tb, int) and tb > 0 else 510
+        except Exception:
+            mml = getattr(self._core, "model_max_length", 512)
+            model_max_length = mml if isinstance(mml, int) and mml > 0 else 512
+            token_budget = max(1, model_max_length - 2)
 
-                windows = plan_windows([text], input_ids, offset_mapping, token_budget, self.text_overlap_length)
-                if not windows:
-                    return []
+        windows = plan_windows([text], input_ids, offset_mapping, token_budget, self.text_overlap_length)
+        if not windows:
+            return []
 
-                window_args = [(w.content_ids, w.offsets, w.text) for w in windows]
-                window_preds = self._core.forward_windows(window_args)
-                raw_preds: list[dict] = []
-                for preds in window_preds:
-                    raw_preds.extend(preds)
-                return raw_preds
-        except Exception as exc:
-            logger.debug(f"Direct tokenized window inference not available, falling back: {exc}")
-
-        return self._infer_raw_tokens_fallback(text)
+        # Real tokenized forward execution: let exceptions propagate (e.g. CUDA OOM)
+        window_args = [(w.content_ids, w.offsets, w.text) for w in windows]
+        window_preds = self._core.forward_windows(window_args)
+        raw_preds: list[dict] = []
+        for preds in window_preds:
+            raw_preds.extend(preds)
+        return raw_preds
 
     def _infer_raw_tokens_fallback(self, text: str) -> list[dict]:
         """Fallback for mocked cores or test stubs where tokenize_ragged is not implemented."""
