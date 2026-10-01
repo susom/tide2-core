@@ -1,8 +1,8 @@
 """
-Workflow execution tests for ACC_NUM anonymization with per-note patient_uid.
+Workflow execution tests for ACC_NUM anonymization with per-note patient_id.
 
 Tests verify that AnonymizerWorker processes accession numbers using per-note
-patient_uid correctly, ensuring per-patient uniqueness, determinism, and chunked
+patient_id correctly, ensuring per-patient uniqueness, determinism, and chunked
 boundary handling.
 """
 
@@ -41,8 +41,31 @@ def _get_worker_instance(acc_num_salt: str = "test_salt", acc_num_study_id: str 
 class TestAnonymizerWorkerAccNumDirect:
     """Unit tests for AnonymizerWorker.process_note accession hashing."""
 
+    def test_deprecated_patient_uid_raises_in_process_note(self):
+        """Passing patient_uid raises ValueError with DeprecationWarning."""
+        worker = _get_worker_instance()
+        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
+            worker.process_note(
+                note_text="Note text",
+                original_text_hash="hash_a",
+                recognizer_results_json="[]",
+                patient_uid="patient_AAA",
+            )
+
+    def test_deprecated_patient_uid_raises_in_create_operators(self):
+        """Passing patient_uid raises ValueError with DeprecationWarning."""
+        worker = _get_worker_instance()
+        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
+            worker._create_operators_for_note(patient_uid="patient_AAA")
+
+    def test_deprecated_patient_uid_raises_in_compute_jitter(self):
+        """Passing patient_uid raises ValueError with DeprecationWarning."""
+        worker = _get_worker_instance()
+        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
+            worker._compute_jitter_for_patient(patient_uid="patient_AAA")
+
     def test_per_patient_uniqueness_short_path(self):
-        """Different patient_uids yield distinct hashes for identical accession text."""
+        """Different patient_ids yield distinct hashes for identical accession text."""
         worker = _get_worker_instance()
         note = "Accession is ACC1234567 for scan."
         recognizer_json = orjson.dumps([{"entity_type": "ACC_NUM", "start": 13, "end": 23, "score": 1.0}]).decode(
@@ -53,14 +76,14 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="hash_a",
             recognizer_results_json=recognizer_json,
-            patient_uid="patient_AAA",
+            patient_id="patient_AAA",
             jitter=10,
         )
         res_b = worker.process_note(
             note_text=note,
             original_text_hash="hash_b",
             recognizer_results_json=recognizer_json,
-            patient_uid="patient_BBB",
+            patient_id="patient_BBB",
             jitter=10,
         )
 
@@ -88,14 +111,14 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="hash_1",
             recognizer_results_json=recognizer_json,
-            patient_uid="patient_AAA",
+            patient_id="patient_AAA",
             jitter=10,
         )
         res_2 = worker.process_note(
             note_text=note,
             original_text_hash="hash_1",
             recognizer_results_json=recognizer_json,
-            patient_uid="patient_AAA",
+            patient_id="patient_AAA",
             jitter=10,
         )
 
@@ -106,7 +129,7 @@ class TestAnonymizerWorkerAccNumDirect:
         """Worker output matches direct AccessionNumberHashAnonymizer calculation."""
         salt = "worker_salt"
         study_id = "worker_study"
-        patient_uid = "pat_789"
+        patient_id = "pat_789"
         accession_text = "ACC998877"
 
         worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
@@ -121,19 +144,19 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="h1",
             recognizer_results_json=recognizer_json,
-            patient_uid=patient_uid,
+            patient_id=patient_id,
             jitter=10,
         )
 
         expected_hash = AccessionNumberHashAnonymizer().operate(
             accession_text,
-            {"salt": salt, "study_id": study_id, "patient_uid": patient_uid},
+            {"salt": salt, "study_id": study_id, "patient_id": patient_id},
         )
         items = orjson.loads(res["anonymizer_results_json"])
         assert items[0]["text"] == expected_hash
 
-    def test_none_patient_uid_uses_default(self):
-        """None patient_uid yields default [E] component without error."""
+    def test_none_patient_id_uses_default(self):
+        """None patient_id yields default [E] component without error."""
         salt = "salt_x"
         study_id = "study_y"
         worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
@@ -149,7 +172,7 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="h_none",
             recognizer_results_json=recognizer_json,
-            patient_uid=None,
+            patient_id=None,
             jitter=10,
         )
 
@@ -157,8 +180,8 @@ class TestAnonymizerWorkerAccNumDirect:
         items = orjson.loads(res["anonymizer_results_json"])
         assert items[0]["text"] == expected_hash
 
-    def test_nan_patient_uid_uses_default(self):
-        """NaN patient_uid from nullable float column resolves to default [E] token."""
+    def test_nan_patient_id_uses_default(self):
+        """NaN patient_id from nullable float column resolves to default [E] token."""
         salt = "salt_x"
         study_id = "study_y"
         worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
@@ -174,7 +197,7 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="h_nan",
             recognizer_results_json=recognizer_json,
-            patient_uid=float("nan"),
+            patient_id=float("nan"),
             jitter=10,
         )
 
@@ -182,7 +205,7 @@ class TestAnonymizerWorkerAccNumDirect:
         items = orjson.loads(res["anonymizer_results_json"])
         assert items[0]["text"] == expected_hash
 
-    def test_numpy_and_pandas_null_patient_uids_use_default(self):
+    def test_numpy_and_pandas_null_patient_ids_use_default(self):
         """NumPy float NaNs and pd.NA resolve to default [E] token and random jitter fallback."""
         import numpy as np
         import pandas as pd
@@ -204,7 +227,7 @@ class TestAnonymizerWorkerAccNumDirect:
                 note_text=note,
                 original_text_hash="h_null_scalar",
                 recognizer_results_json=recognizer_json,
-                patient_uid=null_val,
+                patient_id=null_val,
                 jitter=10,
             )
             items = orjson.loads(res["anonymizer_results_json"])
@@ -214,8 +237,8 @@ class TestAnonymizerWorkerAccNumDirect:
             jitter_val = worker._compute_jitter_for_patient(null_val)
             assert isinstance(jitter_val, int)
 
-    def test_numeric_patient_uid_worker(self):
-        """Numeric patient_uid from integer column is converted to string for hashing."""
+    def test_numeric_patient_id_worker(self):
+        """Numeric patient_id from integer column is converted to string for hashing."""
         salt = "salt_x"
         study_id = "study_y"
         worker = _get_worker_instance(acc_num_salt=salt, acc_num_study_id=study_id)
@@ -231,7 +254,7 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="h_int",
             recognizer_results_json=recognizer_json,
-            patient_uid=123456,
+            patient_id=123456,
             jitter=10,
         )
 
@@ -240,7 +263,7 @@ class TestAnonymizerWorkerAccNumDirect:
         assert items[0]["text"] == expected_hash
 
     def test_chunked_path_per_patient_uniqueness(self):
-        """Chunked processing branch (> MAX_ANON_CHUNK_SIZE) scopes hash by patient_uid."""
+        """Chunked processing branch (> MAX_ANON_CHUNK_SIZE) scopes hash by patient_id."""
         worker = _get_worker_instance()
 
         prefix = "A" * (MAX_ANON_CHUNK_SIZE + 500)
@@ -258,14 +281,14 @@ class TestAnonymizerWorkerAccNumDirect:
             note_text=note,
             original_text_hash="h_chunk_a",
             recognizer_results_json=recognizer_json,
-            patient_uid="patient_CHUNK_A",
+            patient_id="patient_CHUNK_A",
             jitter=10,
         )
         res_b = worker.process_note(
             note_text=note,
             original_text_hash="h_chunk_b",
             recognizer_results_json=recognizer_json,
-            patient_uid="patient_CHUNK_B",
+            patient_id="patient_CHUNK_B",
             jitter=10,
         )
 
@@ -297,7 +320,7 @@ class TestAnonymizerWorkerRayWorkflow:
             ray.shutdown()
 
     def test_remote_worker_execution(self):
-        """Remote Ray actor processes note and preserves patient_uid scoping."""
+        """Remote Ray actor processes note and preserves patient_id scoping."""
         from tide2.actors.anonymizer import AnonymizerWorkerActor
 
         worker = AnonymizerWorkerActor.remote(
@@ -318,14 +341,14 @@ class TestAnonymizerWorkerRayWorkflow:
             note_text=note,
             original_text_hash="ray_hash_a",
             recognizer_results_json=recognizer_json,
-            patient_uid="ray_pat_a",
+            patient_id="ray_pat_a",
             jitter=10,
         )
         ref_b = worker.process_note.remote(
             note_text=note,
             original_text_hash="ray_hash_b",
             recognizer_results_json=recognizer_json,
-            patient_uid="ray_pat_b",
+            patient_id="ray_pat_b",
             jitter=10,
         )
 

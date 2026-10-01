@@ -32,6 +32,7 @@ from presidio_analyzer import RecognizerResult
 
 from tide2.recognizers.llm_json_recognizer import LlmJsonRecognizer
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
@@ -189,6 +190,7 @@ class LlmRecognizerWorker:
         processed_indices: list[int] = []
 
         cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="LlmRecognizerActor.process_batch")
         batch_size = len(cols["note_text"])
         note_texts = cols["note_text"]
         input_text_hashes = cols["text_hash"]
@@ -212,9 +214,9 @@ class LlmRecognizerWorker:
 
             try:
                 # Handle empty/null notes
-                if not note_text or is_null(note_text):
+                if is_null(note_text) or not note_text:
                     out_text_hashes.append(text_hash)
-                    out_note_texts.append(note_text if note_text is not None else "")
+                    out_note_texts.append("" if is_null(note_text) else str(note_text))
                     results_json_list.append("[]")
                     entity_counts.append(0)
                     processing_statuses.append("success")

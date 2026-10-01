@@ -71,23 +71,23 @@ def validate_row_id_generation() -> bool:
     df = pd.DataFrame(
         {
             "text_hash": ["hash1", "hash1", "hash2", "hash3"],
-            "patient_uid": ["uid_a", "uid_b", "uid_a", None],
+            "patient_id": ["uid_a", "uid_b", "uid_a", None],
             "note_text": ["text1", "text1", "text2", "text3"],
         }
     )
 
     print("\nInput DataFrame:")
-    print(df[["text_hash", "patient_uid"]])
+    print(df[["text_hash", "patient_id"]])
     print()
 
     # Generate row_ids (same logic as local_runner.py)
-    df["row_id"] = (df["text_hash"] + ":" + df["patient_uid"].fillna("None").astype(str)).apply(
+    df["row_id"] = (df["text_hash"] + ":" + df["patient_id"].fillna("None").astype(str)).apply(
         lambda x: hashlib.sha256(x.encode()).hexdigest()
     )
 
     print("Generated row_ids:")
     for _, row in df.iterrows():
-        print(f"  {row['text_hash']}:{row['patient_uid']} -> {row['row_id'][:16]}...")
+        print(f"  {row['text_hash']}:{row['patient_id']} -> {row['row_id'][:16]}...")
     print()
 
     errors = _run_checks(df)

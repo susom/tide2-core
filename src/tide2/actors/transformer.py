@@ -50,6 +50,7 @@ from tide2.transformers.config import format_transformer_recognizer_name
 from tide2.transformers.core import _dedupe_raw_predictions
 from tide2.transformers.core import _Window
 from tide2.transformers.core import plan_windows
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.text_processing import aggregate_bio_tokens
 from tide2.utils.text_processing import deduplicate_overlapping_entities
 
@@ -75,7 +76,7 @@ _SPAN_DEDUP_IOU = 0.5
 
 # Columns carried through every transformer-side stage untouched when present.
 # Mirrors ``runner.local_runner.StageColumns.optional``.
-PASSTHROUGH_COLS = ("patient_identifiers", "patient_uid", "jitter", "row_id")
+PASSTHROUGH_COLS = ("patient_identifiers", "patient_id", "jitter", "row_id")
 
 
 def _numpy_default(obj: Any) -> Any:
@@ -96,6 +97,7 @@ def _copy_passthrough(batch: dict[str, Any], res: dict[str, list[Any]], *, empty
         empty: When True, emit empty lists instead of copying values (used for
             the empty-batch path, which must still declare the columns).
     """
+    _check_deprecated_patient_uid(batch)
     for col in PASSTHROUGH_COLS:
         if col in batch:
             res[col] = [] if empty else list(batch[col])
@@ -292,7 +294,7 @@ class TransformerInferenceActor:
             project_id=project_id,
             device=device,
             load_immediately=True,  # Load model immediately on actor init
-            local_files_only=True,  # Use cached models only
+            local_files_only=not allow_huggingface_download,
             allow_huggingface_download=allow_huggingface_download,
         )
 
@@ -328,7 +330,7 @@ class TransformerInferenceActor:
         """Get the model pipeline (for backwards compatibility)."""
         return self._core.pipeline
 
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
         """
         Process a batch of **whole notes** through transformer inference (raw tokens).
 
@@ -356,6 +358,7 @@ class TransformerInferenceActor:
                 - predictions_raw_json: JSON-serialized list of raw BIO token dicts,
                   with document-relative char offsets
         """
+        _check_deprecated_patient_uid(batch, location="TransformerInferenceWorker")
         note_texts = batch["note_text"]
         text_hashes = batch["text_hash"]
         patient_ids = batch.get("patient_id", [""] * len(note_texts))
@@ -572,6 +575,7 @@ class TransformerInferenceActor:
         """
         batch_size = max(1, min(self._gpu_batch_size, len(windows)))
         while True:
+            oom_caught = False
             try:
                 out: list[list[dict]] = []
                 for start in range(0, len(windows), batch_size):
@@ -589,12 +593,14 @@ class TransformerInferenceActor:
                 self._record_handled_oom()
                 batch_size = max(1, batch_size // 2)  # power-of-two reduction; terminates at 1
                 logger.warning("CUDA OOM; halving GPU batch to %d and re-forwarding", batch_size)
-                # forward_windows (Fix A1) already freed the failed forward's
-                # tensors, so this reclaims real VRAM before the smaller retry.
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                oom_caught = True
             else:
                 return out
+
+            # Empty cache outside the except block so CPython clears the exception
+            # reference `e` and its traceback, freeing failed forward tensors before cache reclamation.
+            if oom_caught and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     def _plan_windows(
         self,
@@ -688,6 +694,7 @@ class BIOAggregationActor:
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Aggregate raw BIO tokens into document-level recognizer results."""
+        _check_deprecated_patient_uid(batch, location="BIOAggregationActor")
         note_texts = batch["note_text"]
         raw_json_list = batch["predictions_raw_json"]
         text_hashes = batch["text_hash"]

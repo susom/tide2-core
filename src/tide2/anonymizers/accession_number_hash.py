@@ -20,6 +20,7 @@ from typing import Any
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.nulls import is_null
 
 
@@ -36,7 +37,7 @@ class AccessionNumberHashAnonymizer(Operator):
     Parameters:
         salt (str, optional): Salt value for hashing. Defaults to '[S]' if None.
         study_id (str, optional): Study identifier. Defaults to '[U]' if None.
-        patient_uid (str, optional): Patient identifier (SQL entity parameter).
+        patient_id (str, optional): Patient identifier (SQL entity parameter).
             Defaults to '[E]' if None.
         entity_type (str, optional): The Presidio entity type being anonymized
             (e.g., 'ACC_NUM'). Provided by Presidio; defaults to 'DEFAULT'.
@@ -79,22 +80,23 @@ class AccessionNumberHashAnonymizer(Operator):
         """
         Anonymize the accession number using deterministic hashing.
 
-        The algorithm concatenates salt, study_id, entity (patient_uid), and identifier
+        The algorithm concatenates salt, study_id, entity (patient_id), and identifier
         with '|' separator, applies SHA256, and returns the first 16 characters of the
         uppercase hex digest.
 
         Args:
             text: The accession number to anonymize
-            params: Dictionary containing optional 'salt', 'study_id', 'patient_uid',
+            params: Dictionary containing optional 'salt', 'study_id', 'patient_id',
                 and 'entity_type'
 
         Returns:
             16-character uppercase hexadecimal hash
         """
+        _check_deprecated_patient_uid(params, location="accession_number_hash params")
         salt = params.get("salt")
         study_id = params.get("study_id")
-        # Read patient_uid for SQL entity component; entity_type is reserved by Presidio
-        entity = params.get("patient_uid")
+        # Read patient_id for SQL entity component; entity_type is reserved by Presidio
+        entity = params.get("patient_id")
 
         # Apply COALESCE logic matching the SQL function
         salt_part = self._coalesce_param(salt, self.DEFAULT_SALT)
@@ -115,11 +117,12 @@ class AccessionNumberHashAnonymizer(Operator):
         Validate operator parameters.
 
         Args:
-            params: Dictionary that may contain 'entity_type', 'salt', 'study_id'
+            params: Dictionary that may contain 'entity_type', 'salt', 'study_id', 'patient_id'
 
         Raises:
-            ValueError: If entity_type is provided but not supported
+            ValueError: If entity_type is provided but not supported or if deprecated patient_uid is used
         """
+        _check_deprecated_patient_uid(params, location="accession_number_hash params")
         entity_type = params.get("entity_type", "DEFAULT")
         if entity_type not in self.entities_supported:
             raise ValueError(

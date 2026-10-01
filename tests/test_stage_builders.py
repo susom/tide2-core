@@ -182,7 +182,6 @@ class TestRecognizerInputAssembly:
                 "patient_id": ["p1"],
                 "recognizer_results_json": ["[]"],
                 "patient_identifiers": ['{"name": "Alice"}'],
-                "patient_uid": ["u1"],
                 "jitter": [10],
                 "row_id": ["r1"],
             }
@@ -193,7 +192,7 @@ class TestRecognizerInputAssembly:
         res = runner._build_recognizer_input_from_transformer(trans_out, df_input)
 
         assert res["row_id"].tolist() == ["r1"]
-        assert res["patient_uid"].tolist() == ["u1"]
+        assert res["patient_id"].tolist() == ["p1"]
         assert res["jitter"].tolist() == [10]
         assert res["patient_identifiers"].tolist() == ['{"name": "Alice"}']
 

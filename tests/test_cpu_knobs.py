@@ -200,7 +200,7 @@ class TestPerOperatorReservations:
         monkeypatch.setattr(
             lr,
             "detect_columns",
-            lambda *_a, **_k: ["text_hash", "note_text", "recognizer_results_json", "patient_uid"],
+            lambda *_a, **_k: ["text_hash", "note_text", "recognizer_results_json", "patient_id"],
         )
         salt_file = tmp_path / "salt.bin"
         key_file = tmp_path / "key.bin"
