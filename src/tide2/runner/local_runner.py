@@ -29,6 +29,7 @@ import logging
 import os
 import shutil
 import time
+import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +110,46 @@ def _resolve_slot_cpus(
         "ray_remote_args": ray_remote_args,
     }
     return slot_cpus, ray_remote_args, resolved
+
+
+DEPRECATED_TRANSFORMER_KWARGS: frozenset[str] = frozenset(
+    {
+        "chunk_size",
+        "flat_map_cpus",
+        "compile_model",
+        "compile_cache_path",
+        "pre_chunked",
+        "short_seq_budget",
+    }
+)
+
+
+def _check_deprecated_transformer_kwargs(kwargs: dict[str, Any], caller_name: str) -> None:
+    """Validate keyword arguments against deprecated transformer parameters.
+
+    Args:
+        kwargs: Keyword arguments passed to run_transformer.
+        caller_name: Name of the calling function/method for error messages.
+
+    Raises:
+        ValueError: If any deprecated parameter is supplied.
+        TypeError: If an unrecognized parameter is supplied.
+    """
+    for param in (
+        "chunk_size",
+        "flat_map_cpus",
+        "compile_model",
+        "compile_cache_path",
+        "pre_chunked",
+        "short_seq_budget",
+    ):
+        if param in kwargs:
+            msg = f"The parameter '{param}' is deprecated and no longer supported. Please remove it from your call."
+            warnings.warn(msg, DeprecationWarning, stacklevel=3)
+            raise ValueError(msg)
+    if kwargs:
+        unexpected = next(iter(kwargs))
+        raise TypeError(f"{caller_name}() got an unexpected keyword argument '{unexpected}'")
 
 
 def _configure_checkpoint(
@@ -1199,7 +1240,6 @@ class LocalJobRunner:
             acc_num_salt=acc_num_salt,
             acc_num_study_id=acc_num_study_id,
             jitter_required=jitter_required,
-            worker_num_cpus=worker_num_cpus,
         )
 
         try:
@@ -1313,6 +1353,7 @@ class LocalJobRunner:
         transformer_cpus: float | None = None,
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """
         Run transformer NER job with token-accurate windowing.
@@ -1412,6 +1453,7 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
+        _check_deprecated_transformer_kwargs(kwargs, "LocalJobRunner.run_transformer")
         from tide2.actors import create_transformer_actor
         from tide2.transformers.config import load_model_config
 
@@ -2306,7 +2348,6 @@ class LocalJobRunner:
                     acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
                     acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
                     jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
-                    worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
                 )
                 ds = self.build_anonymizer_stage(
                     ds,
@@ -2685,6 +2726,7 @@ def run_transformer_simple(
     num_cpus: int | None = None,
     object_store_gb: int | None = None,
     num_agg_actors: int | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """
     Simple function to run transformer NER job.
@@ -2701,10 +2743,13 @@ def run_transformer_simple(
         num_cpus: CPUs
         object_store_gb: Object store size GB
         num_agg_actors: Number of CPU actors for BIO aggregation (auto if None)
+        **kwargs: Deprecated parameters. Passing any deprecated argument
+            will raise a ValueError with a deprecation warning.
 
     Returns:
         Processing statistics
     """
+    _check_deprecated_transformer_kwargs(kwargs, "run_transformer_simple")
     runner = LocalJobRunner(
         num_cpus=num_cpus,
         num_gpus=num_gpus,

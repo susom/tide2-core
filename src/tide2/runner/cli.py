@@ -40,22 +40,29 @@ _DEPRECATED_FLAGS: dict[str, str] = {
 
 
 def _warn_deprecated_flags(args: argparse.Namespace) -> None:
-    """Emit a DeprecationWarning for every no-op flag present in *args*.
+    """Emit a DeprecationWarning and fail fast for every deprecated flag present in *args*.
 
     Args:
         args: Parsed CLI namespace; each dest in :data:`_DEPRECATED_FLAGS` that
-            was actually supplied produces one warning.
+            was actually supplied produces one warning and halts execution.
     """
     import warnings
 
+    errors = []
     for dest, message in _DEPRECATED_FLAGS.items():
         if getattr(args, dest, None) is not None:
             warnings.warn(message, DeprecationWarning, stacklevel=2)
+            errors.append(message)
+    if errors:
+        sys.stderr.write("error: " + "\nerror: ".join(errors) + "\n")
+        sys.exit(2)
 
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Run a job."""
     from tide2.runner.local_runner import LocalJobRunner
+
+    _warn_deprecated_flags(args)
 
     # Validate required fields (may come from CLI or config)
     if not args.input:
@@ -82,7 +89,6 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     dry_run = getattr(args, "dry_run", False)
 
-    _warn_deprecated_flags(args)
     if no_prog is not None:
         configure_data_context(no_progress_timeout_s=no_prog)
 
@@ -344,8 +350,26 @@ def cmd_run(args: argparse.Namespace) -> None:
         runner.shutdown()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Main entry point for the CLI."""
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # Intercept removed 'reassembly' stage before parsing
+    if "reassembly" in argv:
+        try:
+            run_idx = argv.index("run")
+            pos_args = [tok for tok in argv[run_idx + 1 :] if not tok.startswith("-")]
+            if pos_args and pos_args[0] == "reassembly":
+                sys.stderr.write(
+                    "error: 'reassembly' stage has been removed. Chunk reassembly is now performed "
+                    "automatically in the transformer stage (token-accurate windowing + BIO aggregation). "
+                    "Please remove this step from your workflow.\n"
+                )
+                sys.exit(2)
+        except ValueError:
+            pass
+
     parser = argparse.ArgumentParser(
         prog="tide2-runner",
         description="TIDE 2.0 Runner - Run recognition/anonymization jobs on a single node",
@@ -594,11 +618,11 @@ Examples:
     run_p.set_defaults(func=cmd_run)
 
     # Parse and execute
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # If --config provided on the 'run' command, load YAML and backfill unset args
     if args.command == "run" and getattr(args, "config", None):
-        _apply_config(args, run_p)
+        _apply_config(args, run_p, argv)
 
     args.func(args)
 
@@ -616,7 +640,7 @@ def _cli_supplied_dests(run_parser: argparse.ArgumentParser, argv: list[str]) ->
     return {action.dest for action in run_parser._actions if typed.intersection(action.option_strings)}
 
 
-def _apply_config(args: argparse.Namespace, run_parser: argparse.ArgumentParser) -> None:
+def _apply_config(args: argparse.Namespace, run_parser: argparse.ArgumentParser, argv: list[str] | None = None) -> None:
     """Load YAML config and set any arg that wasn't provided on the command line."""
     import yaml
 
@@ -630,7 +654,7 @@ def _apply_config(args: argparse.Namespace, run_parser: argparse.ArgumentParser)
 
     # Map YAML keys (underscore) to argparse dest names
     # YAML uses the same names as argparse dest (e.g. num_actors, batch_size)
-    supplied = _cli_supplied_dests(run_parser, sys.argv[1:])
+    supplied = _cli_supplied_dests(run_parser, sys.argv[1:] if argv is None else argv)
     for key, value in config.items():
         if key not in supplied:
             setattr(args, key, value)

@@ -40,7 +40,7 @@ def test_supervisor_deprecated_shim():
 
     try:
         with pytest.deprecated_call(match="RecognizerSupervisor is deprecated"):
-            rec_sup = RecognizerSupervisor(batch_timeout=120)
+            rec_sup = RecognizerSupervisor()
         assert isinstance(rec_sup.worker, RecognizerWorker)
 
         with pytest.deprecated_call(match="AnonymizerSupervisor is deprecated"):
@@ -52,6 +52,124 @@ def test_supervisor_deprecated_shim():
         assert isinstance(llm_sup.worker, LlmRecognizerWorker)
     finally:
         unpatch_remove_duplicates()
+
+
+@pytest.mark.parametrize("arg", ["batch_timeout", "timeout", "worker_num_cpus"])
+def test_actor_deprecated_kwargs_raise(arg):
+    """Passing deprecated supervisor/actor kwargs emits DeprecationWarning and raises ValueError."""
+    from tide2.actors.anonymizer import create_anonymizer_actor
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        RecognizerWorker(**{arg: 100})
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        RecognizerSupervisor(**{arg: 100})
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        AnonymizerWorker(salt=b"\x00" * 32, key=b"\x11" * 32, **{arg: 100})
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        AnonymizerSupervisor(salt=b"\x00" * 32, key=b"\x11" * 32, **{arg: 100})
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        create_anonymizer_actor(salt=b"\x00" * 32, key=b"\x11" * 32, **{arg: 100})
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        LlmRecognizerWorker(project_id="test", **{arg: 100})
+
+    with (
+        pytest.deprecated_call(match=f"'{arg}' is deprecated and no longer supported"),
+        pytest.raises(ValueError, match=f"Unsupported deprecated argument: '{arg}'"),
+    ):
+        LlmRecognizerSupervisor(project_id="test", **{arg: 100})
+
+
+def test_actor_unexpected_kwargs_raise_type_error():
+    """Passing unrecognized kwargs raises TypeError."""
+    with pytest.raises(TypeError, match="unexpected keyword argument 'invalid_param'"):
+        RecognizerWorker(invalid_param=True)
+
+
+def test_cli_reassembly_removed_explicit_error(capsys):
+    """Running 'tide2-runner run reassembly' halts with explicit informative error."""
+    with pytest.raises(SystemExit) as exc_info:
+        main(["run", "reassembly", "-i", "in", "-o", "out"])
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "error: 'reassembly' stage has been removed." in captured.err
+    assert "Chunk reassembly is now performed automatically in the transformer stage" in captured.err
+
+
+@pytest.mark.parametrize(
+    "kwarg",
+    [
+        "chunk_size",
+        "flat_map_cpus",
+        "compile_model",
+        "compile_cache_path",
+        "pre_chunked",
+        "short_seq_budget",
+    ],
+)
+def test_transformer_deprecated_kwargs_raise(kwarg):
+    """Passing deprecated kwargs to run_transformer or run_transformer_simple raises ValueError."""
+    from tide2.runner.local_runner import LocalJobRunner
+    from tide2.runner.local_runner import run_transformer_simple
+
+    runner = LocalJobRunner.__new__(LocalJobRunner)
+    with (
+        pytest.deprecated_call(match=f"The parameter '{kwarg}' is deprecated"),
+        pytest.raises(ValueError, match=f"The parameter '{kwarg}' is deprecated"),
+    ):
+        runner.run_transformer(
+            input_path="in",
+            output_path="out",
+            model_name="test",
+            **{kwarg: 123},
+        )
+
+    with (
+        pytest.deprecated_call(match=f"The parameter '{kwarg}' is deprecated"),
+        pytest.raises(ValueError, match=f"The parameter '{kwarg}' is deprecated"),
+    ):
+        run_transformer_simple(
+            input_path="in",
+            output_path="out",
+            model_name="test",
+            **{kwarg: 123},
+        )
+
+
+def test_transformer_unexpected_kwargs_raise_type_error():
+    """Passing unknown kwargs to run_transformer raises TypeError."""
+    from tide2.runner.local_runner import LocalJobRunner
+
+    runner = LocalJobRunner.__new__(LocalJobRunner)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'completely_unknown'"):
+        runner.run_transformer(
+            input_path="in",
+            output_path="out",
+            model_name="test",
+            completely_unknown=True,
+        )
 
 
 def test_resolve_slot_cpus_deprecation_warning():

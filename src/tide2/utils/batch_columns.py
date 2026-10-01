@@ -40,3 +40,32 @@ class BatchColumns:
 
     def __contains__(self, name: str) -> bool:
         return name.lower() in self._lower_map
+
+
+PASSTHROUGH_COLS: tuple[str, ...] = ("patient_identifiers", "patient_uid", "jitter", "row_id")
+
+
+def copy_passthrough(
+    batch: dict[str, Any],
+    res: dict[str, list[Any]],
+    *,
+    indices: list[int] | None = None,
+    empty: bool = False,
+) -> None:
+    """Copy the optional passthrough columns from *batch* into *res* in place.
+
+    Args:
+        batch: Incoming Ray Data batch.
+        res: Output batch being built; mutated in place.
+        indices: Optional list of row indices to slice from *batch*.
+        empty: When True, emit empty lists instead of copying values.
+    """
+    for col in PASSTHROUGH_COLS:
+        if col in batch:
+            if empty:
+                res[col] = []
+            elif indices is not None:
+                src = batch[col]
+                res[col] = [src[i] for i in indices]
+            else:
+                res[col] = list(batch[col])

@@ -117,10 +117,14 @@ def _dedupe_raw_predictions(raw_predictions: list[dict]) -> list[dict]:
     so it does not depend on dict insertion order (O(k) per dict, no per-key
     sort).
     """
-    return [
-        dict(zip(_RAW_PRED_KEYS, key, strict=True))
-        for key in {tuple(d[k] for k in _RAW_PRED_KEYS) for d in raw_predictions}
-    ]
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict] = []
+    for d in raw_predictions:
+        key = tuple(d.get(k) for k in _RAW_PRED_KEYS)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(d)
+    return deduped
 
 
 class TransformerCore:

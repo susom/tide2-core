@@ -206,7 +206,7 @@ class RecognizerWorker:
         analyzer: The Presidio AnalyzerEngine instance with regex recognizers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """
         Initialize the worker with an AnalyzerEngine.
 
@@ -214,6 +214,10 @@ class RecognizerWorker:
         regex-based recognizers, and disables context enhancement for maximum
         throughput in batch processing scenarios.
         """
+        from tide2.actors import check_deprecated_actor_kwargs
+
+        check_deprecated_actor_kwargs(kwargs, "RecognizerWorker")
+
         # Patch Presidio's O(n²) remove_duplicates with a no-op passthrough.
         # Deduplication is handled downstream on the anonymizer side.
         from tide2.anonymizers.presidio_patches import patch_remove_duplicates
@@ -576,19 +580,17 @@ class RecognizerSupervisor:
     execution-level no-progress timeout.
     """
 
-    def __init__(
-        self,
-        batch_timeout: int | None = None,
-        worker_num_cpus: int | float | None = None,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         """
         Initialize supervisor shim (deprecated).
 
         Args:
-            batch_timeout: Deprecated and ignored.
-            worker_num_cpus: Deprecated and ignored.
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
         import warnings
+
+        from tide2.actors import check_deprecated_actor_kwargs
 
         warnings.warn(
             "RecognizerSupervisor is deprecated and will be removed in a future release. "
@@ -596,6 +598,7 @@ class RecognizerSupervisor:
             DeprecationWarning,
             stacklevel=2,
         )
+        check_deprecated_actor_kwargs(kwargs, "RecognizerSupervisor")
         self.worker = RecognizerWorker()
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:

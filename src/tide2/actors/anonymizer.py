@@ -77,6 +77,7 @@ class AnonymizerWorker:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -88,7 +89,13 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
+        from tide2.actors import check_deprecated_actor_kwargs
+
+        check_deprecated_actor_kwargs(kwargs, "AnonymizerWorker")
+
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
 
@@ -619,9 +626,8 @@ class AnonymizerSupervisor:
         key: bytes,
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
-        timeout: int | None = None,
         jitter_required: bool = False,
-        worker_num_cpus: int | float | None = None,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize supervisor shim (deprecated).
@@ -631,12 +637,14 @@ class AnonymizerSupervisor:
             key: 32-byte key for HIPS anonymizers.
             acc_num_salt: Salt for accession number hashing.
             acc_num_study_id: Study ID for accession number hashing.
-            timeout: Deprecated and ignored.
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
-            worker_num_cpus: Deprecated and ignored.
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
         import warnings
+
+        from tide2.actors import check_deprecated_actor_kwargs
 
         warnings.warn(
             "AnonymizerSupervisor is deprecated and will be removed in a future release. "
@@ -644,6 +652,7 @@ class AnonymizerSupervisor:
             DeprecationWarning,
             stacklevel=2,
         )
+        check_deprecated_actor_kwargs(kwargs, "AnonymizerSupervisor")
         self.worker = AnonymizerWorker(
             salt=salt,
             key=key,
@@ -677,7 +686,7 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
-    worker_num_cpus: int | float | None = None,
+    **kwargs: Any,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -692,8 +701,8 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
-        worker_num_cpus: Accepted for backwards compatibility (ignored).
-            Pool slot CPU reservations are configured at the runner level.
+        **kwargs: Deprecated parameters. Passing any deprecated argument
+            will raise a ValueError with a deprecation warning.
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -708,7 +717,9 @@ def create_anonymizer_actor(
         # Mixed
         Actor = create_anonymizer_actor(Path("/keys/salt.key"), key_bytes)
     """
-    del worker_num_cpus  # Unused, retained for signature compatibility
+    from tide2.actors import check_deprecated_actor_kwargs
+
+    check_deprecated_actor_kwargs(kwargs, "create_anonymizer_actor")
     # Load key material (handles both bytes and file paths)
     salt_bytes = _load_key_material(salt)
     key_bytes = _load_key_material(key)

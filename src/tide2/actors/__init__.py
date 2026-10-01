@@ -32,11 +32,40 @@ Example:
     ds.map_batches(AnonymizerActorClass, batch_size=100, ...)
 """
 
+import warnings
+from typing import Any
+
 from tide2.actors.anonymizer import AnonymizerActor
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.actors.anonymizer import create_anonymizer_actor_class  # Backwards compatibility
 from tide2.actors.recognizer import NoOpContextEnhancer
 from tide2.actors.recognizer import RecognizerActor
+
+DEPRECATED_ACTOR_KWARGS: frozenset[str] = frozenset({"batch_timeout", "timeout", "worker_num_cpus"})
+
+
+def check_deprecated_actor_kwargs(kwargs: dict[str, Any], class_or_func_name: str) -> None:
+    """Validate keyword arguments against deprecated actor parameters.
+
+    Args:
+        kwargs: Keyword arguments passed to the actor/worker or factory.
+        class_or_func_name: Name of the class or function for error messages.
+
+    Raises:
+        ValueError: If any deprecated actor argument is present.
+        TypeError: If any unrecognized keyword argument is present.
+    """
+    for arg in ("batch_timeout", "timeout", "worker_num_cpus"):
+        if arg in kwargs:
+            msg = (
+                f"'{arg}' is deprecated and no longer supported. "
+                "Ray Data now drives direct workers with execution-level timeouts."
+            )
+            warnings.warn(msg, DeprecationWarning, stacklevel=3)
+            raise ValueError(f"Unsupported deprecated argument: '{arg}'.")
+    if kwargs:
+        unexpected = next(iter(kwargs))
+        raise TypeError(f"{class_or_func_name}() got an unexpected keyword argument '{unexpected}'")
 
 
 def __getattr__(name: str):
