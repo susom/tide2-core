@@ -178,6 +178,19 @@ class TestWindowBatchShrink:
 
         assert core.tokenize_calls == 1
 
+    @patch("tide2.actors.transformer.torch.cuda.is_available", return_value=True)
+    @patch("tide2.actors.transformer.torch.cuda.empty_cache")
+    def test_empty_cache_called_on_oom_retry(self, mock_empty_cache, mock_cuda_avail):
+        """empty_cache is called when recovering from CUDA OOM."""
+        core = _FakeCore(oom_threshold=1)
+        actor = _make_actor(core)
+        texts = [f"t{i}" for i in range(4)]
+
+        results = actor._run_inference_raw_with_oom_recovery(texts)
+
+        assert _words(results) == texts
+        assert mock_empty_cache.call_count >= 1
+
     @patch("tide2.actors.transformer.torch.cuda.empty_cache")
     @patch("tide2.actors.transformer.torch.cuda.is_available", return_value=True)
     def test_empty_cache_called_only_after_handled_oom(self, mock_is_available, mock_empty_cache):
