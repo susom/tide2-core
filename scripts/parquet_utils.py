@@ -35,7 +35,6 @@ Auto-populated when absent:
   patient_identifiers   JSON string of known PHI values per entity type.
 
 Optional pass-through columns:
-  patient_uid
   jitter
   recognizer_results_json
 """
@@ -136,7 +135,6 @@ def create_pipeline_parquet(
         }
 
         for optional_col in (
-            "patient_uid",
             "jitter",
             "recognizer_results_json",
         ):
@@ -148,7 +146,7 @@ def create_pipeline_parquet(
     df = pd.DataFrame(rows)
 
     ordered_cols = ["note_text", "text_hash", "patient_id", "patient_identifiers"]
-    for col in ("patient_uid", "jitter", "recognizer_results_json"):
+    for col in ("jitter", "recognizer_results_json"):
         if col in df.columns:
             ordered_cols.append(col)
     df = df[ordered_cols]

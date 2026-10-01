@@ -13,7 +13,7 @@ Architecture:
 
 Output columns:
     - text_hash: SHA256 hash of original note_text
-    - patient_uid: Patient identifier (passed through from input)
+    - patient_id: Patient identifier (passed through from input)
     - anonymized_note_text: The anonymized text
     - anonymizer_results_json: JSON with anonymization details
     - entity_count: Number of entities anonymized
@@ -46,6 +46,7 @@ from tide2.anonymizers import presidio_patches
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
@@ -208,7 +209,7 @@ class AnonymizerWorker:
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key},
             ),
-            # ACC_NUM is handled separately with per-note patient_uid
+            # ACC_NUM is handled separately with per-note patient_id
             # See _create_operators_for_note()
             "ID": OperatorConfig(
                 "hips_alphanumeric",
@@ -223,18 +224,20 @@ class AnonymizerWorker:
     def _create_operators_for_note(
         self,
         date_jitter: int | None = None,
-        patient_uid: Any = None,
+        patient_id: Any = None,
+        **kwargs: Any,
     ) -> dict[str, OperatorConfig]:
         """
         Create operators including per-note parameters.
 
         Args:
             date_jitter: Jitter value for date anonymization.
-            patient_uid: Patient UID used as entity param for ACC_NUM hashing.
+            patient_id: Patient ID used as entity param for ACC_NUM hashing.
 
         Returns:
             Dictionary of operator configurations for this note.
         """
+        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker._create_operators_for_note")
         operators = self._base_operators.copy()
 
         # Random jitter between 4-60 days if not provided
@@ -248,20 +251,20 @@ class AnonymizerWorker:
             }
         )
 
-        # Convert numeric patient_uid to string, map null/NaN/nan/none to None
-        clean_patient_uid: str | None = None
-        if not is_null(patient_uid):
-            val_str = str(patient_uid).strip()
+        # Convert numeric patient_id to string, map null/NaN/nan/none to None
+        clean_patient_id: str | None = None
+        if not is_null(patient_id):
+            val_str = str(patient_id).strip()
             if val_str.lower() not in ("nan", "none", "null", ""):
-                clean_patient_uid = val_str
+                clean_patient_id = val_str
 
-        # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
+        # ACC_NUM uses accession_number_hash with per-note patient_id as SQL entity
         operators["ACC_NUM"] = OperatorConfig(
             "accession_number_hash",
             {
                 "salt": self.acc_num_salt,
                 "study_id": self.acc_num_study_id,
-                "patient_uid": clean_patient_uid,
+                "patient_id": clean_patient_id,
             },
         )
 
@@ -295,7 +298,7 @@ class AnonymizerWorker:
             logger.warning(f"Failed to parse recognizer results: {e}")
             return []
 
-    def _compute_jitter_for_patient(self, patient_uid: Any) -> int:
+    def _compute_jitter_for_patient(self, patient_id: Any = None, **kwargs: Any) -> int:
         """
         Compute deterministic jitter for a patient when not provided.
 
@@ -303,15 +306,16 @@ class AnonymizerWorker:
         consistent jitter for the same patient across runs.
 
         Args:
-            patient_uid: Patient identifier. If None, NaN, or empty,
+            patient_id: Patient identifier. If None, NaN, or empty,
                 generates a random jitter.
 
         Returns:
             Integer jitter value in days.
         """
-        if is_null(patient_uid):
+        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker._compute_jitter_for_patient")
+        if is_null(patient_id):
             return secrets.randbelow(357) - 178  # Random between -178 and +178
-        val_str = str(patient_uid).strip()
+        val_str = str(patient_id).strip()
         if val_str.lower() in ("nan", "none", "null", ""):
             return secrets.randbelow(357) - 178  # Random between -178 and +178
 
@@ -430,8 +434,9 @@ class AnonymizerWorker:
         note_text: str,
         original_text_hash: str,
         recognizer_results_json: str | list | None,
-        patient_uid: str | None,
-        jitter: int | None,
+        patient_id: str | None = None,
+        jitter: int | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """
         Process a single note and return results.
@@ -443,18 +448,19 @@ class AnonymizerWorker:
             note_text: The note text to anonymize.
             original_text_hash: SHA256 hash of the note.
             recognizer_results_json: Pre-computed recognizer results (JSON string).
-            patient_uid: Patient identifier.
+            patient_id: Patient identifier.
             jitter: Per-note jitter value (computed if None/NaN).
 
         Returns:
             Dictionary with processing results for this note.
         """
+        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker.process_note")
         # Compute jitter from patient ID if not provided or if NaN
         jitter_missing = is_null(jitter)
         if jitter_missing:
             if self.jitter_required:
                 raise ValueError(f"Jitter value is required but missing for note {original_text_hash[:16]}")
-            jitter = self._compute_jitter_for_patient(patient_uid)
+            jitter = self._compute_jitter_for_patient(patient_id)
 
         # Parse recognizer results
         recognizer_results = self._parse_recognizer_results(recognizer_results_json)
@@ -479,8 +485,8 @@ class AnonymizerWorker:
             text=note_text,
         )
 
-        # Create operators with jitter and per-note patient_uid
-        operators = self._create_operators_for_note(jitter, patient_uid)
+        # Create operators with jitter and per-note patient_id
+        operators = self._create_operators_for_note(jitter, patient_id)
 
         # Use chunked anonymization for long notes to avoid O(n*m) string copies
         if len(note_text) > MAX_ANON_CHUNK_SIZE:
@@ -513,7 +519,7 @@ class AnonymizerWorker:
 
         return {
             "text_hash": original_text_hash,
-            "patient_uid": patient_uid,
+            "patient_id": patient_id,
             "anonymized_note_text": anonymized_text,
             "anonymizer_results_json": anonymizer_json,
             "entity_count": entity_count,
@@ -527,9 +533,9 @@ class AnonymizerWorker:
 
         Called by AnonymizerSupervisor to avoid per-note ray.get() overhead.
 
-        Input columns are read into ``input_*`` locals (e.g. ``input_patient_uids``)
+        Input columns are read into ``input_*`` locals (e.g. ``input_patient_ids``)
         and kept distinct from the output accumulators they feed (e.g.
-        ``patient_uids``). This separation is deliberate: collapsing an input column
+        ``patient_ids``). This separation is deliberate: collapsing an input column
         and its output accumulator onto one name appends results back onto the input
         list, producing a ragged result dict that Ray silently drops at block-build
         time (0-row output).
@@ -542,7 +548,7 @@ class AnonymizerWorker:
             has the same length (one entry per successfully processed note).
         """
         original_text_hashes = []
-        patient_uids = []
+        patient_ids = []
         anonymized_texts = []
         anonymizer_results_json_list = []
         entity_counts = []
@@ -551,9 +557,10 @@ class AnonymizerWorker:
         row_ids = []
 
         cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="AnonymizerWorker.process_batch")
         batch_size = len(cols["note_text"])
         jitters = cols.get("jitter", [None] * batch_size)
-        input_patient_uids = cols.get("patient_uid", [None] * batch_size)
+        input_patient_ids = cols.get("patient_id", [None] * batch_size)
         input_row_ids = cols.get("row_id", [None] * batch_size)
         recognizer_results_list = cols.get("recognizer_results_json", [None] * batch_size)
 
@@ -561,7 +568,7 @@ class AnonymizerWorker:
         for i in range(batch_size):
             note_text = note_texts[i]
             recognizer_results_json = recognizer_results_list[i] if i < len(recognizer_results_list) else None
-            patient_uid = input_patient_uids[i] if i < len(input_patient_uids) else None
+            patient_id = input_patient_ids[i] if i < len(input_patient_ids) else None
             jitter = jitters[i] if i < len(jitters) else None
 
             original_text_hash = self.compute_text_hash(note_text)
@@ -573,11 +580,11 @@ class AnonymizerWorker:
                     note_text=note_text,
                     original_text_hash=original_text_hash,
                     recognizer_results_json=recognizer_results_json,
-                    patient_uid=patient_uid,
+                    patient_id=patient_id,
                     jitter=jitter,
                 )
                 original_text_hashes.append(result["text_hash"])
-                patient_uids.append(result["patient_uid"])
+                patient_ids.append(result["patient_id"])
                 anonymized_texts.append(result["anonymized_note_text"])
                 anonymizer_results_json_list.append(result["anonymizer_results_json"])
                 entity_counts.append(result["entity_count"])
@@ -593,7 +600,7 @@ class AnonymizerWorker:
         batch_timestamp = datetime.now(UTC).isoformat()
         result = {
             "text_hash": original_text_hashes,
-            "patient_uid": patient_uids,
+            "patient_id": patient_ids,
             "anonymized_note_text": anonymized_texts,
             "anonymizer_results_json": anonymizer_results_json_list,
             "entity_count": entity_counts,

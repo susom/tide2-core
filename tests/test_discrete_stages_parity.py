@@ -6,8 +6,8 @@ Covers:
 3. In-actor aggregation in TransformerInferenceActor (aggregate_bio=True).
 4. Window length-sorting and order-restoration in TransformerInferenceActor.
 5. RecognizerWorker patient_identifiers parsing (dicts and strings).
-6. RecognizerWorker columnar passthrough for Stage 3 (note_text, patient_uid, row_id).
-7. AnonymizerWorker patient_uid normalization (ignoring 'nan', 'none', etc.).
+6. RecognizerWorker columnar passthrough for Stage 3 (note_text, patient_id, row_id).
+7. AnonymizerWorker patient_id normalization (ignoring 'nan', 'none', etc.).
 8. Fractional GPU resource resolution in LocalJobRunner.
 9. override_num_blocks propagation across stages.
 10. CLI support for fractional --num-gpus and --override-num-blocks.
@@ -118,7 +118,6 @@ def test_transformer_actor_in_actor_aggregation():
     batch = {
         "text_hash": ["h123"],
         "patient_id": ["pid1"],
-        "patient_uid": ["puid1"],
         "row_id": ["row1"],
         "jitter": [14],
         "note_text": ["John Doe is a patient."],
@@ -129,7 +128,7 @@ def test_transformer_actor_in_actor_aggregation():
     assert "recognizer_results_json" in out
     assert "predictions_raw_json" not in out
     assert out["entity_count"] == [1]
-    assert out["patient_uid"] == ["puid1"]
+    assert out["patient_id"] == ["pid1"]
     assert out["row_id"] == ["row1"]
     assert out["jitter"] == [14]
     assert "PATIENT" in out["recognizer_results_json"][0]
@@ -205,7 +204,7 @@ def test_recognizer_worker_dict_patient_identifiers(monkeypatch):
 
 
 def test_recognizer_worker_process_batch_passthrough():
-    """RecognizerWorker.process_batch passes note_text, patient_uid, row_id, jitter forward for Stage 3."""
+    """RecognizerWorker.process_batch passes note_text, patient_id, row_id, jitter forward for Stage 3."""
     worker_cls = getattr(RecognizerWorker, "__ray_actor_class__", RecognizerWorker)
     worker = worker_cls.__new__(worker_cls)
 
@@ -224,14 +223,14 @@ def test_recognizer_worker_process_batch_passthrough():
     batch = {
         "text_hash": ["h1"],
         "note_text": ["Patient note text"],
-        "patient_uid": ["P123"],
+        "patient_id": ["P123"],
         "row_id": ["R456"],
         "jitter": [5],
     }
 
     res = worker.process_batch(batch)
     assert res["note_text"] == ["Patient note text"]
-    assert res["patient_uid"] == ["P123"]
+    assert res["patient_id"] == ["P123"]
     assert res["row_id"] == ["R456"]
     assert res["jitter"] == [5]
     assert res["text_hash"] == ["h1"]
@@ -240,12 +239,12 @@ def test_recognizer_worker_process_batch_passthrough():
 
 
 # ---------------------------------------------------------------------------
-# 7. AnonymizerWorker patient_uid normalization
+# 7. AnonymizerWorker patient_id normalization
 # ---------------------------------------------------------------------------
 
 
-def test_anonymizer_worker_patient_uid_normalization():
-    """AnonymizerWorker normalizes patient_uid, discarding 'nan', 'none', and empty strings."""
+def test_anonymizer_worker_patient_id_normalization():
+    """AnonymizerWorker normalizes patient_id, discarding 'nan', 'none', and empty strings."""
     worker_cls = getattr(AnonymizerWorker, "__ray_actor_class__", AnonymizerWorker)
     worker = worker_cls.__new__(worker_cls)
     worker.salt = b"\x00" * 32
@@ -254,21 +253,21 @@ def test_anonymizer_worker_patient_uid_normalization():
     worker.acc_num_study_id = "study"
     worker._base_operators = {}
 
-    # Valid patient_uid
-    ops_valid = worker._create_operators_for_note(date_jitter=10, patient_uid="P999")
-    assert ops_valid["ACC_NUM"].params["patient_uid"] == "P999"
+    # Valid patient_id
+    ops_valid = worker._create_operators_for_note(date_jitter=10, patient_id="P999")
+    assert ops_valid["ACC_NUM"].params["patient_id"] == "P999"
 
     # 'nan' string should be normalized to None
-    ops_nan = worker._create_operators_for_note(date_jitter=10, patient_uid="nan")
-    assert ops_nan["ACC_NUM"].params["patient_uid"] is None
+    ops_nan = worker._create_operators_for_note(date_jitter=10, patient_id="nan")
+    assert ops_nan["ACC_NUM"].params["patient_id"] is None
 
     # 'None' string should be normalized to None
-    ops_none = worker._create_operators_for_note(date_jitter=10, patient_uid="None")
-    assert ops_none["ACC_NUM"].params["patient_uid"] is None
+    ops_none = worker._create_operators_for_note(date_jitter=10, patient_id="None")
+    assert ops_none["ACC_NUM"].params["patient_id"] is None
 
     # float NaN should be normalized to None
-    ops_float_nan = worker._create_operators_for_note(date_jitter=10, patient_uid=float("nan"))
-    assert ops_float_nan["ACC_NUM"].params["patient_uid"] is None
+    ops_float_nan = worker._create_operators_for_note(date_jitter=10, patient_id=float("nan"))
+    assert ops_float_nan["ACC_NUM"].params["patient_id"] is None
 
 
 # ---------------------------------------------------------------------------

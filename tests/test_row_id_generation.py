@@ -12,7 +12,7 @@ class TestRowIdGeneration:
     def _generate_row_id(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply row_id generation (same as local_runner.py)."""
         df = df.copy()
-        df["row_id"] = (df["text_hash"] + ":" + df["patient_uid"].fillna("None").astype(str)).apply(
+        df["row_id"] = (df["text_hash"] + ":" + df["patient_id"].fillna("None").astype(str)).apply(
             lambda x: hashlib.sha256(x.encode()).hexdigest()
         )
         return df
@@ -22,7 +22,7 @@ class TestRowIdGeneration:
         df = pd.DataFrame(
             {
                 "text_hash": ["unique_hash_1", "unique_hash_2"],
-                "patient_uid": ["uid_a", "uid_b"],
+                "patient_id": ["uid_a", "uid_b"],
             }
         )
 
@@ -36,7 +36,7 @@ class TestRowIdGeneration:
         df = pd.DataFrame(
             {
                 "text_hash": ["abc123"],
-                "patient_uid": ["patient_001"],
+                "patient_id": ["patient_001"],
             }
         )
 
@@ -59,11 +59,11 @@ class TestRowIdGeneration:
         assert hash1 == hash2
 
     def test_row_id_unique_for_different_patients(self):
-        """Different UIDs produce different row_ids."""
+        """Different IDs produce different row_ids."""
         df = pd.DataFrame(
             {
                 "text_hash": ["same_hash", "same_hash"],
-                "patient_uid": ["uid_a", "uid_b"],
+                "patient_id": ["uid_a", "uid_b"],
             }
         )
 
@@ -73,11 +73,11 @@ class TestRowIdGeneration:
         assert df["row_id"].is_unique
 
     def test_row_id_unique_for_different_text_hash(self):
-        """Different text_hash with same UID produce different row_ids."""
+        """Different text_hash with same ID produce different row_ids."""
         df = pd.DataFrame(
             {
                 "text_hash": ["hash_a", "hash_b"],
-                "patient_uid": ["same_uid", "same_uid"],
+                "patient_id": ["same_uid", "same_uid"],
             }
         )
 
@@ -87,11 +87,11 @@ class TestRowIdGeneration:
         assert df["row_id"].is_unique
 
     def test_row_id_handles_none_uid(self):
-        """Verify behavior when patient_uid is None."""
+        """Verify behavior when patient_id is None."""
         df = pd.DataFrame(
             {
                 "text_hash": ["hash1", "hash2"],
-                "patient_uid": [None, "valid_uid"],
+                "patient_id": [None, "valid_uid"],
             }
         )
 
@@ -105,7 +105,7 @@ class TestRowIdGeneration:
         df = pd.DataFrame(
             {
                 "text_hash": ["hash1"],
-                "patient_uid": [np.nan],
+                "patient_id": [np.nan],
             }
         )
 
@@ -119,7 +119,7 @@ class TestRowIdGeneration:
         df = pd.DataFrame(
             {
                 "text_hash": ["", "hash"],
-                "patient_uid": ["uid", ""],
+                "patient_id": ["uid", ""],
             }
         )
 
@@ -133,7 +133,7 @@ class TestRowIdGeneration:
         df = pd.DataFrame(
             {
                 "text_hash": ["hash_with_special_!@#$%"],
-                "patient_uid": ["uid_with_unicode_é_ñ"],
+                "patient_id": ["uid_with_unicode_é_ñ"],
             }
         )
 
@@ -147,7 +147,7 @@ class TestRowIdGeneration:
         df = pd.DataFrame(
             {
                 "text_hash": [f"hash_{i}" for i in range(n)],
-                "patient_uid": [f"uid_{i % 100}" for i in range(n)],
+                "patient_id": [f"uid_{i % 100}" for i in range(n)],
             }
         )
 
@@ -211,15 +211,15 @@ class TestRowIdEdgeCases:
     """Test edge cases for row_id generation."""
 
     def test_duplicate_text_hash_same_uid(self):
-        """Same text_hash and same UID should produce same row_id."""
+        """Same text_hash and same ID should produce same row_id."""
         df = pd.DataFrame(
             {
                 "text_hash": ["same_hash", "same_hash"],
-                "patient_uid": ["same_uid", "same_uid"],
+                "patient_id": ["same_uid", "same_uid"],
             }
         )
 
-        df["row_id"] = (df["text_hash"] + ":" + df["patient_uid"].fillna("None").astype(str)).apply(
+        df["row_id"] = (df["text_hash"] + ":" + df["patient_id"].fillna("None").astype(str)).apply(
             lambda x: hashlib.sha256(x.encode()).hexdigest()
         )
 
@@ -227,7 +227,7 @@ class TestRowIdEdgeCases:
         assert df["row_id"].iloc[0] == df["row_id"].iloc[1]
 
     def test_very_long_inputs(self):
-        """Verify handling of very long text_hash and uid."""
+        """Verify handling of very long text_hash and ID."""
         long_hash = "a" * 10000
         long_uid = "b" * 10000
 
@@ -237,15 +237,15 @@ class TestRowIdEdgeCases:
         assert len(result) == 64
 
     def test_numeric_uid(self):
-        """Verify numeric UIDs are handled correctly."""
+        """Verify numeric IDs are handled correctly."""
         df = pd.DataFrame(
             {
                 "text_hash": ["hash1", "hash2"],
-                "patient_uid": [12345, 67890],
+                "patient_id": [12345, 67890],
             }
         )
 
-        df["row_id"] = (df["text_hash"] + ":" + df["patient_uid"].fillna("None").astype(str)).apply(
+        df["row_id"] = (df["text_hash"] + ":" + df["patient_id"].fillna("None").astype(str)).apply(
             lambda x: hashlib.sha256(x.encode()).hexdigest()
         )
 

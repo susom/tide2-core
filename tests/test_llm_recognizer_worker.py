@@ -37,7 +37,7 @@ def test_llm_recognizer_worker_preserves_note_text_and_passthrough():
     batch = {
         "text_hash": ["hash_1", "hash_2"],
         "note_text": ["John has an appointment.", "No phi here."],
-        "patient_uid": ["p_001", "p_002"],
+        "patient_id": ["p_001", "p_002"],
         "row_id": ["row_1", "row_2"],
         "jitter": [15, -20],
         "patient_identifiers": ["id1", "id2"],
@@ -47,7 +47,7 @@ def test_llm_recognizer_worker_preserves_note_text_and_passthrough():
 
     assert out["text_hash"] == ["hash_1", "hash_2"]
     assert out["note_text"] == ["John has an appointment.", "No phi here."]
-    assert out["patient_uid"] == ["p_001", "p_002"]
+    assert out["patient_id"] == ["p_001", "p_002"]
     assert out["row_id"] == ["row_1", "row_2"]
     assert out["jitter"] == [15, -20]
     assert out["patient_identifiers"] == ["id1", "id2"]
@@ -60,5 +60,5 @@ def test_llm_recognizer_worker_preserves_note_text_and_passthrough():
     )
     anon_out = anon_worker.process_batch(out)
     assert len(anon_out["anonymized_note_text"]) == 2
-    assert anon_out["patient_uid"] == ["p_001", "p_002"]
+    assert anon_out["patient_id"] == ["p_001", "p_002"]
     assert anon_out["row_id"] == ["row_1", "row_2"]

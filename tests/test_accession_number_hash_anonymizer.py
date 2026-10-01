@@ -41,17 +41,27 @@ class TestAccessionNumberHashAnonymizer:
     def test_validate_allowed_entities(self):
         """Pass validation when entity_type is in allowed set."""
         for ent in ["DEFAULT", "ACC_NUM", "ACCESSION_NUMBER"]:
-            self.anonymizer.validate({"entity_type": ent, "patient_uid": "pat_123"})
+            self.anonymizer.validate({"entity_type": ent, "patient_id": "pat_123"})
 
     def test_validate_unsupported_entity(self):
         """Raise ValueError when entity_type is unsupported."""
         with pytest.raises(ValueError, match="Entity type 'INVALID' is not supported"):
             self.anonymizer.validate({"entity_type": "INVALID"})
 
+    def test_deprecated_patient_uid_raises_in_operate(self):
+        """Raise ValueError with DeprecationWarning when patient_uid is passed to operate."""
+        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
+            self.anonymizer.operate("ACC123", {"patient_uid": "pat_123"})
+
+    def test_deprecated_patient_uid_raises_in_validate(self):
+        """Raise ValueError with DeprecationWarning when patient_uid is passed to validate."""
+        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
+            self.anonymizer.validate({"patient_uid": "pat_123"})
+
     def test_per_patient_uniqueness(self):
-        """Ensure different patient_uids produce distinct hashes for identical text."""
-        params_a = {"salt": "mysalt", "study_id": "study1", "patient_uid": "patient_A"}
-        params_b = {"salt": "mysalt", "study_id": "study1", "patient_uid": "patient_B"}
+        """Ensure different patient_ids produce distinct hashes for identical text."""
+        params_a = {"salt": "mysalt", "study_id": "study1", "patient_id": "patient_A"}
+        params_b = {"salt": "mysalt", "study_id": "study1", "patient_id": "patient_B"}
         hash_a = self.anonymizer.operate("ACC12345", params_a)
         hash_b = self.anonymizer.operate("ACC12345", params_b)
 
@@ -61,7 +71,7 @@ class TestAccessionNumberHashAnonymizer:
 
     def test_determinism(self):
         """Same parameters and text produce identical hash."""
-        params = {"salt": "mysalt", "study_id": "study1", "patient_uid": "pat_001"}
+        params = {"salt": "mysalt", "study_id": "study1", "patient_id": "pat_001"}
         hash_1 = self.anonymizer.operate("ACC12345", params)
         hash_2 = self.anonymizer.operate("ACC12345", params)
         assert hash_1 == hash_2
@@ -70,13 +80,13 @@ class TestAccessionNumberHashAnonymizer:
         """Hash matches the BigQuery SQL algorithm precisely."""
         salt = "test_salt"
         study_id = "study_99"
-        patient_uid = "pat_xyz"
+        patient_id = "pat_xyz"
         acc_num = "ACC-987654"
 
-        expected = _expected_bq_hash(salt, study_id, patient_uid, acc_num)
+        expected = _expected_bq_hash(salt, study_id, patient_id, acc_num)
         actual = self.anonymizer.operate(
             acc_num,
-            {"salt": salt, "study_id": study_id, "patient_uid": patient_uid},
+            {"salt": salt, "study_id": study_id, "patient_id": patient_id},
         )
         assert actual == expected
 
@@ -86,12 +96,12 @@ class TestAccessionNumberHashAnonymizer:
         actual_defaults = self.anonymizer.operate("ACC99", {})
         assert actual_defaults == expected_defaults
 
-    def test_nan_patient_uid_resolves_to_default(self):
+    def test_nan_patient_id_resolves_to_default(self):
         """Float NaN resolves to default token [E] matching SQL COALESCE."""
         expected = _expected_bq_hash("salt", "study", None, "ACC99")
         actual = self.anonymizer.operate(
             "ACC99",
-            {"salt": "salt", "study_id": "study", "patient_uid": float("nan")},
+            {"salt": "salt", "study_id": "study", "patient_id": float("nan")},
         )
         assert actual == expected
 
@@ -104,16 +114,16 @@ class TestAccessionNumberHashAnonymizer:
         for null_val in [np.float32("nan"), np.float64("nan"), np.nan, pd.NA]:
             actual = self.anonymizer.operate(
                 "ACC99",
-                {"salt": "salt", "study_id": "study", "patient_uid": null_val},
+                {"salt": "salt", "study_id": "study", "patient_id": null_val},
             )
             assert actual == expected
 
-    def test_numeric_patient_uid(self):
-        """Numeric patient_uid is converted to string for hashing."""
+    def test_numeric_patient_id(self):
+        """Numeric patient_id is converted to string for hashing."""
         expected = _expected_bq_hash("salt", "study", "12345", "ACC99")
         actual = self.anonymizer.operate(
             "ACC99",
-            {"salt": "salt", "study_id": "study", "patient_uid": 12345},
+            {"salt": "salt", "study_id": "study", "patient_id": 12345},
         )
         assert actual == expected
 
@@ -121,7 +131,7 @@ class TestAccessionNumberHashAnonymizer:
         """Empty string is not None and remains empty string per SQL COALESCE."""
         actual = self.anonymizer.operate(
             "ACC99",
-            {"salt": "", "study_id": "", "patient_uid": ""},
+            {"salt": "", "study_id": "", "patient_id": ""},
         )
         expected = _expected_bq_hash("", "", "", "ACC99")
         assert actual == expected
@@ -130,16 +140,16 @@ class TestAccessionNumberHashAnonymizer:
         """Whitespace is trimmed and text is upper-cased before hashing."""
         hash_lower = self.anonymizer.operate(
             "  acc12345  ",
-            {"salt": " salt ", "study_id": " study ", "patient_uid": " pat "},
+            {"salt": " salt ", "study_id": " study ", "patient_id": " pat "},
         )
         hash_upper = self.anonymizer.operate(
             "ACC12345",
-            {"salt": "SALT", "study_id": "STUDY", "patient_uid": "PAT"},
+            {"salt": "SALT", "study_id": "STUDY", "patient_id": "PAT"},
         )
         assert hash_lower == hash_upper
 
     def test_presidio_anonymizer_engine_regression_guard(self):
-        """Regression test: verify patient_uid survives Presidio AnonymizerEngine."""
+        """Regression test: verify patient_id survives Presidio AnonymizerEngine."""
         engine = AnonymizerEngine()
         engine.add_anonymizer(AccessionNumberHashAnonymizer)
 
@@ -154,7 +164,7 @@ class TestAccessionNumberHashAnonymizer:
                 {
                     "salt": "s1",
                     "study_id": "u1",
-                    "patient_uid": "pat_1",
+                    "patient_id": "pat_1",
                 },
             ),
         }
@@ -164,7 +174,7 @@ class TestAccessionNumberHashAnonymizer:
                 {
                     "salt": "s1",
                     "study_id": "u1",
-                    "patient_uid": "pat_2",
+                    "patient_id": "pat_2",
                 },
             ),
         }

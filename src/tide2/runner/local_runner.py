@@ -44,6 +44,8 @@ import ray.data.exceptions
 from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
+
 from .fault_tolerance import GracefulShutdown
 from .fault_tolerance import configure_data_context
 from .fault_tolerance import get_ray_remote_args_cpu
@@ -209,19 +211,17 @@ class StageColumns:
 #: Column contracts, mirroring the actor implementations in ``tide2.actors``.
 TRANSFORMER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text"}),
-    optional=frozenset({"patient_id", "patient_identifiers", "patient_uid", "jitter", "row_id"}),
+    optional=frozenset({"patient_id", "patient_identifiers", "jitter", "row_id"}),
     produces=frozenset({"text_hash", "patient_id", "note_text", "recognizer_results_json"}),
 )
 RECOGNIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text"}),
-    optional=frozenset(
-        {"patient_identifiers", "recognizer_results_json", "patient_id", "patient_uid", "jitter", "row_id"}
-    ),
+    optional=frozenset({"patient_identifiers", "recognizer_results_json", "patient_id", "jitter", "row_id"}),
     produces=frozenset(
         {
             "text_hash",
             "note_text",
-            "patient_uid",
+            "patient_id",
             "row_id",
             "recognizer_results_json",
             "entity_count",
@@ -240,11 +240,11 @@ LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
 )
 ANONYMIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "recognizer_results_json"}),
-    optional=frozenset({"patient_uid", "patient_id", "jitter", "row_id"}),
+    optional=frozenset({"patient_id", "jitter", "row_id"}),
     produces=frozenset(
         {
             "text_hash",
-            "patient_uid",
+            "patient_id",
             "anonymized_note_text",
             "anonymizer_results_json",
             "entity_count",
@@ -260,7 +260,7 @@ ANONYMIZER_STAGE_COLUMNS = StageColumns(
 FINAL_OUTPUT_COLUMNS = frozenset(
     {
         "text_hash",
-        "patient_uid",
+        "patient_id",
         "row_id",
         "anonymized_note_text",
         "anonymizer_results_json",
@@ -311,7 +311,7 @@ def validate_stage_columns(
     Returns:
         The columns available after the last stage, including pass-through
         columns a stage forwards but does not itself produce (``row_id``,
-        ``patient_uid``, ``jitter``).
+        ``patient_id``, ``jitter``).
 
     Raises:
         ValueError: If a stage's required columns are not available, naming the
@@ -807,7 +807,6 @@ class LocalJobRunner:
             "patient_identifiers",
             "recognizer_results_json",
             "patient_id",
-            "patient_uid",
             "jitter",
             "row_id",
         ]
@@ -1219,7 +1218,7 @@ class LocalJobRunner:
 
         # Detect columns
         required_cols = ["text_hash", "note_text", "recognizer_results_json"]
-        optional_cols = ["patient_uid", "patient_id", "jitter", "row_id"]
+        optional_cols = ["patient_id", "jitter", "row_id"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
@@ -1523,7 +1522,7 @@ class LocalJobRunner:
 
         input_files = resolve_input_files(input_path)
         required_cols = ["text_hash", "note_text"]
-        optional_cols = ["patient_id", "patient_identifiers", "patient_uid", "jitter", "row_id"]
+        optional_cols = ["patient_id", "patient_identifiers", "jitter", "row_id"]
         if input_files:
             try:
                 columns = detect_columns(input_files[0], required_cols, optional_cols)
@@ -1934,7 +1933,7 @@ class LocalJobRunner:
                 )
 
             df_merged_results = pd.DataFrame(merged_rows)
-            cols_to_keep = [c for c in ["note_text", "patient_uid", "row_id", "jitter"] if c in df_regex.columns]
+            cols_to_keep = [c for c in ["note_text", "patient_id", "row_id", "jitter"] if c in df_regex.columns]
             if cols_to_keep:
                 df_merged_results = df_merged_results.merge(
                     df_regex[["text_hash", *cols_to_keep]].drop_duplicates(subset=["text_hash"]),
@@ -2439,7 +2438,7 @@ class LocalJobRunner:
         """Load and normalize the pipeline input DataFrame.
 
         Lowercases column names (so e.g. ``JITTER`` from BigQuery works) and
-        derives ``text_hash`` / ``patient_id`` / ``patient_uid`` / ``row_id``
+        derives ``text_hash`` / ``patient_id`` / ``row_id``
         when absent. Shared verbatim by both execution modes so the normalized
         frame is identical.
         """
@@ -2449,6 +2448,8 @@ class LocalJobRunner:
 
         # Normalize column names to lowercase so that e.g. "JITTER" from BQ works
         df_input.columns = df_input.columns.str.lower()
+
+        _check_deprecated_patient_uid(df_input.columns, location="input data")
 
         if "note_text" not in df_input.columns:
             raise ValueError("Input data must contain a 'note_text' column")
@@ -2460,12 +2461,9 @@ class LocalJobRunner:
         if "patient_id" not in df_input.columns:
             df_input["patient_id"] = df_input["text_hash"]
 
-        if "patient_uid" not in df_input.columns:
-            df_input["patient_uid"] = df_input["patient_id"]
-
         if "row_id" not in df_input.columns:
             df_input["row_id"] = (
-                df_input["text_hash"] + ":" + df_input["patient_uid"].fillna("None").astype(str)
+                df_input["text_hash"] + ":" + df_input["patient_id"].fillna("None").astype(str)
             ).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
 
         return df_input
@@ -2510,7 +2508,7 @@ class LocalJobRunner:
         The transformer stage now emits document-level rows directly
         (text_hash, patient_id, note_text, recognizer_results_json) — there is no
         chunk→reassembly step. This reads that output, preserves the passthrough
-        columns (patient_identifiers, patient_uid, jitter, row_id), and attaches
+        columns (patient_identifiers, patient_id, jitter, row_id), and attaches
         patient_identifiers from df_input using row_id if missing. Falls back to
         the raw input when no transformer output exists (e.g. the transformer
         stage was skipped).
@@ -2519,6 +2517,7 @@ class LocalJobRunner:
         if trans_files:
             dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
             df_rec_in = pd.concat(dfs_trans, ignore_index=True)
+            _check_deprecated_patient_uid(df_rec_in.columns, location="transformer stage output")
             keep = [
                 c
                 for c in [
@@ -2527,7 +2526,6 @@ class LocalJobRunner:
                     "note_text",
                     "recognizer_results_json",
                     "patient_identifiers",
-                    "patient_uid",
                     "jitter",
                     "row_id",
                 ]

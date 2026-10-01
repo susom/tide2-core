@@ -54,6 +54,7 @@ from tide2.recognizers import UrlRecognizer
 from tide2.recognizers import create_cached_recognizer
 from tide2.recognizers import create_recognizers_for_patient
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
@@ -300,7 +301,7 @@ class RecognizerWorker:
         start_time = _time.time()
 
         # Handle empty/null notes
-        if not note_text or is_null(note_text):
+        if is_null(note_text) or not note_text:
             return {
                 "text_hash": text_hash,
                 "recognizer_results_json": "[]",
@@ -361,12 +362,12 @@ class RecognizerWorker:
         ad_hoc_recognizers = []
 
         # Add cached DL results recognizer if available
-        if cached_results and not is_null(cached_results):
+        if not is_null(cached_results) and cached_results:
             cached_recognizer = create_cached_recognizer(results=cached_results)
             ad_hoc_recognizers.append(cached_recognizer)
 
         # Add known values recognizers if patient PHI is available
-        if patient_identifiers and not is_null(patient_identifiers):
+        if not is_null(patient_identifiers) and patient_identifiers:
             try:
                 if isinstance(patient_identifiers, dict):
                     phi_dict = patient_identifiers
@@ -480,7 +481,7 @@ class RecognizerWorker:
 
         return all_results
 
-    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
         """
         Process a batch of notes in a single call. No IPC per note.
 
@@ -495,7 +496,7 @@ class RecognizerWorker:
         """
         out_text_hashes = []
         out_note_texts = []
-        out_patient_uids = []
+        out_patient_ids = []
         out_row_ids = []
         out_jitters = []
         results_json_list = []
@@ -504,12 +505,13 @@ class RecognizerWorker:
         error_messages = []
 
         cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="RecognizerWorker.process_batch")
         batch_size = len(cols["note_text"])
         note_texts = cols["note_text"]
         input_text_hashes = cols["text_hash"]
         cached_results_col = cols.get("recognizer_results_json", [None] * batch_size)
         patient_identifiers_col = cols.get("patient_identifiers", [None] * batch_size)
-        patient_uids_col = cols.get("patient_uid", cols.get("patient_id", [None] * batch_size))
+        patient_ids_col = cols.get("patient_id", [None] * batch_size)
         jitters_col = cols.get("jitter", [None] * batch_size)
         row_ids_col = cols.get("row_id", [None] * batch_size)
         has_jitter = "jitter" in cols
@@ -528,17 +530,17 @@ class RecognizerWorker:
                     cached_results=cached_results,
                     patient_identifiers=patient_identifiers,
                 )
-                p_uid = patient_uids_col[i]
-                p_uid = str(text_hash) if is_null(p_uid) or str(p_uid).strip() == "" else str(p_uid)
+                p_id = patient_ids_col[i]
+                p_id = str(text_hash) if is_null(p_id) or str(p_id).strip() == "" else str(p_id)
 
                 if has_row_id and not is_null(row_ids_col[i]):
                     r_id = row_ids_col[i]
                 else:
-                    r_id = hashlib.sha256(f"{text_hash}:{p_uid}".encode()).hexdigest()
+                    r_id = hashlib.sha256(f"{text_hash}:{p_id}".encode()).hexdigest()
 
                 out_text_hashes.append(result["text_hash"])
                 out_note_texts.append(note_text)
-                out_patient_uids.append(p_uid)
+                out_patient_ids.append(p_id)
                 out_row_ids.append(r_id)
                 if has_jitter:
                     out_jitters.append(jitters_col[i])
@@ -554,7 +556,7 @@ class RecognizerWorker:
         res = {
             "text_hash": out_text_hashes,
             "note_text": out_note_texts,
-            "patient_uid": out_patient_uids,
+            "patient_id": out_patient_ids,
             "row_id": out_row_ids,
             "recognizer_results_json": results_json_list,
             "entity_count": entity_counts,

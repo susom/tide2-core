@@ -54,6 +54,7 @@ and output is byte-identical for callers who do not switch names.
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -190,7 +191,7 @@ def extract_gpu_family(gpu_name: str | None) -> str | None:
         return None
     name_upper = gpu_name.upper()
     for family in ("L4", "T4", "A100", "H100", "V100", "A10G"):
-        if family in name_upper:
+        if re.search(rf"\b{re.escape(family)}\b", name_upper):
             return family
     return None
 

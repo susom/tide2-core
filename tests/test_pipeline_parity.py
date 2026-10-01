@@ -13,7 +13,7 @@ which this asserts per ``row_id``:
 Byte parity is not expected: ``processing_timestamp`` is wall-clock and row
 order is not preserved (``preserve_order=False``, and streaming changes block
 scheduling). Everything else is deterministic, because anonymization is keyed
-off ``salt``/``key``/``patient_uid`` and jitter is derived per patient.
+off ``salt``/``key``/``patient_id`` and jitter is derived per patient.
 
 The GPU transformer is replaced by a deterministic stub actor — both modes go
 through ``tide2.actors.create_transformer_actor``, so the stub exercises the
@@ -86,7 +86,7 @@ class StubTransformerActor:
             "entity_count": counts,
             "processing_timestamp": [timestamp] * len(note_texts),
         }
-        for col in ("patient_identifiers", "patient_uid", "jitter", "row_id"):
+        for col in ("patient_identifiers", "jitter", "row_id"):
             if col in batch:
                 res[col] = list(batch[col])
         return res

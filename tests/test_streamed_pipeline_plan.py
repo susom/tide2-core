@@ -82,7 +82,6 @@ def df():
             "note_text": ["a note", "another note"],
             "text_hash": ["h1", "h2"],
             "patient_id": ["p1", "p2"],
-            "patient_uid": ["p1", "p2"],
             "row_id": ["r1", "r2"],
         }
     )
@@ -156,7 +155,7 @@ def run_streamed(runner, df, output_dir, **overrides):
 class TestColumnContracts:
     def test_full_chain_validates(self):
         validate_stage_columns(
-            ["note_text", "text_hash", "patient_uid", "row_id"],
+            ["note_text", "text_hash", "patient_id", "row_id"],
             [
                 ("transformer", TRANSFORMER_STAGE_COLUMNS),
                 ("recognizer", RECOGNIZER_STAGE_COLUMNS),
@@ -338,7 +337,6 @@ class TestFallbacks:
                     "note_text": ["a"],
                     "text_hash": ["h"],
                     "patient_id": ["p"],
-                    "patient_uid": ["p"],
                     "row_id": ["r"],
                 }
             )
