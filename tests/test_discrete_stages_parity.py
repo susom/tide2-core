@@ -16,6 +16,7 @@ Covers:
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import numpy as np
 import ray
@@ -197,6 +198,37 @@ def test_recognizer_worker_dict_patient_identifiers(monkeypatch):
     recs_none = worker._build_ad_hoc_recognizers(cached_results=None, patient_identifiers=None, text_hash="h3")
     assert len(recs_none) == 0
 
+    # With pd.NA for patient_identifiers and cached_results
+    import pandas as pd
+
+    recs_na = worker._build_ad_hoc_recognizers(cached_results=pd.NA, patient_identifiers=pd.NA, text_hash="h4")
+    assert len(recs_na) == 0
+
+    # With empty string
+    recs_empty = worker._build_ad_hoc_recognizers(cached_results="", patient_identifiers="", text_hash="h5")
+    assert len(recs_empty) == 0
+
+
+def test_recognizer_worker_process_note_handles_pd_na():
+    """RecognizerWorker.process_note treats pd.NA as empty note without raising."""
+    import pandas as pd
+
+    worker_cls = getattr(RecognizerWorker, "__ray_actor_class__", RecognizerWorker)
+    worker = worker_cls.__new__(worker_cls)
+
+    res = worker.process_note(
+        note_text=pd.NA,
+        text_hash="h_na",
+        cached_results=None,
+        patient_identifiers=None,
+    )
+    if res["processing_status"] != "success":
+        raise ValueError(f"Expected success, got {res['processing_status']}")
+    if res["entity_count"] != 0:
+        raise ValueError(f"Expected 0 entities, got {res['entity_count']}")
+    if res["recognizer_results_json"] != "[]":
+        raise ValueError(f"Expected empty JSON, got {res['recognizer_results_json']}")
+
 
 # ---------------------------------------------------------------------------
 # 6. RecognizerWorker process_batch passthrough columns
@@ -236,6 +268,43 @@ def test_recognizer_worker_process_batch_passthrough():
     assert res["text_hash"] == ["h1"]
     assert "processing_timestamp" in res
     assert len(res["processing_timestamp"]) == 1
+
+
+def test_transformer_actor_offline_mode_derived_from_download_flag():
+    """TransformerInferenceActor derives local_files_only = not allow_huggingface_download."""
+    mock_instance = MagicMock()
+    mock_instance.model_path = "/fake/path"
+    mock_instance.model_max_length = 512
+    mock_instance.config = {}
+    mock_instance.ignore_labels = []
+    mock_instance.num_special_tokens = 2
+    mock_instance.token_budget = 510
+
+    with patch("tide2.actors.transformer.TransformerCore", return_value=mock_instance) as mock_core:
+        TransformerInferenceActor(
+            model_name="stanford_deidentifier",
+            allow_huggingface_download=True,
+        )
+        _, kwargs = mock_core.call_args
+        if kwargs.get("local_files_only") is not False:
+            raise ValueError(f"Expected local_files_only=False, got {kwargs.get('local_files_only')}")
+        if kwargs.get("allow_huggingface_download") is not True:
+            raise ValueError(
+                f"Expected allow_huggingface_download=True, got {kwargs.get('allow_huggingface_download')}"
+            )
+
+    with patch("tide2.actors.transformer.TransformerCore", return_value=mock_instance) as mock_core:
+        TransformerInferenceActor(
+            model_name="stanford_deidentifier",
+            allow_huggingface_download=False,
+        )
+        _, kwargs = mock_core.call_args
+        if kwargs.get("local_files_only") is not True:
+            raise ValueError(f"Expected local_files_only=True, got {kwargs.get('local_files_only')}")
+        if kwargs.get("allow_huggingface_download") is not False:
+            raise ValueError(
+                f"Expected allow_huggingface_download=False, got {kwargs.get('allow_huggingface_download')}"
+            )
 
 
 # ---------------------------------------------------------------------------

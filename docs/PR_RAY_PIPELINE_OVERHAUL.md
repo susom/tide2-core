@@ -141,6 +141,10 @@ streamed is opt-in and `discrete` is untouched, this does not block the rest of 
 - **Explicit Intercept on Removed Reassembly:** Running `tide2-runner run reassembly` halts immediately with an explicit, actionable error explaining the removal.
 - **Clean Signatures and Explicit Deprecation Errors:** Dead supervisor arguments (`batch_timeout`, `timeout`, `worker_num_cpus`) and deprecated `run_transformer` kwargs (`chunk_size`, `flat_map_cpus`, `compile_model`, `compile_cache_path`, `pre_chunked`, `short_seq_budget`) are captured via `**kwargs`, emitting a `DeprecationWarning` and failing fast with `ValueError`.
 - **LLM Recognizer Metadata Passthrough:** `LlmRecognizerWorker` retains `note_text` and copies passthrough metadata columns (`patient_uid`, `row_id`, `jitter`, `patient_identifiers`) to support downstream anonymizers in streamed mode.
+- **Nullable Scalar Hardening (`pd.NA` Handling):** Reordered null checks in `LlmRecognizerWorker` (`llm_recognizer.py:217`) and `RecognizerWorker` (`recognizer.py:304, 365, 370`) to test `is_null(...)` prior to boolean truthiness, preventing `TypeError: boolean value of NA is ambiguous` on nullable Arrow/pandas columns.
+- **Offline Mode Derived from Download Flag:** Configured `TransformerRayActor` to pass `local_files_only=not allow_huggingface_download` to `TransformerCore`, ensuring explicit download requests function on fresh hosts without cached models.
+- **Out-of-Scope OOM Cache Clearing:** Deferred `torch.cuda.empty_cache()` execution outside the `except RuntimeError as e:` block in `_forward_windows_with_retry`, allowing CPython to release traceback frames and unpin failed forward tensors before cache reclamation.
+- **Token-Bound GPU Family Matching:** Replaced substring containment in `extract_gpu_family` with word-boundary regex (`\b{family}\b`), preventing `NVIDIA L40` and `L40S` from misclassifying as `L4`.
 
 ## Compatibility
 

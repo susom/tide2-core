@@ -26,6 +26,7 @@ from tide2.runner.hardware import NodeShape
 from tide2.runner.hardware import apply_recommendations
 from tide2.runner.hardware import classify_profile
 from tide2.runner.hardware import detect_hardware
+from tide2.runner.hardware import extract_gpu_family
 from tide2.runner.hardware import recommend_object_store_gb
 from tide2.runner.hardware import recommend_settings
 from tide2.runner.hardware import render_settings_table
@@ -288,6 +289,29 @@ def test_model_gating_matching_l4():
     assert rec.transformer["gpu_batch_size"] == 64
     assert rec.transformer["batch_size"] == 512
     assert rec.model_status == "(measured, L4)"
+
+
+@pytest.mark.parametrize(
+    ("gpu_name", "expected_family"),
+    [
+        ("NVIDIA L4", "L4"),
+        ("Tesla T4", "T4"),
+        ("NVIDIA A100-SXM4-80GB", "A100"),
+        ("NVIDIA A100 80GB PCIe", "A100"),
+        ("NVIDIA A10G", "A10G"),
+        ("Tesla V100-PCIE-32GB", "V100"),
+        ("NVIDIA H100 80GB HBM3", "H100"),
+        ("NVIDIA L40", None),
+        ("NVIDIA L40S", None),
+        ("L40S", None),
+        ("RTX 4090", None),
+        (None, None),
+    ],
+)
+def test_extract_gpu_family_exact_tokens(gpu_name, expected_family):
+    """Ensure extract_gpu_family matches whole tokens so L40/L40S are not misclassified as L4."""
+    if extract_gpu_family(gpu_name) != expected_family:
+        raise ValueError(f"extract_gpu_family({gpu_name!r}) != {expected_family!r}")
 
 
 def test_model_gating_deprecated_model_alias():
