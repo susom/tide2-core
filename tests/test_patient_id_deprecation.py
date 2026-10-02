@@ -174,3 +174,73 @@ def test_null_note_text_passes_through_recognizer_to_anonymizer():
     anon_worker.process_note = dummy_anon_process_note
     anon_output = anon_worker.process_batch(rec_output)
     assert anon_output["anonymized_note_text"] == ["", "hello world"]
+
+
+def test_anonymizer_worker_preserves_uppercase_row_id():
+    """AnonymizerWorker.process_batch preserves row_id when provided as uppercase ROW_ID."""
+    anon_worker_cls = getattr(AnonymizerWorker, "__ray_actor_class__", AnonymizerWorker)
+    anon_worker = anon_worker_cls.__new__(anon_worker_cls)
+
+    def dummy_anon_process_note(
+        note_text, original_text_hash, recognizer_results_json=None, patient_id=None, jitter=None
+    ):
+        return {
+            "text_hash": original_text_hash,
+            "patient_id": patient_id,
+            "anonymized_note_text": note_text,
+            "anonymizer_results_json": "[]",
+            "entity_count": 0,
+            "processing_status": "success",
+            "error_message": None,
+        }
+
+    anon_worker.process_note = dummy_anon_process_note
+    batch = {
+        "text_hash": ["h1"],
+        "note_text": ["hello"],
+        "ROW_ID": ["custom_row_123"],
+    }
+    output = anon_worker.process_batch(batch)
+    assert "row_id" in output
+    assert output["row_id"] == ["custom_row_123"]
+
+
+def test_transformer_worker_preserves_missing_patient_id_as_none():
+    """TransformerInferenceActor and BIOAggregationActor preserve missing patient_id as None."""
+    from tide2.actors.transformer import BIOAggregationActor
+    from tide2.actors.transformer import TransformerInferenceActor
+
+    worker_cls = getattr(TransformerInferenceActor, "__ray_actor_class__", TransformerInferenceActor)
+    worker = worker_cls.__new__(worker_cls)
+    worker._aggregate_bio = True
+    worker._recognizer_name = "test_recognizer"
+    worker._model_to_presidio_mapping = {}
+    worker._ignore_labels = set()
+    worker._log_gpu_mem = lambda _: None
+    worker._run_inference_raw_with_oom_recovery = lambda _: [[]]
+    worker._format_note = lambda _p, _t: ("[]", 0)
+
+    batch = {
+        "text_hash": ["h1"],
+        "note_text": ["sample text"],
+        "ROW_ID": ["row_abc"],
+    }
+    out = worker(batch)
+    assert out["patient_id"] == [None]
+    assert out["row_id"] == ["row_abc"]
+
+    agg_cls = getattr(BIOAggregationActor, "__ray_actor_class__", BIOAggregationActor)
+    agg = agg_cls.__new__(agg_cls)
+    agg._recognizer_name = "test_recognizer"
+    agg._model_to_presidio_mapping = {}
+    agg._ignore_labels = set()
+    agg_batch = {
+        "text_hash": ["h1"],
+        "note_text": ["sample text"],
+        "predictions_raw_json": ["[]"],
+        "PATIENT_ID": ["pid_123"],
+        "JITTER": [5],
+    }
+    agg_out = agg(agg_batch)
+    assert agg_out["patient_id"] == ["pid_123"]
+    assert agg_out["jitter"] == [5]

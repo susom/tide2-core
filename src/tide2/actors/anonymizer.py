@@ -610,7 +610,7 @@ class AnonymizerWorker:
             "error_message": error_messages,
         }
         # Preserve row_id for checkpointing when input batch has the column
-        if "row_id" in batch:
+        if "row_id" in cols:
             result["row_id"] = row_ids
         return result
 
