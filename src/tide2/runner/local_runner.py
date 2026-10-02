@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 import warnings
@@ -641,6 +642,7 @@ class LocalJobRunner:
         dashboard_host: str = DEFAULT_DASHBOARD_HOST,
         include_dashboard: bool = False,
         no_progress_timeout_s: float | None = None,
+        hardware_autotune: bool = True,
     ):
         """
         Initialize local job runner.
@@ -654,6 +656,8 @@ class LocalJobRunner:
             no_progress_timeout_s: Ray Data hang-detection timeout applied to every
                 stage this runner launches. None = Ray Data's default. Stages reset
                 the DataContext per job, so the value is re-applied on each one.
+            hardware_autotune: Whether automatic hardware recommendations are enabled.
+                If False, automatic object store and stage sizing recommendations are skipped.
         """
         self.num_cpus = num_cpus
         self.num_gpus = num_gpus
@@ -661,6 +665,7 @@ class LocalJobRunner:
         self.dashboard_host = dashboard_host
         self.include_dashboard = include_dashboard
         self.no_progress_timeout_s = no_progress_timeout_s
+        self.hardware_autotune = hardware_autotune
         self._initialized = False
 
     def _data_context_kwargs(self, **overrides: Any) -> dict[str, Any]:
@@ -707,10 +712,13 @@ class LocalJobRunner:
         if self.num_cpus:
             kwargs["num_cpus"] = self.num_cpus
         if self.num_gpus is not None:
-            kwargs["num_gpus"] = self.num_gpus
+            # ray.init needs integer physical GPU count for cluster capacity;
+            # fractional values (e.g. 0.33) represent per-actor allocations.
+            cluster_gpus = math.ceil(self.num_gpus) if self.num_gpus > 0 else 0
+            kwargs["num_gpus"] = cluster_gpus
         if self.object_store_gb:
             kwargs["object_store_memory"] = self.object_store_gb * 1024**3
-        else:
+        elif self.hardware_autotune:
             rec_gb = recommend_object_store_gb(detect_hardware())
             if rec_gb is not None:
                 kwargs["object_store_memory"] = int(rec_gb * 1024**3)

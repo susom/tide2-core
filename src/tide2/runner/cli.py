@@ -78,6 +78,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
 
     no_prog = getattr(args, "no_progress_timeout_s", None)
+    hw_tune = getattr(args, "hardware_autotune", None) is not False
 
     runner = LocalJobRunner(
         num_cpus=args.num_cpus,
@@ -85,6 +86,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         object_store_gb=args.object_store_gb,
         include_dashboard=getattr(args, "include_dashboard", False),
         no_progress_timeout_s=no_prog,
+        hardware_autotune=hw_tune,
     )
 
     dry_run = getattr(args, "dry_run", False)
