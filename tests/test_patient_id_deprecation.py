@@ -9,16 +9,20 @@ from tide2.actors.recognizer import RecognizerWorker
 from tide2.actors.transformer import BIOAggregationActor
 from tide2.actors.transformer import TransformerInferenceActor
 from tide2.anonymizers.accession_number_hash import AccessionNumberHashAnonymizer
-from tide2.runner.local_runner import LocalJobRunner
 from tide2.runner.utils import detect_columns
 from tide2.utils.batch_columns import copy_passthrough
 
 
-def test_prepare_pipeline_input_raises_for_patient_uid():
-    """LocalJobRunner._prepare_pipeline_input raises ValueError on patient_uid column."""
+def test_inspect_pipeline_input_raises_for_patient_uid(tmp_path):
+    """_inspect_pipeline_input raises ValueError on patient_uid column."""
+    from tide2.runner.local_runner import _inspect_pipeline_input
+
+    file_path = tmp_path / "sample.parquet"
     df = pd.DataFrame({"note_text": ["Clinical note."], "patient_uid": ["P1"]})
+    df.to_parquet(file_path)
+
     with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
-        LocalJobRunner._prepare_pipeline_input(df)
+        _inspect_pipeline_input([str(file_path)])
 
 
 def test_detect_columns_raises_for_patient_uid(tmp_path):
