@@ -103,11 +103,18 @@ class _DeduplicateLogFilter(logging.Filter):
 # pooled workers don't stack a new filter (and a new seen-set) on the shared
 # loggers each time.
 _DEDUPLICATE_LOG_FILTER = _DeduplicateLogFilter()
-_DEDUPLICATE_LOG_TARGETS = ("presidio-analyzer", "tide2")
+_DEDUPLICATE_LOG_TARGETS = (
+    "presidio-analyzer",
+    "tide2",
+    "tide2.actors.recognizer",
+    "tide2.actors.anonymizer",
+    "tide2.actors.transformer",
+    "tide2.actors.llm_recognizer",
+)
 
 
 def _install_deduplicate_log_filter() -> None:
-    """Attach the process-wide dedup filter to the noisy loggers, at most once."""
+    """Attach the process-wide dedup filter to the noisy child loggers, at most once."""
     for name in _DEDUPLICATE_LOG_TARGETS:
         target = logging.getLogger(name)
         if _DEDUPLICATE_LOG_FILTER not in target.filters:
@@ -531,12 +538,12 @@ class RecognizerWorker:
                     patient_identifiers=patient_identifiers,
                 )
                 p_id = patient_ids_col[i]
-                p_id = str(text_hash) if is_null(p_id) or str(p_id).strip() == "" else str(p_id)
+                pid_for_row_id = "None" if is_null(p_id) or str(p_id).strip() == "" else str(p_id)
 
                 if has_row_id and not is_null(row_ids_col[i]):
                     r_id = row_ids_col[i]
                 else:
-                    r_id = hashlib.sha256(f"{text_hash}:{p_id}".encode()).hexdigest()
+                    r_id = hashlib.sha256(f"{text_hash}:{pid_for_row_id}".encode()).hexdigest()
 
                 out_text_hashes.append(result["text_hash"])
                 out_note_texts.append(note_text)

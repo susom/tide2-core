@@ -13,6 +13,7 @@ Covers:
 10. CLI support for fractional --num-gpus and --override-num-blocks.
 """
 
+import hashlib
 import json
 import logging
 from types import SimpleNamespace
@@ -270,6 +271,16 @@ def test_recognizer_worker_process_batch_passthrough():
     assert res["text_hash"] == ["h1"]
     assert "processing_timestamp" in res
     assert len(res["processing_timestamp"]) == 1
+
+    # Verify missing/null patient_id is preserved as None rather than replaced by text_hash
+    batch_null_pid = {
+        "text_hash": ["h2"],
+        "note_text": ["Another note"],
+        "patient_id": [None],
+    }
+    res_null = worker.process_batch(batch_null_pid)
+    assert res_null["patient_id"] == [None]
+    assert res_null["row_id"][0] == hashlib.sha256(b"h2:None").hexdigest()
 
 
 def test_transformer_actor_offline_mode_derived_from_download_flag():
