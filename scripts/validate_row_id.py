@@ -76,8 +76,7 @@ def validate_row_id_generation() -> bool:
         }
     )
 
-    print("\nInput DataFrame:")
-    print(df[["text_hash", "patient_id"]])
+    print(f"\nInput DataFrame: {len(df)} rows")
     print()
 
     # Generate row_ids (same logic as local_runner.py)
@@ -87,7 +86,7 @@ def validate_row_id_generation() -> bool:
 
     print("Generated row_ids:")
     for _, row in df.iterrows():
-        print(f"  {row['text_hash']}:{row['patient_id']} -> {row['row_id'][:16]}...")
+        print(f"  row_id: {row['row_id'][:16]}...")
     print()
 
     errors = _run_checks(df)
@@ -111,36 +110,36 @@ def validate_sql_consistency() -> bool:
     print("=" * 60)
 
     test_cases = [
-        ("abc123", "patient_001"),
-        ("def456", "patient_002"),
+        ("abc123", "test_id_001"),
+        ("def456", "test_id_002"),
         ("", "empty_hash_test"),
     ]
 
     print("\nExpected BigQuery query to validate:")
-    print("  SELECT TO_HEX(SHA256(CONCAT(text_hash, ':', uid))) AS row_id")
+    print("  SELECT TO_HEX(SHA256(CONCAT(text_hash, ':', patient_id))) AS row_id")
     print()
 
     all_passed = True
-    for text_hash, uid in test_cases:
-        composite = f"{text_hash}:{uid}"
+    for text_hash, test_id in test_cases:
+        composite = f"{text_hash}:{test_id}"
         python_hash = hashlib.sha256(composite.encode()).hexdigest()
 
         # Validate format
         if len(python_hash) != SHA256_HEX_LENGTH:
-            print(f"[FAIL] {composite} -> length {len(python_hash)} != {SHA256_HEX_LENGTH}")
+            print(f"[FAIL] composite hash length {len(python_hash)} != {SHA256_HEX_LENGTH}")
             all_passed = False
         elif python_hash != python_hash.lower():
-            print(f"[FAIL] {composite} -> not lowercase")
+            print("[FAIL] composite hash not lowercase")
             all_passed = False
         else:
-            print(f"[PASS] {composite} -> {python_hash[:32]}...")
+            print(f"[PASS] row_id -> {python_hash[:32]}...")
 
     print()
     if all_passed:
         print("SQL/Python consistency validation passed!")
         print("Run the following in BigQuery to verify:")
-        print("  SELECT TO_HEX(SHA256(CONCAT('abc123', ':', 'patient_001')))")
-        print(f"  Expected: {hashlib.sha256(b'abc123:patient_001').hexdigest()}")
+        print("  SELECT TO_HEX(SHA256(CONCAT('abc123', ':', 'test_id_001')))")
+        print(f"  Expected: {hashlib.sha256(b'abc123:test_id_001').hexdigest()}")
     return all_passed
 
 
