@@ -77,7 +77,7 @@ PASSTHROUGH_COLS: tuple[str, ...] = ("patient_identifiers", "patient_id", "jitte
 
 
 def copy_passthrough(
-    batch: dict[str, Any],
+    batch: dict[str, Any] | BatchColumns,
     res: dict[str, list[Any]],
     *,
     indices: list[int] | None = None,
@@ -86,18 +86,19 @@ def copy_passthrough(
     """Copy the optional passthrough columns from *batch* into *res* in place.
 
     Args:
-        batch: Incoming Ray Data batch.
+        batch: Incoming Ray Data batch or BatchColumns accessor.
         res: Output batch being built; mutated in place.
         indices: Optional list of row indices to slice from *batch*.
         empty: When True, emit empty lists instead of copying values.
     """
     _check_deprecated_patient_uid(batch)
+    cols = batch if isinstance(batch, BatchColumns) else BatchColumns(batch)
     for col in PASSTHROUGH_COLS:
-        if col in batch:
+        if col in cols:
             if empty:
                 res[col] = []
             elif indices is not None:
-                src = batch[col]
+                src = cols[col]
                 res[col] = [src[i] for i in indices]
             else:
-                res[col] = list(batch[col])
+                res[col] = list(cols[col])

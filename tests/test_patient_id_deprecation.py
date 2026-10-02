@@ -43,6 +43,20 @@ def test_copy_passthrough_raises_for_patient_uid():
         copy_passthrough(batch, res)
 
 
+def test_copy_passthrough_case_insensitive():
+    """copy_passthrough handles case-insensitive headers like PATIENT_ID, ROW_ID, JITTER."""
+    batch = {
+        "PATIENT_ID": ["p1", "p2"],
+        "ROW_ID": ["r1", "r2"],
+        "JITTER": [10, -5],
+    }
+    res = {}
+    copy_passthrough(batch, res)
+    assert res["patient_id"] == ["p1", "p2"]
+    assert res["row_id"] == ["r1", "r2"]
+    assert res["jitter"] == [10, -5]
+
+
 def test_recognizer_worker_raises_for_patient_uid():
     """RecognizerWorker.process_batch raises ValueError when patient_uid is in batch."""
     worker_cls = getattr(RecognizerWorker, "__ray_actor_class__", RecognizerWorker)

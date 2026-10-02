@@ -218,6 +218,12 @@ it changed.**
 | `--produce-visualizer-json` | yes | falls back to discrete |
 | Return shape | per-stage manifests | `operator_stats` + row counts |
 
+> **Merge mode limitation:** In `--llm-recognizer-mode merge`, discrete regex and
+> LLM outputs are joined on `row_id` (`sha256(text_hash:patient_id)`). Input
+> datasets must have unique `(text_hash, patient_id)` records. Repeated identical
+> notes for the same patient will experience Cartesian join expansion; upstream
+> deduplication or unique patient/note IDs are required.
+
 Use `streamed` for development, benchmarks, and single-box batches, where one
 cluster does all three stages. Stay on `discrete` for production, for anything
 multi-machine, for long-running or unattended jobs (you want resume), and on

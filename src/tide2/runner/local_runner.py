@@ -241,7 +241,7 @@ def normalize_source_batch(batch: pa.Table) -> pa.Table:
         batch = batch.rename_columns(lower_names)
 
     if "text_hash" not in batch.column_names:
-        text_hashes = [compute_text_hash(t) for t in batch["note_text"].to_pylist()]
+        text_hashes = [compute_text_hash(t if t is not None else "") for t in batch["note_text"].to_pylist()]
         batch = batch.append_column("text_hash", pa.array(text_hashes, type=pa.string()))
 
     if "row_id" not in batch.column_names:
@@ -386,11 +386,35 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:
         resolved_jsons.append(json.dumps(resolved_dicts))
         entity_counts.append(len(resolved_dicts))
 
-    drop_cols = {"results_regex", "results_llm", "text_hash_regex", "text_hash_llm", "text_hash"}
+    drop_cols = {
+        "results_regex",
+        "results_llm",
+        "text_hash_regex",
+        "text_hash_llm",
+        "text_hash",
+        "note_text_regex",
+        "note_text_llm",
+        "patient_id_regex",
+        "patient_id_llm",
+        "jitter_regex",
+        "jitter_llm",
+        "patient_identifiers_regex",
+        "patient_identifiers_llm",
+    }
     res_cols = {col: batch[col] for col in col_names if col not in drop_cols}
     res_cols["text_hash"] = pa.array(text_hashes, type=pa.string())
     res_cols["recognizer_results_json"] = pa.array(resolved_jsons, type=pa.string())
     res_cols["entity_count"] = pa.array(entity_counts, type=pa.int64())
+
+    for col in ("note_text", "patient_id", "jitter", "patient_identifiers"):
+        col_reg = f"{col}_regex"
+        col_llm = f"{col}_llm"
+        if col_reg in col_names and col_llm in col_names:
+            res_cols[col] = pc.coalesce(batch[col_reg], batch[col_llm])
+        elif col_reg in col_names:
+            res_cols[col] = batch[col_reg]
+        elif col_llm in col_names:
+            res_cols[col] = batch[col_llm]
 
     return pa.table(res_cols)
 
@@ -1934,6 +1958,16 @@ class LocalJobRunner:
         **raises** on multi-node clusters and on nodes with ≤4 CPUs, where a
         chained plan cannot be scheduled (see ``check_streamed_admission``).
 
+        Merge mode limitation
+        ---------------------
+        When ``llm_recognizer_mode="merge"``, regex and LLM outputs are joined
+        via a distributed ``join(on=("row_id",))``. The pipeline contract assumes
+        each record has a unique ``(text_hash, patient_id)`` pair. If an input
+        contains repeated rows with the identical note text and identical patient ID,
+        they share the same ``row_id`` and will experience Cartesian join expansion.
+        Upstream deduplication or supplying unique record IDs is expected when
+        using merge mode.
+
         Args:
             input_path: Path to input parquet file, directory, glob, or list of file paths (local or gs://).
                 Required column: note_text.
@@ -2209,26 +2243,31 @@ class LocalJobRunner:
             if rec_files and llm_files:
                 sample_schema = pq.read_schema(rec_files[0])
                 regex_names = set(sample_schema.names)
-                passthrough = [
-                    c for c in ["note_text", "patient_id", "jitter", "patient_identifiers"] if c in regex_names
-                ]
+                passthrough_cols = ["note_text", "patient_id", "jitter", "patient_identifiers"]
+                reg_passthrough = [c for c in passthrough_cols if c in regex_names]
 
                 regex_ds = ray.data.read_parquet(str(regex_output_path)).select_columns(
-                    ["row_id", "text_hash", "recognizer_results_json", *passthrough]
+                    ["row_id", "text_hash", "recognizer_results_json", *reg_passthrough]
                 )
-                regex_ds = regex_ds.rename_columns(
-                    {
-                        "recognizer_results_json": "results_regex",
-                        "text_hash": "text_hash_regex",
-                    }
-                )
+                regex_renames = {
+                    "recognizer_results_json": "results_regex",
+                    "text_hash": "text_hash_regex",
+                }
+                for c in reg_passthrough:
+                    regex_renames[c] = f"{c}_regex"
+                regex_ds = regex_ds.rename_columns(regex_renames)
 
                 llm_schema = pq.read_schema(llm_files[0])
-                llm_cols = ["row_id", "recognizer_results_json"]
+                llm_names = set(llm_schema.names)
+                llm_passthrough = [c for c in passthrough_cols if c in llm_names]
+
+                llm_cols = ["row_id", "recognizer_results_json", *llm_passthrough]
                 llm_renames = {"recognizer_results_json": "results_llm"}
                 if "text_hash" in llm_schema.names:
                     llm_cols.append("text_hash")
                     llm_renames["text_hash"] = "text_hash_llm"
+                for c in llm_passthrough:
+                    llm_renames[c] = f"{c}_llm"
 
                 llm_ds = ray.data.read_parquet(str(llm_recognizer_output_path)).select_columns(llm_cols)
                 llm_ds = llm_ds.rename_columns(llm_renames)
