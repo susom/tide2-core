@@ -51,6 +51,7 @@ from tide2.transformers.core import _dedupe_raw_predictions
 from tide2.transformers.core import _Window
 from tide2.transformers.core import plan_windows
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.nulls import is_null
 from tide2.utils.text_processing import aggregate_bio_tokens
 from tide2.utils.text_processing import deduplicate_overlapping_entities
 
@@ -381,8 +382,8 @@ class TransformerInferenceActor:
             _copy_passthrough(batch, res, empty=True)
             return res
 
-        # Filter out None/empty texts
-        note_texts = list(note_texts)
+        # Filter out None/empty texts, normalizing nullable scalars (e.g. pd.NA, float nan)
+        note_texts = ["" if is_null(t) else str(t) for t in note_texts]
         valid_indices = [i for i, t in enumerate(note_texts) if t]
         if not valid_indices:
             res = {
@@ -695,7 +696,7 @@ class BIOAggregationActor:
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Aggregate raw BIO tokens into document-level recognizer results."""
         _check_deprecated_patient_uid(batch, location="BIOAggregationActor")
-        note_texts = batch["note_text"]
+        note_texts = ["" if is_null(t) else str(t) for t in batch["note_text"]]
         raw_json_list = batch["predictions_raw_json"]
         text_hashes = batch["text_hash"]
         patient_ids = batch.get("patient_id", [""] * len(note_texts))
