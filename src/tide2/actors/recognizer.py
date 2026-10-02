@@ -525,7 +525,8 @@ class RecognizerWorker:
         has_row_id = "row_id" in cols
 
         for i in range(batch_size):
-            note_text = note_texts[i]
+            raw_note = note_texts[i]
+            note_text = "" if is_null(raw_note) else str(raw_note)
             text_hash = input_text_hashes[i]
             cached_results = cached_results_col[i]
             patient_identifiers = patient_identifiers_col[i]

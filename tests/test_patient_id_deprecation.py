@@ -128,3 +128,49 @@ def test_accession_number_hash_operate_and_validate():
 
     with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
         anon.validate({"patient_uid": "p1"})
+
+
+def test_null_note_text_passes_through_recognizer_to_anonymizer():
+    """Null note_text in RecognizerWorker is normalized and processed by AnonymizerWorker without crashing."""
+    rec_worker_cls = getattr(RecognizerWorker, "__ray_actor_class__", RecognizerWorker)
+    rec_worker = rec_worker_cls.__new__(rec_worker_cls)
+    rec_worker.analyzer = None
+
+    def dummy_process_note(note_text, text_hash, cached_results=None, patient_identifiers=None):
+        return {
+            "text_hash": text_hash,
+            "recognizer_results_json": "[]",
+            "entity_count": 0,
+            "processing_status": "success",
+            "error_message": None,
+        }
+
+    rec_worker.process_note = dummy_process_note
+
+    batch = {
+        "text_hash": ["h1", "h2"],
+        "note_text": [None, "hello world"],
+        "patient_id": ["p1", "p2"],
+    }
+    rec_output = rec_worker.process_batch(batch)
+    assert rec_output["note_text"] == ["", "hello world"]
+
+    anon_worker_cls = getattr(AnonymizerWorker, "__ray_actor_class__", AnonymizerWorker)
+    anon_worker = anon_worker_cls.__new__(anon_worker_cls)
+
+    def dummy_anon_process_note(
+        note_text, original_text_hash, recognizer_results_json=None, patient_id=None, jitter=None
+    ):
+        return {
+            "text_hash": original_text_hash,
+            "patient_id": patient_id,
+            "anonymized_note_text": note_text,
+            "anonymizer_results_json": "[]",
+            "entity_count": 0,
+            "processing_status": "success",
+            "error_message": None,
+        }
+
+    anon_worker.process_note = dummy_anon_process_note
+    anon_output = anon_worker.process_batch(rec_output)
+    assert anon_output["anonymized_note_text"] == ["", "hello world"]

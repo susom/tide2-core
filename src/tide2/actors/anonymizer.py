@@ -136,9 +136,9 @@ class AnonymizerWorker:
         logger.info("AnonymizerWorker initialized with Presidio AnonymizerEngine")
 
     @staticmethod
-    def compute_text_hash(text: str) -> str:
+    def compute_text_hash(text: str | None) -> str:
         """Compute SHA256 hash of text."""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
     def _create_base_operators(self) -> dict[str, OperatorConfig]:
         """Create base operator configuration with the provided keys."""
@@ -566,7 +566,8 @@ class AnonymizerWorker:
 
         note_texts = cols["note_text"]
         for i in range(batch_size):
-            note_text = note_texts[i]
+            raw_note = note_texts[i]
+            note_text = "" if is_null(raw_note) else str(raw_note)
             recognizer_results_json = recognizer_results_list[i] if i < len(recognizer_results_list) else None
             patient_id = input_patient_ids[i] if i < len(input_patient_ids) else None
             jitter = jitters[i] if i < len(jitters) else None

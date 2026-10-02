@@ -242,7 +242,6 @@ class TransformersRecognizer(EntityRecognizer):
             or not hasattr(self._core, "tokenize_ragged")
             or not hasattr(self._core, "forward_windows")
             or isinstance(getattr(self._core, "forward_windows", None), Mock)
-            or (hasattr(self._core, "_ensure_pipeline_loaded") and getattr(self._core, "_tokenizer", None) is None)
         ):
             return self._infer_raw_tokens_fallback(text)
 
