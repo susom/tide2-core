@@ -522,7 +522,7 @@ class TestTransformersRecognizer:
 
             recognizer._core = TokenizedCore()
 
-            with pytest.raises(RuntimeError, match="CUDA out of memory"):
+            with pytest.raises(RuntimeError, match=r"(CUDA out of memory|CUDA OOM on a single token window)"):
                 recognizer._infer_raw_tokens("sample text")
 
             # Verify that lazy-loaded core with _tokenizer=None invokes tokenize_ragged directly

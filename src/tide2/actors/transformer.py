@@ -50,7 +50,9 @@ from tide2.transformers.config import format_transformer_recognizer_name
 from tide2.transformers.core import _dedupe_raw_predictions
 from tide2.transformers.core import _Window
 from tide2.transformers.core import plan_windows
+from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.nulls import is_null
 from tide2.utils.text_processing import aggregate_bio_tokens
 from tide2.utils.text_processing import deduplicate_overlapping_entities
@@ -75,10 +77,6 @@ _DEFAULT_WINDOW_OVERLAP = 40
 # detection (window overlap produces near-identical spans).
 _SPAN_DEDUP_IOU = 0.5
 
-# Columns carried through every transformer-side stage untouched when present.
-# Mirrors ``runner.local_runner.StageColumns.optional``.
-PASSTHROUGH_COLS = ("patient_identifiers", "patient_id", "jitter", "row_id")
-
 
 def _numpy_default(obj: Any) -> Any:
     """json.dumps default handler for numpy scalar types."""
@@ -87,21 +85,6 @@ def _numpy_default(obj: Any) -> Any:
     if isinstance(obj, np.floating):
         return float(obj)
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
-
-
-def _copy_passthrough(batch: dict[str, Any], res: dict[str, list[Any]], *, empty: bool = False) -> None:
-    """Copy the optional passthrough columns from *batch* into *res* in place.
-
-    Args:
-        batch: Incoming Ray Data batch.
-        res: Output batch being built; mutated in place.
-        empty: When True, emit empty lists instead of copying values (used for
-            the empty-batch path, which must still declare the columns).
-    """
-    _check_deprecated_patient_uid(batch)
-    for col in PASSTHROUGH_COLS:
-        if col in batch:
-            res[col] = [] if empty else list(batch[col])
 
 
 def format_note_entities(
@@ -359,10 +342,11 @@ class TransformerInferenceActor:
                 - predictions_raw_json: JSON-serialized list of raw BIO token dicts,
                   with document-relative char offsets
         """
-        _check_deprecated_patient_uid(batch, location="TransformerInferenceWorker")
-        note_texts = batch["note_text"]
-        text_hashes = batch["text_hash"]
-        patient_ids = batch.get("patient_id", [""] * len(note_texts))
+        cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="TransformerInferenceWorker")
+        note_texts = cols["note_text"]
+        text_hashes = cols["text_hash"]
+        patient_ids = cols.get("patient_id", [None] * len(note_texts))
 
         batch_size = len(note_texts)
 
@@ -379,7 +363,7 @@ class TransformerInferenceActor:
                 res["processing_timestamp"] = []
             else:
                 res["predictions_raw_json"] = []
-            _copy_passthrough(batch, res, empty=True)
+            copy_passthrough(cols, res, empty=True)
             return res
 
         # Filter out None/empty texts, normalizing nullable scalars (e.g. pd.NA, float nan)
@@ -398,7 +382,7 @@ class TransformerInferenceActor:
                 res["processing_timestamp"] = [timestamp] * batch_size
             else:
                 res["predictions_raw_json"] = ["[]"] * batch_size
-            _copy_passthrough(batch, res)
+            copy_passthrough(cols, res)
             return res
 
         valid_texts = [note_texts[i] for i in valid_indices]
@@ -445,7 +429,7 @@ class TransformerInferenceActor:
                 "predictions_raw_json": predictions_raw_json_list,
             }
 
-        _copy_passthrough(batch, res)
+        copy_passthrough(cols, res)
 
         return res
 
@@ -695,11 +679,12 @@ class BIOAggregationActor:
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Aggregate raw BIO tokens into document-level recognizer results."""
-        _check_deprecated_patient_uid(batch, location="BIOAggregationActor")
-        note_texts = ["" if is_null(t) else str(t) for t in batch["note_text"]]
-        raw_json_list = batch["predictions_raw_json"]
-        text_hashes = batch["text_hash"]
-        patient_ids = batch.get("patient_id", [""] * len(note_texts))
+        cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="BIOAggregationActor")
+        note_texts = ["" if is_null(t) else str(t) for t in cols["note_text"]]
+        raw_json_list = cols["predictions_raw_json"]
+        text_hashes = cols["text_hash"]
+        patient_ids = cols.get("patient_id", [None] * len(note_texts))
 
         batch_size = len(note_texts)
 
@@ -712,7 +697,7 @@ class BIOAggregationActor:
                 "entity_count": [],
                 "processing_timestamp": [],
             }
-            _copy_passthrough(batch, res, empty=True)
+            copy_passthrough(cols, res, empty=True)
             return res
 
         timestamp = datetime.now(tz=UTC).isoformat()
@@ -735,7 +720,7 @@ class BIOAggregationActor:
             "entity_count": entity_counts,
             "processing_timestamp": [timestamp] * batch_size,
         }
-        _copy_passthrough(batch, res)
+        copy_passthrough(cols, res)
         return res
 
 

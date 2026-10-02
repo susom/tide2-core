@@ -209,7 +209,7 @@ class TransformersRecognizer(EntityRecognizer):
 
     def _get_actor(self) -> Any:
         """Lazily initialize or return internal TransformerInferenceActor."""
-        if not hasattr(self, "_actor") or self._actor is None:
+        if not hasattr(self, "_actor") or self._actor is None or self._actor._core is not self._core:
             from tide2.actors.transformer import TransformerInferenceActor
 
             actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
@@ -265,9 +265,9 @@ class TransformersRecognizer(EntityRecognizer):
         if not windows:
             return []
 
-        # Real tokenized forward execution: let exceptions propagate (e.g. CUDA OOM)
-        window_args = [(w.content_ids, w.offsets, w.text) for w in windows]
-        window_preds = self._core.forward_windows(window_args)
+        # Real tokenized forward execution with bounded batching & OOM recovery
+        actor = self._get_actor()
+        window_preds = actor._forward_windows(windows)
         raw_preds: list[dict] = []
         for preds in window_preds:
             raw_preds.extend(preds)
