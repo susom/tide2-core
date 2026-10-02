@@ -263,6 +263,8 @@ class TransformerCore:
 
         # Pipeline state
         self._pipeline: Any | None = None
+        self._tokenizer: Any | None = None
+        self._model: Any | None = None
         self._pipeline_lock = threading.Lock()
 
         # Load immediately if requested
@@ -300,11 +302,18 @@ class TransformerCore:
         Returns:
             The loaded pipeline instance
         """
-        if self._pipeline is None:
+        if getattr(self, "_pipeline", None) is None:
             with self._pipeline_lock:
                 # Double-check pattern
                 if self._pipeline is None:
                     self._load_pipeline()
+
+        if getattr(self, "_tokenizer", None) is None and getattr(self, "_pipeline", None) is not None:
+            self._tokenizer = getattr(self._pipeline, "tokenizer", None)
+        if getattr(self, "_model", None) is None and getattr(self, "_pipeline", None) is not None:
+            self._model = getattr(self._pipeline, "model", None)
+            if self._model is not None and hasattr(self._model, "config"):
+                self._id2label = getattr(self._model.config, "id2label", None)
 
         return self._pipeline
 

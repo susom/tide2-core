@@ -524,5 +524,32 @@ class TestTransformersRecognizer:
 
             with pytest.raises(RuntimeError, match="CUDA out of memory"):
                 recognizer._infer_raw_tokens("sample text")
+
+            # Verify that lazy-loaded core with _tokenizer=None invokes tokenize_ragged directly
+            class LazyLoadedCore:
+                model_max_length = 512
+                token_budget = 510
+                _tokenizer = None
+                tokenize_ragged_called = False
+
+                def _ensure_pipeline_loaded(self):
+                    self._tokenizer = object()
+
+                def tokenize_ragged(self, texts):
+                    self.tokenize_ragged_called = True
+                    self._ensure_pipeline_loaded()
+                    return {
+                        "input_ids": [[1, 2]],
+                        "offset_mapping": [[(0, 1), (1, 2)]],
+                    }
+
+                def forward_windows(self, windows):
+                    return [[{"entity_group": "PERSON", "score": 0.99, "word": "sample", "start": 0, "end": 6}]]
+
+            lazy_core = LazyLoadedCore()
+            recognizer._core = lazy_core
+            tokens = recognizer._infer_raw_tokens("sample text")
+            assert lazy_core.tokenize_ragged_called is True
+            assert len(tokens) == 1
         finally:
             Path(config_path).unlink()
