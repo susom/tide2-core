@@ -28,7 +28,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import time
 import warnings
 from collections.abc import Iterable
@@ -37,7 +36,9 @@ from pathlib import Path
 from typing import Any
 from typing import Literal
 
-import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 import ray
 import ray.data
@@ -190,6 +191,209 @@ def _configure_checkpoint(
         ctx.checkpoint_config = None
 
 
+DEFAULT_ROW_ID_PATIENT_ID = "None"
+
+
+@dataclass(frozen=True)
+class PipelineInputInfo:
+    """Metadata summary of pipeline Parquet input inspected from footers only."""
+
+    columns: set[str]
+    actual_to_lower: dict[str, str]
+    lower_to_actual: dict[str, str]
+    num_rows: int
+    has_row_id: bool
+    has_text_hash: bool
+    has_patient_id: bool
+    is_patient_id_numeric: bool = False
+
+
+def add_row_id(table: pa.Table) -> pa.Table:
+    """Compute and append a row_id column to an Arrow table if not present.
+
+    Derives row_id from text_hash and patient_id using sha256(f"{text_hash}:{patient_id}").
+    When patient_id is absent or null, uses DEFAULT_ROW_ID_PATIENT_ID ("None").
+    """
+    if "row_id" in table.column_names:
+        return table
+
+    n = len(table)
+    if "patient_id" in table.column_names:
+        pid = table["patient_id"]
+        if not pa.types.is_string(pid.type) and not pa.types.is_large_string(pid.type):
+            pid = pc.cast(pid, pa.string())
+    else:
+        pid = pa.nulls(n, pa.string())
+
+    pid_str = pc.fill_null(pid, DEFAULT_ROW_ID_PATIENT_ID)
+    key = pc.binary_join_element_wise(table["text_hash"], pid_str, ":")
+    row_ids = [hashlib.sha256(k.encode("utf-8")).hexdigest() for k in key.to_pylist()]
+    return table.append_column("row_id", pa.array(row_ids, type=pa.string()))
+
+
+def normalize_source_batch(batch: pa.Table) -> pa.Table:
+    """Normalize source batch: lowercase column names, add text_hash and row_id if absent."""
+    from tide2.utils.text_processing import compute_text_hash
+
+    lower_names = [c.lower() for c in batch.column_names]
+    if lower_names != batch.column_names:
+        batch = batch.rename_columns(lower_names)
+
+    if "text_hash" not in batch.column_names:
+        text_hashes = [compute_text_hash(t) for t in batch["note_text"].to_pylist()]
+        batch = batch.append_column("text_hash", pa.array(text_hashes, type=pa.string()))
+
+    if "row_id" not in batch.column_names:
+        batch = add_row_id(batch)
+
+    return batch
+
+
+def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
+    """Inspect input Parquet file metadata without reading data pages.
+
+    Validates schema requirements, checks for deprecated columns, and extracts
+    row counts and column mappings from Parquet footers.
+    """
+    ds = pads.dataset(files, format="parquet")
+    schema = ds.schema
+
+    lower_to_actual: dict[str, str] = {}
+    actual_to_lower: dict[str, str] = {}
+    for name in schema.names:
+        lower = name.lower()
+        if lower in lower_to_actual:
+            raise ValueError(
+                f"Duplicate column after lowercasing: '{lower}' collides with '{lower_to_actual[lower]}' and '{name}'"
+            )
+        lower_to_actual[lower] = name
+        actual_to_lower[name] = lower
+
+    _check_deprecated_patient_uid(schema.names, location=f"schema of {files[0] if isinstance(files, list) else files}")
+
+    if "note_text" not in lower_to_actual:
+        raise ValueError("Input data must contain a 'note_text' column")
+
+    is_patient_id_numeric = False
+    if "patient_id" in lower_to_actual:
+        pid_type = schema.field(lower_to_actual["patient_id"]).type
+        is_string = pa.types.is_string(pid_type) or pa.types.is_large_string(pid_type)
+        is_numeric = pa.types.is_integer(pid_type) or pa.types.is_floating(pid_type)
+        if not (is_string or is_numeric):
+            raise TypeError(f"Column 'patient_id' has unsupported type {pid_type}; expected string or numeric")
+        is_patient_id_numeric = is_numeric
+
+    num_rows = ds.count_rows()
+
+    return PipelineInputInfo(
+        columns=set(lower_to_actual.keys()),
+        actual_to_lower=actual_to_lower,
+        lower_to_actual=lower_to_actual,
+        num_rows=num_rows,
+        has_row_id="row_id" in lower_to_actual,
+        has_text_hash="text_hash" in lower_to_actual,
+        has_patient_id="patient_id" in lower_to_actual,
+        is_patient_id_numeric=is_patient_id_numeric,
+    )
+
+
+def _read_stage_source(
+    files: str | list[str],
+    columns: list[str] | None = None,
+    *,
+    normalize: bool = False,
+    num_blocks: int | None = None,
+    read_cpus: float | None = None,
+) -> Dataset:
+    """Read a Parquet source with optional normalization fused into the read."""
+    kwargs: dict[str, Any] = {}
+    if columns is not None:
+        kwargs["columns"] = columns
+    if num_blocks is not None:
+        kwargs["override_num_blocks"] = num_blocks
+    if read_cpus is not None:
+        kwargs["ray_remote_args"] = {"num_cpus": read_cpus}
+
+    ds: Dataset = ray.data.read_parquet(files, **kwargs)
+    if normalize:
+        ds = ds.map_batches(normalize_source_batch, batch_format="pyarrow")
+    return ds
+
+
+def _resolve_merged_batch(batch: pa.Table) -> pa.Table:
+    """Resolve regex and LLM recognizer results per row with longest_wins strategy."""
+    from presidio_anonymizer.entities import RecognizerResult
+
+    from tide2.utils.span_metrics import resolve_recognizer_results
+
+    n = len(batch)
+    if n == 0:
+        return batch
+
+    col_names = batch.column_names
+
+    if "text_hash_regex" in col_names and "text_hash_llm" in col_names:
+        text_hashes = pc.coalesce(batch["text_hash_regex"], batch["text_hash_llm"]).to_pylist()
+    elif "text_hash" in col_names:
+        text_hashes = batch["text_hash"].to_pylist()
+    elif "text_hash_regex" in col_names:
+        text_hashes = batch["text_hash_regex"].to_pylist()
+    elif "text_hash_llm" in col_names:
+        text_hashes = batch["text_hash_llm"].to_pylist()
+    else:
+        text_hashes = [None] * n
+
+    reg_raw = batch["results_regex"].to_pylist() if "results_regex" in col_names else [None] * n
+    llm_raw = batch["results_llm"].to_pylist() if "results_llm" in col_names else [None] * n
+
+    resolved_jsons = []
+    entity_counts = []
+    for r_json, l_json in zip(reg_raw, llm_raw, strict=True):
+        r_list = json.loads(r_json) if r_json else []
+        l_list = json.loads(l_json) if l_json else []
+
+        regex_results = [
+            RecognizerResult(
+                entity_type=r["entity_type"],
+                start=r["start"],
+                end=r["end"],
+                score=r["score"],
+            )
+            for r in r_list
+        ]
+        llm_results = [
+            RecognizerResult(
+                entity_type=r["entity_type"],
+                start=r["start"],
+                end=r["end"],
+                score=r["score"],
+            )
+            for r in l_list
+        ]
+
+        combined = regex_results + llm_results
+        resolved = resolve_recognizer_results(combined, strategy="longest_wins") if combined else []
+        resolved_dicts = [
+            {
+                "entity_type": r.entity_type,
+                "start": r.start,
+                "end": r.end,
+                "score": r.score,
+            }
+            for r in resolved
+        ]
+        resolved_jsons.append(json.dumps(resolved_dicts))
+        entity_counts.append(len(resolved_dicts))
+
+    drop_cols = {"results_regex", "results_llm", "text_hash_regex", "text_hash_llm", "text_hash"}
+    res_cols = {col: batch[col] for col in col_names if col not in drop_cols}
+    res_cols["text_hash"] = pa.array(text_hashes, type=pa.string())
+    res_cols["recognizer_results_json"] = pa.array(resolved_jsons, type=pa.string())
+    res_cols["entity_count"] = pa.array(entity_counts, type=pa.int64())
+
+    return pa.table(res_cols)
+
+
 @dataclass(frozen=True)
 class StageColumns:
     """Static column contract for one pipeline stage.
@@ -211,13 +415,13 @@ class StageColumns:
 
 #: Column contracts, mirroring the actor implementations in ``tide2.actors``.
 TRANSFORMER_STAGE_COLUMNS = StageColumns(
-    requires=frozenset({"text_hash", "note_text"}),
-    optional=frozenset({"patient_id", "patient_identifiers", "jitter", "row_id"}),
-    produces=frozenset({"text_hash", "patient_id", "note_text", "recognizer_results_json"}),
+    requires=frozenset({"text_hash", "note_text", "row_id"}),
+    optional=frozenset({"patient_id", "patient_identifiers", "jitter"}),
+    produces=frozenset({"text_hash", "patient_id", "note_text", "recognizer_results_json", "row_id"}),
 )
 RECOGNIZER_STAGE_COLUMNS = StageColumns(
-    requires=frozenset({"text_hash", "note_text"}),
-    optional=frozenset({"patient_identifiers", "recognizer_results_json", "patient_id", "jitter", "row_id"}),
+    requires=frozenset({"text_hash", "note_text", "row_id"}),
+    optional=frozenset({"patient_identifiers", "recognizer_results_json", "patient_id", "jitter"}),
     produces=frozenset(
         {
             "text_hash",
@@ -233,8 +437,8 @@ RECOGNIZER_STAGE_COLUMNS = StageColumns(
     ),
 )
 LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
-    requires=frozenset({"text_hash", "note_text"}),
-    optional=frozenset({"patient_identifiers", "patient_id", "jitter", "row_id"}),
+    requires=frozenset({"text_hash", "note_text", "row_id"}),
+    optional=frozenset({"patient_identifiers", "patient_id", "jitter"}),
     produces=frozenset(
         {
             "text_hash",
@@ -250,12 +454,13 @@ LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
     ),
 )
 ANONYMIZER_STAGE_COLUMNS = StageColumns(
-    requires=frozenset({"text_hash", "note_text", "recognizer_results_json"}),
-    optional=frozenset({"patient_id", "jitter", "row_id"}),
+    requires=frozenset({"text_hash", "note_text", "recognizer_results_json", "row_id"}),
+    optional=frozenset({"patient_id", "jitter"}),
     produces=frozenset(
         {
             "text_hash",
             "patient_id",
+            "row_id",
             "anonymized_note_text",
             "anonymizer_results_json",
             "entity_count",
@@ -735,6 +940,8 @@ class LocalJobRunner:
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
         dry_run: bool = False,
+        _id_column: str = "text_hash",
+        _normalize: bool = False,
     ) -> dict[str, Any]:
         """
         Run recognition job with Ray Data checkpointing for resume.
@@ -817,14 +1024,25 @@ class LocalJobRunner:
             num_actors = self._auto_num_actors()
 
         # Detect columns
-        required_cols = ["text_hash", "note_text"]
-        optional_cols = [
-            "patient_identifiers",
-            "recognizer_results_json",
-            "patient_id",
-            "jitter",
-            "row_id",
-        ]
+        if _normalize:
+            required_cols = ["note_text"]
+            optional_cols = [
+                "text_hash",
+                "patient_identifiers",
+                "recognizer_results_json",
+                "patient_id",
+                "jitter",
+                "row_id",
+            ]
+        else:
+            required_cols = ["text_hash", "note_text"]
+            optional_cols = [
+                "patient_identifiers",
+                "recognizer_results_json",
+                "patient_id",
+                "jitter",
+                "row_id",
+            ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
@@ -858,7 +1076,7 @@ class LocalJobRunner:
             # _configure_checkpoint for why enable_checkpoint=False is REQUIRED on
             # tiny clusters (≲4 CPUs, e.g. 2-CPU Colab) and why disabling
             # op_resource_reservation_enabled does NOT help.
-            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column="text_hash")
+            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=_id_column)
 
             # Single streaming pipeline — no repartition, no segment loop.
             num_blocks = read_parallelism if read_parallelism is not None else len(input_files)
@@ -866,11 +1084,12 @@ class LocalJobRunner:
             num_blocks = max(num_blocks, num_actors)
             if override_num_blocks is not None:
                 num_blocks = override_num_blocks
-            ds = ray.data.read_parquet(
+            ds = _read_stage_source(
                 input_files,
                 columns=columns,
-                override_num_blocks=num_blocks,
-                ray_remote_args={"num_cpus": read_cpus},
+                normalize=_normalize,
+                num_blocks=num_blocks,
+                read_cpus=read_cpus,
             )
             processed = self.build_recognizer_stage(
                 ds,
@@ -903,9 +1122,9 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_llm_recognition(
+    def run_llm_recognition(  # noqa: PLR0915
         self,
-        input_path: str,
+        input_path: str | list[str],
         output_path: str,
         project_id: str,
         model_name: str = "gemini-2.5-flash",
@@ -930,6 +1149,8 @@ class LocalJobRunner:
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
         dry_run: bool = False,
+        _id_column: str = "text_hash",
+        _normalize: bool = False,
     ) -> dict[str, Any]:
         """
         Run LLM-based recognition job with Ray Data checkpointing for resume.
@@ -1024,8 +1245,12 @@ class LocalJobRunner:
             num_actors = self._auto_num_actors()
 
         # Detect columns — LLM recognizer needs text_hash, note_text, and forwards patient metadata
-        required_cols = ["text_hash", "note_text"]
-        optional_cols = ["patient_id", "row_id", "jitter", "patient_identifiers"]
+        if _normalize:
+            required_cols = ["note_text"]
+            optional_cols = ["text_hash", "patient_id", "row_id", "jitter", "patient_identifiers"]
+        else:
+            required_cols = ["text_hash", "note_text"]
+            optional_cols = ["patient_id", "row_id", "jitter", "patient_identifiers"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
@@ -1063,16 +1288,17 @@ class LocalJobRunner:
             # _configure_checkpoint for why this must be disabled on tiny clusters
             # (the checkpoint shuffle deadlocks Ray 2.55's reservation allocator, and
             # disabling op_resource_reservation_enabled does NOT help).
-            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column="text_hash")
+            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=_id_column)
 
             # Single streaming pipeline
             # Default to num_actors blocks so data is distributed across all actors
             num_blocks = read_parallelism if read_parallelism is not None else max(num_actors, len(input_files))
-            ds = ray.data.read_parquet(
+            ds = _read_stage_source(
                 input_files,
                 columns=columns,
-                override_num_blocks=num_blocks,
-                ray_remote_args={"num_cpus": read_cpus},
+                normalize=_normalize,
+                num_blocks=num_blocks,
+                read_cpus=read_cpus,
             )
             processed = self.build_llm_recognizer_stage(
                 ds,
@@ -1142,6 +1368,8 @@ class LocalJobRunner:
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
         dry_run: bool = False,
+        _id_column: str = "row_id",
+        _normalize: bool = False,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1237,6 +1465,28 @@ class LocalJobRunner:
         optional_cols = ["patient_id", "jitter", "row_id"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
+        # Check if row_id is present
+        has_row_id = "row_id" in [c.lower() for c in columns]
+        fuse_add_row_id = False
+        if not has_row_id:
+            if enable_checkpoint:
+                norm_dir = Path(output_path).resolve() / "00_normalized_anonymizer_input"
+                if not (norm_dir / "_SUCCESS").exists():
+                    logger.info(
+                        "Checkpointing is enabled and input lacks 'row_id'; materializing input with 'row_id' to %s. "
+                        "Writing 'row_id' upstream avoids this pass.",
+                        norm_dir,
+                    )
+                    norm_dir.mkdir(parents=True, exist_ok=True)
+                    norm_ds = ray.data.read_parquet(input_files, columns=columns)
+                    norm_ds = norm_ds.map_batches(add_row_id, batch_format="pyarrow")
+                    norm_ds.write_parquet(str(norm_dir), compression="zstd")
+                    (norm_dir / "_SUCCESS").touch()
+                input_files = resolve_input_files(str(norm_dir))
+                columns = detect_columns(input_files[0], required_cols, optional_cols)
+            else:
+                fuse_add_row_id = True
+
         ctx = ray.data.DataContext.get_current()
         logger.info("Anonymization job starting")
         logger.info(f"  Input: {input_path}")
@@ -1278,8 +1528,7 @@ class LocalJobRunner:
             # _configure_checkpoint for why this must be disabled on tiny clusters
             # (the checkpoint shuffle deadlocks Ray 2.55's reservation allocator, and
             # disabling op_resource_reservation_enabled does NOT help).
-            id_col = "row_id" if "row_id" in columns else "text_hash"
-            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=id_col)
+            _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=_id_column)
 
             # Single streaming pipeline — no repartition, no segment loop.
             num_blocks = read_parallelism if read_parallelism is not None else len(input_files)
@@ -1287,12 +1536,15 @@ class LocalJobRunner:
             num_blocks = max(num_blocks, num_actors)
             if override_num_blocks is not None:
                 num_blocks = override_num_blocks
-            ds = ray.data.read_parquet(
+            ds = _read_stage_source(
                 input_files,
                 columns=columns,
-                override_num_blocks=num_blocks,
-                ray_remote_args={"num_cpus": read_cpus},
+                normalize=_normalize,
+                num_blocks=num_blocks,
+                read_cpus=read_cpus,
             )
+            if fuse_add_row_id and not _normalize:
+                ds = ds.map_batches(add_row_id, batch_format="pyarrow")
             processed = self.build_anonymizer_stage(
                 ds,
                 actor_cls=AnonymizerActor,
@@ -1305,12 +1557,10 @@ class LocalJobRunner:
             # Guard against silent total failure: Ray's max_errored_blocks can turn
             # every dropped batch into a successful-looking 0-row write.
             # Surface that as a hard error instead.
-            import pyarrow.dataset as _pad
-
             try:
                 output_files = list(output_dir.glob("*.parquet"))
                 if output_files:
-                    output_rows = _pad.dataset(output_files).count_rows()
+                    output_rows = pads.dataset(output_files).count_rows()
                 elif hasattr(processed, "count"):
                     output_rows = processed.count()
                 else:
@@ -1368,6 +1618,8 @@ class LocalJobRunner:
         transformer_cpus: float | None = None,
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
+        _id_column: str = "text_hash",
+        _normalize: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -1537,8 +1789,12 @@ class LocalJobRunner:
         )
 
         input_files = resolve_input_files(input_path)
-        required_cols = ["text_hash", "note_text"]
-        optional_cols = ["patient_id", "patient_identifiers", "jitter", "row_id"]
+        if _normalize:
+            required_cols = ["note_text"]
+            optional_cols = ["text_hash", "patient_id", "patient_identifiers", "jitter", "row_id"]
+        else:
+            required_cols = ["text_hash", "note_text"]
+            optional_cols = ["patient_id", "patient_identifiers", "jitter", "row_id"]
         if input_files:
             try:
                 columns = detect_columns(input_files[0], required_cols, optional_cols)
@@ -1551,24 +1807,20 @@ class LocalJobRunner:
 
         self._ensure_output_dir(output_path)
 
-        # Configure Ray Data checkpointing for row-level resume, keyed on text_hash
+        # Configure Ray Data checkpointing for row-level resume, keyed on _id_column
         # (one row per note through the whole stage now — no chunk_uid).
         ctx = ray.data.DataContext.get_current()
         _configure_checkpoint(
-            ctx, enable=enable_checkpoint, output_dir=Path(output_path).resolve(), id_column="text_hash"
+            ctx, enable=enable_checkpoint, output_dir=Path(output_path).resolve(), id_column=_id_column
         )
 
-        read_kwargs: dict[str, Any] = {
-            "columns": columns,
-            "ray_remote_args": {"num_cpus": read_cpus},
-        }
-        if override_num_blocks is not None:
-            read_kwargs["override_num_blocks"] = override_num_blocks
-
         # Phase 1: Read whole notes (the actor's token-windowing is the sole chunker)
-        ds: Dataset = ray.data.read_parquet(
+        ds: Dataset = _read_stage_source(
             read_target,
-            **read_kwargs,
+            columns=columns,
+            normalize=_normalize,
+            num_blocks=override_num_blocks,
+            read_cpus=read_cpus,
         )
 
         # Phase 2: Transformer inference (tokenize -> window -> forward, per note).
@@ -1615,7 +1867,7 @@ class LocalJobRunner:
 
     def run_pipeline(  # noqa: PLR0915 # its a long function but its the main pipeline runner
         self,
-        input_data: str | pd.DataFrame,
+        input_path: str | list[str],
         output_dir: str,
         model_name: str,
         *,
@@ -1675,10 +1927,10 @@ class LocalJobRunner:
         chained plan cannot be scheduled (see ``check_streamed_admission``).
 
         Args:
-            input_data: Path to input parquet file, or a DataFrame.
+            input_path: Path to input parquet file, directory, glob, or list of file paths (local or gs://).
                 Required column: note_text.
                 Optional columns: text_hash, patient_identifiers (JSON string),
-                patient_id, recognizer_results_json, jitter.
+                patient_id, recognizer_results_json, jitter, row_id.
             output_dir: Output directory for all intermediate and final files.
             model_name: Transformer model name (e.g. "StanfordAIMI/stanford-deidentifier-base").
             run_transformer: Run GPU transformer NER stage.
@@ -1717,8 +1969,37 @@ class LocalJobRunner:
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
 
+        if not isinstance(input_path, (str, list)) or (
+            isinstance(input_path, list) and not all(isinstance(f, str) for f in input_path)
+        ):
+            type_name = type(input_path).__name__
+            if "DataFrame" in type_name or hasattr(input_path, "to_parquet"):
+                raise TypeError(
+                    "DataFrame input to run_pipeline was removed. "
+                    "Please write the DataFrame to a Parquet file using df.to_parquet(...) and pass the file path."
+                )
+            raise TypeError(
+                f"input_path must be a str or list[str], got {type_name}. "
+                "If you have a DataFrame, write it to a Parquet file using df.to_parquet(...) and pass the file path."
+            )
+
+        if isinstance(input_path, str) and input_path.startswith("gs://"):
+            resolved_files = [input_path]
+        elif isinstance(input_path, list) and any(f.startswith("gs://") for f in input_path):
+            resolved_files = input_path
+        else:
+            resolved_files = resolve_input_files(input_path)
+
+        if not resolved_files:
+            raise ValueError(f"No input files found matching: {input_path}")
+
+        for f in resolved_files:
+            if not f.startswith("gs://") and not f.endswith(".parquet"):
+                raise ValueError(f"Resolved file does not end with .parquet: {f}")
+
+        input_info = _inspect_pipeline_input(resolved_files)
+
         # --- Intermediate paths ---
-        transformer_input_path = output_path / "01_transformer_input.parquet"
         transformer_output_path = output_path / "02_transformer_output"
         recognizer_output_path = output_path / "04_recognizer_output"
         anonymizer_output_path = output_path / "06_anonymizer_output"
@@ -1738,11 +2019,6 @@ class LocalJobRunner:
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
         llm_kw = llm_recognizer_kwargs or {}
-
-        # ------------------------------------------------------------------
-        # Prepare input DataFrame
-        # ------------------------------------------------------------------
-        df_input = self._prepare_pipeline_input(input_data)
 
         # ------------------------------------------------------------------
         # Execution mode: resolve fallbacks before anything is written
@@ -1772,7 +2048,8 @@ class LocalJobRunner:
 
         if execution_mode == "streamed":
             return self._run_pipeline_streamed(
-                df_input=df_input,
+                input_files=resolved_files,
+                input_info=input_info,
                 output_path=output_path,
                 model_name=model_name,
                 run_transformer=run_transformer,
@@ -1790,15 +2067,50 @@ class LocalJobRunner:
             )
 
         results["execution_mode"] = "discrete"
-
-        # Write transformer input (with all columns needed across downstream stages)
-        df_input.to_parquet(transformer_input_path, index=False)
-        logger.info(f"Pipeline input: {len(df_input)} notes")
+        logger.info("Pipeline input: %d notes (%d files)", input_info.num_rows, len(resolved_files))
 
         self._init_ray()
 
         # Resolve settings via hardware recommender
         self._apply_pipeline_recommendations(model_name, t_kw, r_kw, a_kw, hardware_autotune)
+
+        use_llm = llm_recognizer_mode == "only"
+        if use_llm:
+            first_stage = "llm"
+            first_stage_enable_checkpoint = bool(llm_kw.get("enable_checkpoint", True))
+        elif run_transformer:
+            first_stage = "transformer"
+            first_stage_enable_checkpoint = bool(t_kw.get("enable_checkpoint", True))
+        elif run_recognizer or llm_recognizer_mode == "merge":
+            first_stage = "recognizer"
+            first_stage_enable_checkpoint = bool(r_kw.get("enable_checkpoint", True))
+        elif run_anonymizer:
+            first_stage = "anonymizer"
+            first_stage_enable_checkpoint = bool(a_kw.get("enable_checkpoint", True))
+        else:
+            first_stage = None
+            first_stage_enable_checkpoint = False
+
+        first_stage_input_path: str | list[str] = resolved_files
+        first_stage_normalize = True
+
+        if first_stage and first_stage_enable_checkpoint and not input_info.has_row_id:
+            normalized_input_dir = output_path / "01_normalized_input"
+            if not (normalized_input_dir / "_SUCCESS").exists():
+                logger.info(
+                    "Checkpointing is enabled and input lacks 'row_id'; materializing normalized input to %s. "
+                    "Writing 'row_id' upstream (e.g. in BigQuery export) avoids this pass.",
+                    normalized_input_dir,
+                )
+                normalized_input_dir.mkdir(parents=True, exist_ok=True)
+                norm_ds = ray.data.read_parquet(resolved_files)
+                norm_ds = norm_ds.map_batches(normalize_source_batch, batch_format="pyarrow")
+                norm_ds.write_parquet(str(normalized_input_dir), compression="zstd")
+                (normalized_input_dir / "_SUCCESS").touch()
+            else:
+                logger.info("Reusing existing normalized input with _SUCCESS marker from %s", normalized_input_dir)
+            first_stage_input_path = str(normalized_input_dir)
+            first_stage_normalize = False
 
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
@@ -1813,9 +2125,11 @@ class LocalJobRunner:
         elif run_transformer:
             logger.info("Pipeline phase 1/3: Transformer NER")
             transformer_manifest = self.run_transformer(
-                input_path=str(transformer_input_path),
+                input_path=first_stage_input_path,
                 output_path=str(transformer_output_path),
                 model_name=model_name,
+                _id_column="row_id",
+                _normalize=first_stage_normalize,
                 **t_kwargs,
             )
             results["transformer"] = transformer_manifest
@@ -1826,20 +2140,17 @@ class LocalJobRunner:
         # Phase 2: Recognizer (+ optional LLM recognizer)
         # ------------------------------------------------------------------
         r_kwargs: dict[str, Any] = dict(r_kw)
-
-        rec_input_path = transformer_output_path if run_transformer else transformer_input_path
+        rec_input_path = str(transformer_output_path) if run_transformer else first_stage_input_path
+        rec_normalize = False if run_transformer else first_stage_normalize
 
         if llm_recognizer_mode == "only":
             # LLM replaces both transformer and regex recognizer
             logger.info("Pipeline phase 2/3: LLM Recognizer (only mode)")
-
-            # Write LLM recognizer input (just note_text + text_hash)
-            llm_input_path = output_path / "03_llm_recognizer_input.parquet"
-            df_input[["note_text", "text_hash"]].to_parquet(llm_input_path, index=False)
-
             llm_manifest = self.run_llm_recognition(
-                input_path=str(llm_input_path),
+                input_path=first_stage_input_path,
                 output_path=str(recognizer_output_path),
+                _id_column="row_id",
+                _normalize=first_stage_normalize,
                 **llm_kw,
             )
             results["llm_recognizer"] = llm_manifest
@@ -1847,12 +2158,15 @@ class LocalJobRunner:
         elif llm_recognizer_mode == "merge":
             # Run both regex recognizer and LLM recognizer, then merge
             logger.info("Pipeline phase 2/3: Recognizer + LLM Recognizer (merge mode)")
+            regex_output_path = output_path / "04a_regex_recognizer_output"
 
             # --- Standard regex recognizer ---
             if run_recognizer:
                 recognizer_manifest = self.run_recognition(
-                    input_path=str(rec_input_path),
-                    output_path=str(recognizer_output_path),
+                    input_path=rec_input_path,
+                    output_path=str(regex_output_path),
+                    _id_column="row_id",
+                    _normalize=rec_normalize,
                     **r_kwargs,
                 )
                 results["recognizer"] = recognizer_manifest
@@ -1860,116 +2174,91 @@ class LocalJobRunner:
                 logger.info("Regex recognizer stage skipped (run_recognizer=False)")
 
             # --- LLM recognizer ---
-            llm_input_path = output_path / "03_llm_recognizer_input.parquet"
-            df_input[["note_text", "text_hash"]].to_parquet(llm_input_path, index=False)
+            llm_input_path = str(transformer_output_path) if run_transformer else first_stage_input_path
+            llm_normalize = False if run_transformer else first_stage_normalize
 
             llm_manifest = self.run_llm_recognition(
-                input_path=str(llm_input_path),
+                input_path=llm_input_path,
                 output_path=str(llm_recognizer_output_path),
+                _id_column="row_id",
+                _normalize=llm_normalize,
                 **llm_kw,
             )
             results["llm_recognizer"] = llm_manifest
 
-            # --- Merge results ---
+            # --- Merge results via Ray Data join ---
             logger.info("Merging regex and LLM recognizer results")
-            from presidio_anonymizer.entities import RecognizerResult
-
-            from tide2.utils.span_metrics import resolve_recognizer_results
-
-            # Read regex recognizer output
-            rec_files = list(recognizer_output_path.glob("**/*.parquet"))
-            if rec_files:
-                dfs_regex = [pq.read_table(f).to_pandas() for f in rec_files]
-                df_regex = pd.concat(dfs_regex, ignore_index=True)
-            else:
-                df_regex = pd.DataFrame(columns=["text_hash", "recognizer_results_json"])
-
-            # Read LLM recognizer output
+            rec_files = list(regex_output_path.glob("**/*.parquet")) if run_recognizer else []
             llm_files = list(llm_recognizer_output_path.glob("**/*.parquet"))
-            if llm_files:
-                dfs_llm = [pq.read_table(f).to_pandas() for f in llm_files]
-                df_llm = pd.concat(dfs_llm, ignore_index=True)
-            else:
-                df_llm = pd.DataFrame(columns=["text_hash", "recognizer_results_json"])
 
-            # Merge on text_hash
-            df_merged = df_regex[["text_hash", "recognizer_results_json"]].merge(
-                df_llm[["text_hash", "recognizer_results_json"]],
-                on="text_hash",
-                how="outer",
-                suffixes=("_regex", "_llm"),
+            alive_cpus = alive_node_cpus()
+            node_cpus = max(alive_cpus or [1.0])
+            agg_cpus = (
+                min(0.25, node_cpus / float(MIN_STREAMED_NODE_CPUS)) if node_cpus <= MIN_STREAMED_NODE_CPUS else 0.5
             )
+            n_partitions = min(MIN_STREAMED_NODE_CPUS, max(1, int(node_cpus)))
 
-            merged_rows = []
-            for _, row in df_merged.iterrows():
-                regex_json = row.get("recognizer_results_json_regex", "[]")
-                llm_json = row.get("recognizer_results_json_llm", "[]")
-                if pd.isna(regex_json):
-                    regex_json = "[]"
-                if pd.isna(llm_json):
-                    llm_json = "[]"
-
-                regex_results = [
-                    RecognizerResult(
-                        entity_type=r["entity_type"],
-                        start=r["start"],
-                        end=r["end"],
-                        score=r["score"],
-                    )
-                    for r in json.loads(regex_json)
-                ]
-                llm_results = [
-                    RecognizerResult(
-                        entity_type=r["entity_type"],
-                        start=r["start"],
-                        end=r["end"],
-                        score=r["score"],
-                    )
-                    for r in json.loads(llm_json)
+            if rec_files and llm_files:
+                sample_schema = pq.read_schema(rec_files[0])
+                regex_names = set(sample_schema.names)
+                passthrough = [
+                    c for c in ["note_text", "patient_id", "jitter", "patient_identifiers"] if c in regex_names
                 ]
 
-                combined = regex_results + llm_results
-                resolved = resolve_recognizer_results(combined, strategy="longest_wins") if combined else []
-
-                merged_rows.append(
+                regex_ds = ray.data.read_parquet(str(regex_output_path)).select_columns(
+                    ["row_id", "text_hash", "recognizer_results_json", *passthrough]
+                )
+                regex_ds = regex_ds.rename_columns(
                     {
-                        "text_hash": row["text_hash"],
-                        "recognizer_results_json": json.dumps(
-                            [
-                                {
-                                    "entity_type": r.entity_type,
-                                    "start": r.start,
-                                    "end": r.end,
-                                    "score": r.score,
-                                }
-                                for r in resolved
-                            ]
-                        ),
+                        "recognizer_results_json": "results_regex",
+                        "text_hash": "text_hash_regex",
                     }
                 )
 
-            df_merged_results = pd.DataFrame(merged_rows)
-            cols_to_keep = [c for c in ["note_text", "patient_id", "row_id", "jitter"] if c in df_regex.columns]
-            if cols_to_keep:
-                df_merged_results = df_merged_results.merge(
-                    df_regex[["text_hash", *cols_to_keep]].drop_duplicates(subset=["text_hash"]),
-                    on="text_hash",
-                    how="left",
-                )
+                llm_schema = pq.read_schema(llm_files[0])
+                llm_cols = ["row_id", "recognizer_results_json"]
+                llm_renames = {"recognizer_results_json": "results_llm"}
+                if "text_hash" in llm_schema.names:
+                    llm_cols.append("text_hash")
+                    llm_renames["text_hash"] = "text_hash_llm"
 
-            # Overwrite recognizer output with merged results
-            if recognizer_output_path.exists():
-                shutil.rmtree(recognizer_output_path)
-            recognizer_output_path.mkdir(parents=True, exist_ok=True)
-            df_merged_results.to_parquet(recognizer_output_path / "merged_results.parquet", index=False)
-            logger.info(f"Merged {len(df_merged_results)} notes from regex + LLM recognizers")
+                llm_ds = ray.data.read_parquet(str(llm_recognizer_output_path)).select_columns(llm_cols)
+                llm_ds = llm_ds.rename_columns(llm_renames)
+
+                joined_ds = regex_ds.join(
+                    llm_ds,
+                    join_type="full_outer",
+                    num_partitions=n_partitions,
+                    on=("row_id",),
+                    aggregator_ray_remote_args={"num_cpus": agg_cpus},
+                )
+                merged_ds = joined_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
+                merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
+
+            elif rec_files:
+                regex_ds = ray.data.read_parquet(str(regex_output_path))
+                regex_ds = regex_ds.rename_columns({"recognizer_results_json": "results_regex"})
+                merged_ds = regex_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
+                merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
+
+            elif llm_files:
+                llm_ds = ray.data.read_parquet(str(llm_recognizer_output_path))
+                llm_ds = llm_ds.rename_columns({"recognizer_results_json": "results_llm"})
+                merged_ds = llm_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
+                merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
+
+            out_files = list(recognizer_output_path.glob("**/*.parquet"))
+            merged_count = pads.dataset(out_files).count_rows() if out_files else 0
+            logger.info("Merged %d notes from regex + LLM recognizers", merged_count)
 
         elif run_recognizer:
             # Standard recognizer path (no LLM)
             logger.info("Pipeline phase 2/3: Recognizer")
             recognizer_manifest = self.run_recognition(
-                input_path=str(rec_input_path),
+                input_path=rec_input_path,
                 output_path=str(recognizer_output_path),
+                _id_column="row_id",
+                _normalize=rec_normalize,
                 **r_kwargs,
             )
             results["recognizer"] = recognizer_manifest
@@ -1990,17 +2279,23 @@ class LocalJobRunner:
 
             a_kwargs: dict[str, Any] = dict(a_kw)
 
-            anon_input_path = (
-                recognizer_output_path
-                if run_recognizer or llm_recognizer_mode != "off"
-                else (transformer_output_path if run_transformer else transformer_input_path)
-            )
+            if run_recognizer or llm_recognizer_mode != "off":
+                anon_input_path = str(recognizer_output_path)
+                anon_normalize = False
+            elif run_transformer:
+                anon_input_path = str(transformer_output_path)
+                anon_normalize = False
+            else:
+                anon_input_path = first_stage_input_path
+                anon_normalize = first_stage_normalize
 
             anonymizer_manifest = self.run_anonymization(
-                input_path=str(anon_input_path),
+                input_path=anon_input_path,
                 output_path=str(anonymizer_output_path),
                 salt_path=str(salt_file),
                 key_path=str(key_file),
+                _id_column="row_id",
+                _normalize=anon_normalize,
                 **a_kwargs,
             )
             results["anonymizer"] = anonymizer_manifest
@@ -2017,7 +2312,6 @@ class LocalJobRunner:
                 transformer_output_path=transformer_output_path,
                 recognizer_output_path=recognizer_output_path,
                 anonymizer_output_path=anonymizer_output_path,
-                df_input=df_input,
             )
             results["visualizer_json"] = True
 
@@ -2163,7 +2457,8 @@ class LocalJobRunner:
     def _run_pipeline_streamed(  # noqa: PLR0915 # one linear plan; splitting it hides the chain
         self,
         *,
-        df_input: pd.DataFrame,
+        input_files: list[str],
+        input_info: PipelineInputInfo,
         output_path: Path,
         model_name: str,
         run_transformer: bool,
@@ -2216,7 +2511,7 @@ class LocalJobRunner:
                 contracts.append(("recognizer", RECOGNIZER_STAGE_COLUMNS))
         if run_anonymizer:
             contracts.append(("anonymizer", ANONYMIZER_STAGE_COLUMNS))
-        final_columns = validate_stage_columns(df_input.columns, contracts)
+        final_columns = validate_stage_columns(input_info.columns | {"text_hash", "row_id"}, contracts)
 
         # --- Resolve pools and CPU budget, then admit or fail fast ---
         pool_minimums: dict[str, float] = {}
@@ -2287,6 +2582,7 @@ class LocalJobRunner:
         ctx = ray.data.DataContext.get_current()
         ctx.checkpoint_config = None
 
+        input_rows = input_info.num_rows
         num_blocks = next(
             (
                 int(kw["override_num_blocks"])
@@ -2295,7 +2591,7 @@ class LocalJobRunner:
             ),
             max(32, int(node_cpus * 2)),
         )
-        num_blocks = min(num_blocks, max(1, len(df_input)))
+        num_blocks = min(num_blocks, max(1, input_rows))
 
         logger.info("Streamed pipeline plan:")
         logger.info(f"  Stages: {[name for name, _ in contracts]}")
@@ -2307,7 +2603,6 @@ class LocalJobRunner:
         )
 
         shutdown = GracefulShutdown()
-        input_rows = len(df_input)
         try:
             # ``from_pandas`` defaults to very few blocks and the first pool
             # starves, so split the source at creation — the same starvation the
@@ -2315,8 +2610,15 @@ class LocalJobRunner:
             # count here rather than calling ``.repartition()`` avoids an
             # all-to-all pass that would push the whole corpus (``note_text``
             # included) through the object store before the first stage starts.
-            source_cols = [c for c in df_input.columns if c in _streamed_source_columns(contracts)]
-            ds: Dataset = ray.data.from_pandas(df_input[source_cols], override_num_blocks=num_blocks)
+            source_cols = [c for c in _streamed_source_columns(contracts) if c in input_info.columns]
+            actual_source_cols = [input_info.lower_to_actual[c] for c in source_cols if c in input_info.lower_to_actual]
+            ds: Dataset = _read_stage_source(
+                input_files,
+                columns=actual_source_cols,
+                normalize=True,
+                num_blocks=num_blocks,
+                read_cpus=read_cpus,
+            )
 
             if use_llm:
                 llm_kwargs = {k: v for k, v in llm_recognizer_kwargs.items() if k not in ("num_actors", "num_cpus")}
@@ -2391,10 +2693,8 @@ class LocalJobRunner:
 
             # Row reconciliation. Count with pyarrow, never ds.count() — that
             # re-executes the whole chained plan.
-            import pyarrow.dataset as _pad
-
             output_files = list(sink_dir.glob("**/*.parquet"))
-            output_rows = _pad.dataset(output_files).count_rows() if output_files else 0
+            output_rows = pads.dataset(output_files).count_rows() if output_files else 0
             if output_rows == 0 and input_rows > 0:
                 raise RuntimeError(
                     f"Streamed pipeline wrote 0 rows from {input_rows} input rows — all batches failed. "
@@ -2450,41 +2750,6 @@ class LocalJobRunner:
     # Shared helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _prepare_pipeline_input(input_data: str | pd.DataFrame) -> pd.DataFrame:
-        """Load and normalize the pipeline input DataFrame.
-
-        Lowercases column names (so e.g. ``JITTER`` from BigQuery works) and
-        derives ``text_hash`` / ``patient_id`` / ``row_id``
-        when absent. Shared verbatim by both execution modes so the normalized
-        frame is identical.
-        """
-        from tide2.utils.text_processing import compute_text_hash
-
-        df_input = pd.read_parquet(input_data) if isinstance(input_data, str) else input_data.copy()
-
-        # Normalize column names to lowercase so that e.g. "JITTER" from BQ works
-        df_input.columns = df_input.columns.str.lower()
-
-        _check_deprecated_patient_uid(df_input.columns, location="input data")
-
-        if "note_text" not in df_input.columns:
-            raise ValueError("Input data must contain a 'note_text' column")
-
-        if "text_hash" not in df_input.columns:
-            df_input["text_hash"] = df_input["note_text"].apply(compute_text_hash)
-
-        # Ensure patient_id exists (use text_hash as fallback)
-        if "patient_id" not in df_input.columns:
-            df_input["patient_id"] = df_input["text_hash"]
-
-        if "row_id" not in df_input.columns:
-            df_input["row_id"] = (
-                df_input["text_hash"] + ":" + df_input["patient_id"].fillna("None").astype(str)
-            ).apply(lambda x: hashlib.sha256(x.encode()).hexdigest())
-
-        return df_input
-
     def _load_key(self, key_path: str) -> bytes:
         """Load a 32-byte key from a file (hex-encoded)."""
         with Path(key_path).open("r", encoding="utf-8") as f:
@@ -2515,94 +2780,43 @@ class LocalJobRunner:
         if not output_path.startswith("gs://"):
             Path(output_path).mkdir(parents=True, exist_ok=True)
 
-    def _build_recognizer_input_from_transformer(
-        self,
-        transformer_output_path: Path,
-        df_input: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """Assemble the recognizer input DataFrame from transformer-stage output.
-
-        The transformer stage now emits document-level rows directly
-        (text_hash, patient_id, note_text, recognizer_results_json) — there is no
-        chunk→reassembly step. This reads that output, preserves the passthrough
-        columns (patient_identifiers, patient_id, jitter, row_id), and attaches
-        patient_identifiers from df_input using row_id if missing. Falls back to
-        the raw input when no transformer output exists (e.g. the transformer
-        stage was skipped).
-        """
-        trans_files = list(transformer_output_path.glob("**/*.parquet"))
-        if trans_files:
-            dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
-            df_rec_in = pd.concat(dfs_trans, ignore_index=True)
-            _check_deprecated_patient_uid(df_rec_in.columns, location="transformer stage output")
-            keep = [
-                c
-                for c in [
-                    "text_hash",
-                    "patient_id",
-                    "note_text",
-                    "recognizer_results_json",
-                    "patient_identifiers",
-                    "jitter",
-                    "row_id",
-                ]
-                if c in df_rec_in.columns
-            ]
-            df_rec_in = df_rec_in[keep].copy()
-        else:
-            logger.info("No transformer output found; using input data for recognizer")
-            df_rec_in = df_input.copy()
-            if "recognizer_results_json" not in df_rec_in.columns:
-                df_rec_in["recognizer_results_json"] = "[]"
-
-        if "patient_identifiers" in df_input.columns and "patient_identifiers" not in df_rec_in.columns:
-            # Join by row_id when present in both frames; otherwise fall back to text_hash.
-            if "row_id" in df_input.columns and "row_id" in df_rec_in.columns:
-                id_map = df_input.drop_duplicates(subset="row_id").set_index("row_id")["patient_identifiers"]
-                df_rec_in["patient_identifiers"] = df_rec_in["row_id"].map(id_map).fillna("{}")
-            else:
-                id_map = df_input.drop_duplicates(subset="text_hash").set_index("text_hash")["patient_identifiers"]
-                df_rec_in["patient_identifiers"] = df_rec_in["text_hash"].map(id_map).fillna("{}")
-        elif "patient_identifiers" not in df_rec_in.columns:
-            df_rec_in["patient_identifiers"] = "{}"
-        return df_rec_in
-
     def _get_text_source(
         self,
         trans_files: list[Path],
-        df_input: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """Return a text_hash/note_text DataFrame, preferring transformer output."""
-        if trans_files:
-            dfs_trans = [pq.read_table(f).to_pandas() for f in trans_files]
-            df_trans = pd.concat(dfs_trans, ignore_index=True)
-            col_source = df_trans if "note_text" in df_trans.columns else df_input
-            return col_source[["text_hash", "note_text"]].drop_duplicates(subset=["text_hash"])
-        return df_input[["text_hash", "note_text"]]
+    ) -> dict[str, str]:
+        """Return a mapping of text_hash to note_text, preferring transformer output."""
+        if not trans_files:
+            return {}
+        schema = pq.read_schema(trans_files[0])
+        if "note_text" not in schema.names or "text_hash" not in schema.names:
+            return {}
+        tbl = pads.dataset(trans_files).to_table(columns=["text_hash", "note_text"])
+        text_map: dict[str, str] = {}
+        for row in tbl.to_pylist():
+            th = row.get("text_hash")
+            txt = row.get("note_text")
+            if th is not None and th not in text_map:
+                text_map[th] = txt or ""
+        return text_map
 
     def _write_recognizer_json_files(
         self,
         cli_recognizer_dir: Path,
         recognizer_output_path: Path,
         transformer_output_path: Path,
-        df_input: pd.DataFrame,
     ) -> None:
         """Write per-sample recognizer JSON files for the visualizer."""
         rec_files = list(recognizer_output_path.glob("**/*.parquet"))
         if not rec_files:
             return
-        dfs_rec = [pq.read_table(f).to_pandas() for f in rec_files]
-        df_rec = pd.concat(dfs_rec, ignore_index=True)
+        tbl_rec = pads.dataset(rec_files).to_table()
         trans_files = list(transformer_output_path.glob("**/*.parquet"))
-        text_source = self._get_text_source(trans_files, df_input)
-        df_merged = df_rec.merge(text_source, on="text_hash", how="left")
+        text_map = self._get_text_source(trans_files)
         count = 0
-        for _, row in df_merged.iterrows():
-            sample_id = str(row.get("text_hash", "unknown"))
-            note_text = row.get("note_text", "") if pd.notna(row.get("note_text")) else ""
-            results_json = (
-                row.get("recognizer_results_json", "[]") if pd.notna(row.get("recognizer_results_json")) else "[]"
-            )
+        for row in tbl_rec.to_pylist():
+            sample_id = str(row.get("text_hash") or "unknown")
+            note_text = row.get("note_text") or text_map.get(sample_id, "")
+            results_json = row.get("recognizer_results_json") or "[]"
             recognizer_results = json.loads(results_json) if results_json else []
             cli_data = {"key": sample_id, "value": note_text, "recognizer_results": recognizer_results}
             with (cli_recognizer_dir / f"{sample_id}.json").open("w", encoding="utf-8") as f:
@@ -2619,25 +2833,24 @@ class LocalJobRunner:
         anon_files = list(anonymizer_output_path.glob("**/*.parquet"))
         if not anon_files:
             return
-        dfs_anon = [pq.read_table(f).to_pandas() for f in anon_files]
-        df_anon = pd.concat(dfs_anon, ignore_index=True)
+        tbl_anon = pads.dataset(anon_files).to_table()
         count = 0
-        for _, row in df_anon.iterrows():
+        for row in tbl_anon.to_pylist():
             sample_id = next(
-                (str(row[col]) for col in ["text_hash"] if col in row.index and pd.notna(row[col])),
+                (str(row[col]) for col in ["text_hash"] if row.get(col) is not None),
                 "unknown",
             )
             anonymized_text = next(
                 (
-                    row[col]
+                    str(row[col])
                     for col in ["anonymized_note_text", "deid_note_text", "anonymized_text", "note_text"]
-                    if col in row.index and pd.notna(row[col])
+                    if row.get(col) is not None
                 ),
                 "",
             )
             items: list[Any] = []
             for col in ["anonymizer_results_json", "items", "anonymizer_results"]:
-                if col in row.index and pd.notna(row[col]):
+                if row.get(col) is not None:
                     items_data = row[col]
                     items = json.loads(items_data) if isinstance(items_data, str) else list(items_data)
                     break
@@ -2653,14 +2866,13 @@ class LocalJobRunner:
         transformer_output_path: Path,
         recognizer_output_path: Path,
         anonymizer_output_path: Path,
-        df_input: pd.DataFrame,
     ) -> None:
         """Write JSON files for tide2-visualizer (unified_interface.py)."""
         cli_recognizer_dir = output_path / "cli_recognizer_json"
         cli_anonymizer_dir = output_path / "cli_anonymizer_json"
         cli_recognizer_dir.mkdir(parents=True, exist_ok=True)
         cli_anonymizer_dir.mkdir(parents=True, exist_ok=True)
-        self._write_recognizer_json_files(cli_recognizer_dir, recognizer_output_path, transformer_output_path, df_input)
+        self._write_recognizer_json_files(cli_recognizer_dir, recognizer_output_path, transformer_output_path)
         self._write_anonymizer_json_files(cli_anonymizer_dir, anonymizer_output_path)
 
 
@@ -2805,7 +3017,7 @@ def run_transformer_simple(
 
 
 def run_pipeline_simple(
-    input_data: str | pd.DataFrame,
+    input_path: str | list[str],
     output_dir: str,
     model_name: str,
     *,
@@ -2826,7 +3038,7 @@ def run_pipeline_simple(
     Simple function to run the full de-identification pipeline.
 
     Args:
-        input_data: Parquet path or DataFrame with at least a 'note_text' column.
+        input_path: Parquet file path, directory, glob, or list of file paths with at least a 'note_text' column.
         output_dir: Output directory for all intermediate and final files.
         model_name: Transformer model name.
         run_transformer: Run GPU transformer NER stage.
@@ -2853,7 +3065,7 @@ def run_pipeline_simple(
 
     try:
         return runner.run_pipeline(
-            input_data=input_data,
+            input_path=input_path,
             output_dir=output_dir,
             model_name=model_name,
             run_transformer=run_transformer,

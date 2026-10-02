@@ -154,6 +154,8 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Runner CLI (Ray-based processing)
 
+> **Input format note:** `run_pipeline` and `tide2-runner run pipeline` accept **Parquet input only** (a file path, directory, glob pattern, list of file paths, or `gs://` URI). Passing a `pandas.DataFrame` is no longer supported. If you have a DataFrame in memory, write it to Parquet first: `df.to_parquet("input.parquet")`. When `patient_id` is omitted or null, notes receive random date jitter (matching standalone anonymization) rather than a hash-derived shift.
+
 ```bash
 # Run recognition locally
 tide2-runner run recognizer -i ./data/input -o ./data/output

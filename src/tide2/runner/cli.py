@@ -309,7 +309,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                         llm_kw[key] = val
 
             result = runner.run_pipeline(
-                input_data=args.input,
+                input_path=args.input,
                 output_dir=args.output,
                 model_name=args.model,
                 run_transformer=getattr(args, "run_transformer", True),

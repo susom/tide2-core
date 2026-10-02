@@ -13,7 +13,6 @@ No live Ray cluster is needed — the ``Dataset`` is a double that records the
 
 from unittest.mock import MagicMock
 
-import pandas as pd
 import pytest
 import ray
 
@@ -167,57 +166,3 @@ class TestBuildersAreSideEffectFree:
         ds = FakeDataset()
         runner.build_recognizer_stage(ds, batch_size=1, num_actors=1, ray_remote_args={})
         runner.build_anonymizer_stage(ds, actor_cls=MagicMock(), batch_size=1, num_actors=1, ray_remote_args={})
-
-
-class TestRecognizerInputAssembly:
-    """_build_recognizer_input_from_transformer must preserve passthrough columns and join by row_id."""
-
-    def test_preserves_transformer_passthrough_columns(self, runner, tmp_path):
-        trans_out = tmp_path / "trans"
-        trans_out.mkdir()
-        df_trans = pd.DataFrame(
-            {
-                "text_hash": ["h1"],
-                "note_text": ["note"],
-                "patient_id": ["p1"],
-                "recognizer_results_json": ["[]"],
-                "patient_identifiers": ['{"name": "Alice"}'],
-                "jitter": [10],
-                "row_id": ["r1"],
-            }
-        )
-        df_trans.to_parquet(trans_out / "part-0.parquet")
-
-        df_input = pd.DataFrame({"text_hash": ["h1"], "note_text": ["note"]})
-        res = runner._build_recognizer_input_from_transformer(trans_out, df_input)
-
-        assert res["row_id"].tolist() == ["r1"]
-        assert res["patient_id"].tolist() == ["p1"]
-        assert res["jitter"].tolist() == [10]
-        assert res["patient_identifiers"].tolist() == ['{"name": "Alice"}']
-
-    def test_joins_missing_identifiers_by_row_id_not_text_hash(self, runner, tmp_path):
-        trans_out = tmp_path / "trans"
-        trans_out.mkdir()
-        # Two different patients with identical note text (same text_hash, distinct row_id)
-        df_trans = pd.DataFrame(
-            {
-                "text_hash": ["h_shared", "h_shared"],
-                "note_text": ["normal exam", "normal exam"],
-                "patient_id": ["pat_A", "pat_B"],
-                "recognizer_results_json": ["[]", "[]"],
-                "row_id": ["row_A", "row_B"],
-            }
-        )
-        df_trans.to_parquet(trans_out / "part-0.parquet")
-
-        df_input = pd.DataFrame(
-            {
-                "text_hash": ["h_shared", "h_shared"],
-                "row_id": ["row_A", "row_B"],
-                "patient_identifiers": ['{"name": "Patient A"}', '{"name": "Patient B"}'],
-            }
-        )
-
-        res = runner._build_recognizer_input_from_transformer(trans_out, df_input)
-        assert res["patient_identifiers"].tolist() == ['{"name": "Patient A"}', '{"name": "Patient B"}']

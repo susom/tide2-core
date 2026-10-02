@@ -128,10 +128,13 @@ def read_output(output_dir):
 
 
 def run_mode(tmp_path, notes, mode):
+    in_file = tmp_path / "notes.parquet"
+    if not in_file.exists():
+        notes.to_parquet(in_file, index=False)
     runner = LocalJobRunner()
     try:
         manifest = runner.run_pipeline(
-            input_data=notes,
+            input_path=str(in_file),
             output_dir=str(tmp_path / mode),
             model_name="stub-model",
             salt_hex=SALT_HEX,

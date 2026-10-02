@@ -92,16 +92,16 @@ def streamed_env(monkeypatch, tmp_path):
     """Patch out Ray, the model, and the output counting for a plan-only run."""
     state = {}
 
-    def fake_from_pandas(frame, override_num_blocks=None):
-        state["source_columns"] = list(frame.columns)
-        state["rows"] = len(frame)
-        state["num_blocks"] = override_num_blocks
+    def fake_read_stage_source(files, columns=None, *, normalize=False, num_blocks=None, read_cpus=None):
+        state["source_columns"] = list(columns or [])
+        state["rows"] = state.get("input_rows", 2)
+        state["num_blocks"] = num_blocks
         ds = PlanDataset()
-        ds.state["rows"] = len(frame)
+        ds.state["rows"] = state["rows"]
         state["ds"] = ds
         return ds
 
-    monkeypatch.setattr(ray.data, "from_pandas", fake_from_pandas)
+    monkeypatch.setattr(lr, "_read_stage_source", fake_read_stage_source)
     monkeypatch.setattr(lr, "configure_data_context", lambda **_k: None)
     monkeypatch.setattr(
         ray.data.DataContext,
@@ -124,10 +124,27 @@ def streamed_env(monkeypatch, tmp_path):
     return state
 
 
+def make_input_info(df):
+    cols = {c.lower() for c in df.columns}
+    col_map = {c.lower(): c for c in df.columns}
+    actual_to_lower = {c: c.lower() for c in df.columns}
+    return lr.PipelineInputInfo(
+        columns=cols,
+        actual_to_lower=actual_to_lower,
+        lower_to_actual=col_map,
+        num_rows=len(df),
+        has_row_id="row_id" in cols,
+        has_text_hash="text_hash" in cols,
+        has_patient_id="patient_id" in cols,
+    )
+
+
 def run_streamed(runner, df, output_dir, **overrides):
     """Invoke the streamed path with sensible defaults for the plan tests."""
+    info = make_input_info(df) if isinstance(df, pd.DataFrame) else df
     kwargs = {
-        "df_input": df,
+        "input_files": ["fake.parquet"],
+        "input_info": info,
         "output_path": output_dir,
         "model_name": "some-model",
         "run_transformer": True,
@@ -170,17 +187,17 @@ class TestColumnContracts:
     def test_anonymizer_without_a_recognizer_stage_raises(self):
         """Skipping every recognizer stage leaves recognizer_results_json unavailable."""
         with pytest.raises(ValueError, match="recognizer_results_json"):
-            validate_stage_columns(["note_text", "text_hash"], [("anonymizer", ANONYMIZER_STAGE_COLUMNS)])
+            validate_stage_columns(["note_text", "text_hash", "row_id"], [("anonymizer", ANONYMIZER_STAGE_COLUMNS)])
 
     def test_anonymizer_accepts_precomputed_results(self):
         validate_stage_columns(
-            ["note_text", "text_hash", "recognizer_results_json"],
+            ["note_text", "text_hash", "row_id", "recognizer_results_json"],
             [("anonymizer", ANONYMIZER_STAGE_COLUMNS)],
         )
 
     def test_llm_only_chain_validates(self):
         validate_stage_columns(
-            ["note_text", "text_hash"],
+            ["note_text", "text_hash", "row_id"],
             [("llm_recognizer", LLM_RECOGNIZER_STAGE_COLUMNS), ("anonymizer", ANONYMIZER_STAGE_COLUMNS)],
         )
 
@@ -345,8 +362,8 @@ class TestPlanShape:
         assert streamed_env["ds"].state["executed"] is False
 
     def test_missing_columns_raise_before_any_operator_is_built(self, streamed_env):
-        bad = pd.DataFrame({"note_text": ["a"]})  # no text_hash
-        with pytest.raises(ValueError, match="text_hash"):
+        bad = pd.DataFrame({"patient_id": ["p"]})  # no note_text
+        with pytest.raises(ValueError, match="note_text"):
             run_streamed(lr.LocalJobRunner(), bad, streamed_env["output_dir"])
         assert "ds" not in streamed_env
 
@@ -368,21 +385,38 @@ class TestPlanShape:
 
 class TestFallbacks:
     @pytest.fixture
+    def in_file(self, tmp_path):
+        f = tmp_path / "in.parquet"
+        f.touch()
+        return str(f)
+
+    @pytest.fixture
     def discrete_spy(self, monkeypatch):
         """Make the discrete path a no-op that records it was reached."""
         seen = {}
 
-        def fake_prepare(input_data):
-            return pd.DataFrame(
-                {
-                    "note_text": ["a"],
-                    "text_hash": ["h"],
-                    "patient_id": ["p"],
-                    "row_id": ["r"],
-                }
+        def fake_inspect(files):
+            return lr.PipelineInputInfo(
+                columns={"note_text", "text_hash", "patient_id", "row_id"},
+                actual_to_lower={
+                    "note_text": "note_text",
+                    "text_hash": "text_hash",
+                    "patient_id": "patient_id",
+                    "row_id": "row_id",
+                },
+                lower_to_actual={
+                    "note_text": "note_text",
+                    "text_hash": "text_hash",
+                    "patient_id": "patient_id",
+                    "row_id": "row_id",
+                },
+                num_rows=1,
+                has_row_id=True,
+                has_text_hash=True,
+                has_patient_id=True,
             )
 
-        monkeypatch.setattr(lr.LocalJobRunner, "_prepare_pipeline_input", staticmethod(fake_prepare))
+        monkeypatch.setattr(lr, "_inspect_pipeline_input", fake_inspect)
         monkeypatch.setattr(lr.LocalJobRunner, "_init_ray", lambda _self: None)
         monkeypatch.setattr(lr.LocalJobRunner, "_apply_pipeline_recommendations", lambda *_a, **_k: None)
         monkeypatch.setattr(
@@ -413,11 +447,11 @@ class TestFallbacks:
         ],
     )
     def test_falls_back_to_discrete_with_a_corrected_manifest(
-        self, discrete_spy, tmp_path, caplog, overrides, expected_in_warning
+        self, discrete_spy, in_file, tmp_path, caplog, overrides, expected_in_warning
     ):
         with caplog.at_level("WARNING"):
             result = lr.LocalJobRunner().run_pipeline(
-                input_data=pd.DataFrame({"note_text": ["a"]}),
+                input_path=in_file,
                 output_dir=str(tmp_path),
                 model_name="m",
                 execution_mode="streamed",
@@ -428,9 +462,9 @@ class TestFallbacks:
         assert expected_in_warning in caplog.text
         assert "Falling back to discrete execution" in caplog.text
 
-    def test_no_fallback_for_a_plain_streamed_run(self, discrete_spy, tmp_path):
+    def test_no_fallback_for_a_plain_streamed_run(self, discrete_spy, in_file, tmp_path):
         result = lr.LocalJobRunner().run_pipeline(
-            input_data=pd.DataFrame({"note_text": ["a"]}),
+            input_path=in_file,
             output_dir=str(tmp_path),
             model_name="m",
             execution_mode="streamed",
@@ -438,9 +472,9 @@ class TestFallbacks:
         assert "streamed" in discrete_spy
         assert result["execution_mode"] == "streamed"
 
-    def test_explicit_enable_checkpoint_false_does_not_fall_back(self, discrete_spy, tmp_path):
+    def test_explicit_enable_checkpoint_false_does_not_fall_back(self, discrete_spy, in_file, tmp_path):
         lr.LocalJobRunner().run_pipeline(
-            input_data=pd.DataFrame({"note_text": ["a"]}),
+            input_path=in_file,
             output_dir=str(tmp_path),
             model_name="m",
             execution_mode="streamed",
@@ -448,17 +482,15 @@ class TestFallbacks:
         )
         assert "streamed" in discrete_spy
 
-    def test_discrete_is_the_default_and_is_recorded(self, discrete_spy, tmp_path):
-        result = lr.LocalJobRunner().run_pipeline(
-            input_data=pd.DataFrame({"note_text": ["a"]}), output_dir=str(tmp_path), model_name="m"
-        )
+    def test_discrete_is_the_default_and_is_recorded(self, discrete_spy, in_file, tmp_path):
+        result = lr.LocalJobRunner().run_pipeline(input_path=in_file, output_dir=str(tmp_path), model_name="m")
         assert result["execution_mode"] == "discrete"
         assert "streamed" not in discrete_spy
 
-    def test_unknown_mode_raises(self, discrete_spy, tmp_path):
+    def test_unknown_mode_raises(self, discrete_spy, in_file, tmp_path):
         with pytest.raises(ValueError, match="execution_mode"):
             lr.LocalJobRunner().run_pipeline(
-                input_data=pd.DataFrame({"note_text": ["a"]}),
+                input_path=in_file,
                 output_dir=str(tmp_path),
                 model_name="m",
                 execution_mode=cast(Any, "fused"),
