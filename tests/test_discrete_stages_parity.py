@@ -13,6 +13,7 @@ Covers:
 10. CLI support for fractional --num-gpus and --override-num-blocks.
 """
 
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -25,6 +26,7 @@ import tide2.runner.local_runner as lr
 from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.actors.recognizer import RecognizerWorker
 from tide2.actors.recognizer import _DeduplicateLogFilter
+from tide2.actors.transformer import BIOAggregationActor
 from tide2.actors.transformer import TransformerInferenceActor
 from tide2.runner.cli import main as cli_main
 from tide2.transformers.core import TransformerCore
@@ -305,6 +307,41 @@ def test_transformer_actor_offline_mode_derived_from_download_flag():
             raise ValueError(
                 f"Expected allow_huggingface_download=False, got {kwargs.get('allow_huggingface_download')}"
             )
+
+
+def test_transformer_actor_handles_pd_na_and_nulls():
+    """TransformerInferenceActor and BIOAggregationActor treat pd.NA/nulls safely without raising."""
+    import pandas as pd
+
+    actor = TransformerInferenceActor.__new__(TransformerInferenceActor)
+    actor._aggregate_bio = False
+    actor._log_gpu_mem = lambda _stage: None
+    actor._run_inference_raw_with_oom_recovery = lambda texts: (
+        [[{"entity": "B-X", "score": 1.0, "start": 0, "end": 4}]] * len(texts)
+    )
+
+    batch = {
+        "text_hash": ["h1", "h2", "h3"],
+        "note_text": [pd.NA, None, "Valid note"],
+        "patient_id": ["p1", "p2", "p3"],
+    }
+    out = actor(batch)
+    assert out["note_text"] == ["", "", "Valid note"]
+    assert json.loads(out["predictions_raw_json"][0]) == []
+    assert json.loads(out["predictions_raw_json"][1]) == []
+    assert len(json.loads(out["predictions_raw_json"][2])) > 0
+
+    agg_actor = BIOAggregationActor.__new__(BIOAggregationActor)
+    agg_actor._model_name = "test"
+    agg_actor._recognizer_name = "TEST_NER"
+    agg_actor._model_to_presidio_mapping = {}
+    agg_actor._ignore_labels = {"O"}
+
+    agg_out = agg_actor(out)
+    assert agg_out["note_text"] == ["", "", "Valid note"]
+    assert len(agg_out["recognizer_results_json"]) == 3
+    assert agg_out["recognizer_results_json"][0] == "[]"
+    assert agg_out["recognizer_results_json"][1] == "[]"
 
 
 # ---------------------------------------------------------------------------

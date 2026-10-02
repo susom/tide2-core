@@ -23,6 +23,7 @@ Examples:
         runner.shutdown()
 """
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -233,9 +234,19 @@ RECOGNIZER_STAGE_COLUMNS = StageColumns(
 )
 LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text"}),
-    optional=frozenset(),
+    optional=frozenset({"patient_identifiers", "patient_id", "jitter", "row_id"}),
     produces=frozenset(
-        {"text_hash", "note_text", "recognizer_results_json", "entity_count", "processing_status", "error_message"}
+        {
+            "text_hash",
+            "note_text",
+            "patient_id",
+            "row_id",
+            "recognizer_results_json",
+            "entity_count",
+            "processing_timestamp",
+            "processing_status",
+            "error_message",
+        }
     ),
 )
 ANONYMIZER_STAGE_COLUMNS = StageColumns(
@@ -466,7 +477,11 @@ class LocalJobRunner:
 
         # Disable uv runtime_env isolation hook so local workers directly inherit
         # the active environment without redundant per-worker venv creation
-        os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+        os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
+        with contextlib.suppress(Exception):
+            from ray._private import ray_constants
+
+            ray_constants.RAY_ENABLE_UV_RUN_RUNTIME_ENV = False
 
         # When dashboard is enabled, bind to 0.0.0.0 so it's accessible
         # from outside Docker containers
@@ -1008,9 +1023,10 @@ class LocalJobRunner:
         if num_actors is None:
             num_actors = self._auto_num_actors()
 
-        # Detect columns — LLM recognizer only needs text_hash and note_text
+        # Detect columns — LLM recognizer needs text_hash, note_text, and forwards patient metadata
         required_cols = ["text_hash", "note_text"]
-        columns = detect_columns(input_files[0], required_cols, [])
+        optional_cols = ["patient_id", "row_id", "jitter", "patient_identifiers"]
+        columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
         logger.info("LLM Recognition job starting")
@@ -2219,7 +2235,8 @@ class LocalJobRunner:
             ) = self._resolve_streamed_transformer_actor(model_name, transformer_kwargs)
             pool_minimums["transformer"] = float(t_remote_args.get("num_cpus", 0.0))
             if num_agg_actors:
-                pool_minimums["bio_aggregation"] = float(transformer_kwargs.get("agg_num_cpus") or 1.0)
+                agg_slot = float(transformer_kwargs.get("agg_num_cpus") or 1.0)
+                pool_minimums["bio_aggregation"] = num_agg_actors * agg_slot
 
         node_cpus = max(_alive_node_cpus() or [0.0])
 

@@ -184,6 +184,19 @@ class TestColumnContracts:
             [("llm_recognizer", LLM_RECOGNIZER_STAGE_COLUMNS), ("anonymizer", ANONYMIZER_STAGE_COLUMNS)],
         )
 
+    def test_llm_chain_preserves_patient_metadata(self):
+        available_after_llm = validate_stage_columns(
+            ["note_text", "text_hash", "patient_id", "row_id", "jitter", "patient_identifiers"],
+            [("llm_recognizer", LLM_RECOGNIZER_STAGE_COLUMNS)],
+        )
+        assert {"patient_id", "row_id", "jitter", "patient_identifiers"}.issubset(available_after_llm)
+
+        available_after_anon = validate_stage_columns(
+            ["note_text", "text_hash", "patient_id", "row_id", "jitter", "patient_identifiers"],
+            [("llm_recognizer", LLM_RECOGNIZER_STAGE_COLUMNS), ("anonymizer", ANONYMIZER_STAGE_COLUMNS)],
+        )
+        assert {"patient_id", "row_id", "jitter"}.issubset(available_after_anon)
+
     def test_final_columns_exclude_raw_note_text(self):
         assert "note_text" not in lr.FINAL_OUTPUT_COLUMNS
         assert ANONYMIZER_STAGE_COLUMNS.produces | {"row_id"} >= lr.FINAL_OUTPUT_COLUMNS
@@ -220,6 +233,34 @@ class TestAdmissionCheck:
         monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [8.0])
         with pytest.raises(ValueError, match=r"usable budget 7\.0"):
             check_streamed_admission({"a": 4.0, "b": 4.0})
+
+    def test_aggregation_pool_multiplies_num_agg_actors(self, monkeypatch, streamed_env, df):
+        """Admission check reserves num_agg_actors * agg_num_cpus for bio_aggregation."""
+        captured_minimums = {}
+
+        def fake_admission(pool_minimums):
+            captured_minimums.update(pool_minimums)
+            return 64.0
+
+        monkeypatch.setattr(lr, "check_streamed_admission", fake_admission)
+        monkeypatch.setattr(
+            lr.LocalJobRunner,
+            "_resolve_streamed_transformer_actor",
+            lambda _self, _model_name, t_kw: (
+                streamed_env["transformer_actor"],
+                3,
+                t_kw.get("num_agg_actors", 4),
+                {"num_gpus": 0.33, "num_cpus": 1.0},
+            ),
+        )
+        runner = lr.LocalJobRunner()
+        run_streamed(
+            runner,
+            df,
+            streamed_env["output_dir"],
+            transformer_kwargs={"num_agg_actors": 4, "agg_num_cpus": 1.5},
+        )
+        assert captured_minimums.get("bio_aggregation") == 6.0
 
 
 # ---------------------------------------------------------------------------

@@ -255,6 +255,8 @@ def _ray_cluster_totals() -> tuple[float, float] | None:
     try:
         import ray
 
+        if not ray.is_initialized():
+            return None
         res = ray.cluster_resources()
     except Exception:
         logger.debug("Ray cluster resources unavailable; falling back to a local probe", exc_info=True)
@@ -267,6 +269,8 @@ def _ray_alive_nodes() -> list[dict[str, Any]]:
     try:
         import ray
 
+        if not ray.is_initialized():
+            return []
         return [n for n in ray.nodes() if n.get("Alive", False)]
     except Exception:
         logger.debug("ray.nodes() unavailable; treating the cluster as one node", exc_info=True)
@@ -308,8 +312,8 @@ def _shapes_from_ray_nodes(nodes_data: list[dict[str, Any]]) -> list[NodeShape]:
             NodeShape(
                 cpu_count=float(resources.get("CPU", 0.0)),
                 gpu_count=gpu_count,
-                gpu_name=gpu_name if gpu_count > 0 else None,
-                vram_gb=vram if gpu_count > 0 else None,
+                gpu_name=gpu_name if (single_node and gpu_count > 0) else None,
+                vram_gb=vram if (single_node and gpu_count > 0) else None,
                 ram_gb=ram_gb,
             )
         )
@@ -481,9 +485,10 @@ def _small_box_transformer_recs(
 ) -> dict[str, Any]:
     """Transformer settings for a <=4-CPU box: every operator budgeted fractionally."""
     gpu_present = hw.cluster_gpu > 0
+    node_gpus = float(hw.node.gpu_count) if hw.node is not None else 1.0
     recs: dict[str, Any] = {
         "num_transformer_actors": 1,
-        "num_gpus": float(hw.cluster_gpu) if gpu_present else 0.0,
+        "num_gpus": node_gpus if gpu_present else 0.0,
         "transformer_cpus": 0.25,
         "read_cpus": 0.25,
         "write_cpus": 0.25,
@@ -534,7 +539,19 @@ def recommend_settings(
         anonymizer={},
         runner={},
     )
-    if hw.profile == "unknown":
+    if (
+        hw.profile == "unknown"
+        or len(hw.nodes) > 1
+        or hw.cluster_gpu > 1.0
+        or (hw.node is not None and hw.node.gpu_count > 1.0)
+    ):
+        if len(hw.nodes) > 1 or hw.cluster_gpu > 1.0 or (hw.node is not None and hw.node.gpu_count > 1.0):
+            logger.info(
+                "Hardware autotuning is restricted to single-node, single-GPU environments. "
+                "Multi-node or multi-GPU setup detected (nodes=%d, cluster_gpu=%.1f); withholding recommendations.",
+                len(hw.nodes),
+                hw.cluster_gpu,
+            )
         return empty
 
     if hw.profile in ("small-box-cpu", "small-box-gpu"):

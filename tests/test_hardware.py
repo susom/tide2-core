@@ -152,14 +152,48 @@ def test_cluster_vs_node_scaling():
     assert hw.profile == "gpu-workstation"
 
     rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    # num_actors scales with cluster CPUs (14 * 14 = 196)
-    assert rec.recognizer["num_actors"] == 196
-    # worker_num_cpus is a per-slot property and does NOT scale
-    assert rec.recognizer["worker_num_cpus"] == 1.0
+    # Autotuning is restricted to single-node, single-GPU; multi-node recommendations are withheld
+    assert rec.transformer == {}
+    assert rec.recognizer == {}
+    assert rec.anonymizer == {}
+    assert rec.runner == {}
 
-    # num_transformer_actors scales with cluster GPUs (14 * 3 = 42)
-    assert rec.transformer["num_transformer_actors"] == 42
-    assert rec.transformer["num_gpus"] == 0.33
+
+def test_multi_gpu_single_node_withholds_recommendations():
+    """Multi-GPU single-node setup withholds recommendations."""
+    hw = make_facts(cpu_count=128.0, gpu_count=2.0, gpu_name="NVIDIA L4", vram_gb=24.0)
+    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
+    assert rec.transformer == {}
+    assert rec.recognizer == {}
+    assert rec.anonymizer == {}
+    assert rec.runner == {}
+
+
+def test_ray_uninitialized_guard():
+    """detect_hardware does not auto-initialize Ray when Ray is stopped."""
+    import ray
+
+    if ray.is_initialized():
+        ray.shutdown()
+
+    hw = detect_hardware()
+    assert not ray.is_initialized()
+    assert hw.node is not None
+
+
+def test_multi_node_ray_shapes_withhold_gpu_model():
+    """_shapes_from_ray_nodes withholds gpu_name and vram_gb on multi-node clusters."""
+    from tide2.runner.hardware import _shapes_from_ray_nodes
+
+    fake_nodes = [
+        {"Alive": True, "Resources": {"CPU": 16.0, "GPU": 1.0, "memory": 64 * 1024**3}},
+        {"Alive": True, "Resources": {"CPU": 16.0, "GPU": 1.0, "memory": 64 * 1024**3}},
+    ]
+    shapes = _shapes_from_ray_nodes(fake_nodes)
+    assert len(shapes) == 2
+    for s in shapes:
+        assert s.gpu_name is None
+        assert s.vram_gb is None
 
 
 def test_heterogeneous_cluster_yields_empty_recommendations():
