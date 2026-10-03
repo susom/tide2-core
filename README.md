@@ -95,7 +95,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 ## Features
 
 ### Entity Recognition
-- **Transformer-based NER**: HuggingFace transformer models with direct batch inference (bypasses HF pipeline), BIO token aggregation, and chunk-to-document reassembly
+- **Transformer-based NER**: HuggingFace transformer models with direct batch inference (bypasses HF pipeline), token-accurate windowing of whole notes, and per-note BIO aggregation to document-level entities
 - **Regex recognizers**: Phone, URL/IP, Email, SSN, Address — replacements for Presidio defaults (10-100x faster)
 - **Healthcare-specific**: MRN, Accession Number, HAR code recognizers
 - **Known values detection**: Aho-Corasick based matching against patient databases
@@ -118,11 +118,13 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Ray-based Batch Processing
 - **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
-- **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor`, `ReassemblyActor` for `ray.data.map_batches`
-- **Two-stage GPU/CPU pipeline**: GPU inference returns raw BIO tokens; CPU actors aggregate them concurrently via Ray Data streaming
-- **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with batch tokenize → single GPU forward pass → offset-based extraction
-- **Adaptive GPU batching**: Auto-computes batch size from model config and free GPU memory; adjusts based on text lengths with VRAM-aware budgets (override via `--short-seq-budget`)
-- **OOM recovery**: Automatic batch splitting on CUDA out-of-memory errors
+- **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor` for `ray.data.map_batches`
+- **Two-stage GPU/CPU pipeline**: whole notes flow to the GPU actor (tokenize → token-window → forward), which returns raw BIO tokens; the CPU aggregation actor turns them into document-level `recognizer_results_json` concurrently via Ray Data streaming. There is no separate char-chunking stage and no separate reassembly stage — the actor's token-windowing is the single chunker.
+- **Single length authority**: the model's real tokenized context window (`MODEL_MAX_LENGTH`, pinned per model in `bert_transformer_configuration.json`) is the only sequence-length source. The per-window content-token budget is `MODEL_MAX_LENGTH` minus the tokenizer's special tokens; a model config missing `MODEL_MAX_LENGTH` fails fast rather than falling back to the tokenizer's unreliable sentinel.
+- **Direct inference**: Bypasses HuggingFace pipeline dispatch loop with a single batch tokenize → GPU forward pass → offset-based extraction. Tokenization happens **exactly once** per batch (ragged, no truncation, with char offsets); windowing and OOM retries reuse that single tokenization and never re-tokenize.
+- **Token-accurate windowing**: The GPU actor covers **every token of every note**. Any note that tokenizes past the per-window token budget is sliced into overlapping ≤-budget token windows instead of being truncated — the earlier char-approximation chunker (`1 token ≈ 4 chars`) plus truncation silently dropped the tail of token-dense notes (real clinical text runs ~2.2–3.2 chars/token, so a char-sized chunk can be well over 512 tokens and lose ~30% of its content), so PHI there was never detected or redacted. Because notes are windowed whole, char offsets are already document-relative; window predictions are merged back per note and overlap-region duplicates are removed by the aggregation stage (BIO raw-token tuples + span-level IoU).
+- **GPU batching**: Windows are forwarded at an operator-supplied batch size (`--gpu-batch-size`), which should be set for real runs. Within a single `__call__` the windows are length-sorted so multi-slice batches don't pad short windows to the batch max. There is no auto batch sizing or memory model — size the forward for the load and rely on OOM recovery as the safety net.
+- **OOM recovery**: On CUDA out-of-memory the GPU actor halves the batch and re-forwards the whole set over the **same** already-tokenized windows (never re-tokenizing) — a single owner of sub-batching. Recovery releases the failed forward's GPU tensors at the source so `empty_cache()` can actually reclaim between attempts and the retry converges instead of exhausting VRAM. The GPU allocator is also configured with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (via Ray `runtime_env`) as fragmentation headroom.
 - **Fault tolerance**: Actor restarts, task retries, graceful shutdown
 - **YAML config**: All CLI arguments can be specified in a YAML config file (`--config`)
 
@@ -131,10 +133,15 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **String parsers**: Name parsing/classification, address parsing, format detection
 - **Span metrics**: Gold vs ML evaluation, O(n log n) conflict resolution
 - **GCS cache**: Auto-download models from GCS to `~/.cache/tide2/`
-- **Model compilation**: `torch.compile` with mega-cache support for faster inference startup
+
+> **Note:** the batch inference pipeline runs **eager** (no `torch.compile`).
+> Compilation was measured to add nothing at the batch sizes this pipeline runs,
+> and its only wired mode (`reduce-overhead` / CUDA graphs) grew *reserved* VRAM
+> per input shape and leaked toward OOM under shape churn, so it was removed. A
+> stray `compiled_cache.bin` beside the model weights is ignored.
 
 ### Command Line Tools
-- **`tide2-runner`**: Ray-based single-node job runner with six job types: `recognizer`, `anonymizer`, `transformer`, `reassembly`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
+- **`tide2-runner`**: Ray-based single-node job runner with five job types: `recognizer`, `anonymizer`, `transformer`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
 - **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
 
 
@@ -147,6 +154,8 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Runner CLI (Ray-based processing)
 
+> **Input format note:** `run_pipeline` and `tide2-runner run pipeline` accept **Parquet input only** (a file path, directory, glob pattern, list of file paths, or `gs://` URI). Passing a `pandas.DataFrame` is no longer supported. If you have a DataFrame in memory, write it to Parquet first: `df.to_parquet("input.parquet")`. When `patient_id` is omitted or null, notes receive random date jitter (matching standalone anonymization) rather than a hash-derived shift.
+
 ```bash
 # Run recognition locally
 tide2-runner run recognizer -i ./data/input -o ./data/output
@@ -155,7 +164,7 @@ tide2-runner run recognizer -i ./data/input -o ./data/output
 tide2-runner run recognizer -i gs://bucket/input -o gs://bucket/output \
     --num-cpus 224 --num-actors 200
 
-# Run transformer NER on GPU
+# Run transformer NER on GPU (runs eager; the batch pipeline does not use torch.compile)
 tide2-runner run transformer -i ./data/input -o ./data/transformer_output \
     --model StanfordAIMI/stanford-deidentifier-v2 --batch-size 2048
 
@@ -165,6 +174,10 @@ tide2-runner run transformer --config config.yaml
 # Run the full pipeline (transformer -> recognizer -> anonymizer)
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --model StanfordAIMI/stanford-deidentifier-v2
+
+# Run discrete sequential stages with 32 blocks (optimized for 16-core, 1x L4 GPU):
+tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
+    --model StanfordAIMI/stanford-deidentifier-v2 --override-num-blocks 32
 
 # If you are running on Mac, you can use --object-store-gb option to set
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
@@ -176,16 +189,159 @@ tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
 
 # Run on a small box (e.g. 2-CPU Google Colab) WITHOUT deadlocking. Two fixes
 # are required together (see below): fractional CPUs AND --no-checkpoint.
-# GPU box (T4): the transformer actor is GPU-pinned, so budget read/flat-map/
-# write/agg fractionally; CPU-only box: also give the transformer actor ~C-1.
+# GPU box (T4): the transformer actor is GPU-pinned, so budget read/write/agg
+# fractionally; CPU-only box: also give the transformer actor ~C-1.
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --model StanfordAIMI/stanford-deidentifier-v2 \
     --num-actors 1 --cpus-per-actor 0.5 --worker-num-cpus 1.0 \
-    --read-cpus 0.25 --flat-map-cpus 0.25 --write-cpus 0.25 \
+    --read-cpus 0.25 --write-cpus 0.25 \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 ```
 
+#### Execution modes: `discrete` (default) vs `streamed`
+
+`tide2-runner run pipeline --execution-mode {discrete,streamed}` (and
+`LocalJobRunner.run_pipeline(execution_mode=...)`) chooses how the three stages
+are executed. **`discrete` is the default and the production mode; nothing about
+it changed.**
+
+| | `discrete` (default) | `streamed` |
+|---|---|---|
+| Ray Data executions | one per stage | one for the whole pipeline |
+| Stage boundary | Parquet on disk | blocks in the object store |
+| GPU/CPU overlap | none (stages are sequential) | yes — the GPU stage overlaps the CPU stages |
+| Files written | `02_`, `04_`, `06_` | `06_anonymizer_output` only |
+| Row-level resume (`--no-checkpoint` off) | yes | **no** — a mid-run failure re-runs GPU inference |
+| Multi-machine (stage 1 on a GPU box, 2/3 elsewhere) | yes — this is the point of the mode | no, refused |
+| Nodes with ≤ 4 CPUs | supported (see below) | refused |
+| `--llm-recognizer-mode merge` | yes | falls back to discrete |
+| `--produce-visualizer-json` | yes | falls back to discrete |
+| Return shape | per-stage manifests | `operator_stats` + row counts |
+
+> **Merge mode limitation:** In `--llm-recognizer-mode merge`, discrete regex and
+> LLM outputs are joined on `row_id` (`sha256(text_hash:patient_id)`). Input
+> datasets must have unique `(text_hash, patient_id)` records. Repeated identical
+> notes for the same patient will experience Cartesian join expansion; upstream
+> deduplication or unique patient/note IDs are required. See
+> [Running under an external orchestrator](#running-under-an-external-orchestrator).
+
+Use `streamed` for development, benchmarks, and single-box batches, where one
+cluster does all three stages. Stay on `discrete` for production, for anything
+multi-machine, for long-running or unattended jobs (you want resume), and on
+small boxes.
+
+The stages **pipeline**; they do not fuse. Ray only fuses `TaskPool → TaskPool`
+and `TaskPool → ActorPool`, and all three stages are actor pools, so they remain
+three operators streaming concurrently with blocks crossing the object store.
+The win is trading Parquet write+read for object-store transfer, plus overlap,
+plus paying Ray Data execution setup once instead of three times.
+
+Two consequences worth planning for:
+
+- **CPU admission.** All three pools are resident at once, so their minimum
+  reservations must fit on one node or nothing schedules. Streamed uses
+  autoscaling pools (`min_size`/`max_size`) and checks the budget against the
+  largest node *before* execution, raising a message that names the offending
+  operators instead of hanging at `0/1`. The check is a heuristic; the
+  execution-level no-progress guard is the real backstop.
+- **Memory.** `note_text` stays in the object store across all three operators,
+  so size `--object-store-gb` for it. If the object store overflows, Ray spills
+  — in plaintext — to its local spill directory. That is the same clinical text
+  already present on the host in memory, in the input Parquet, and (in discrete
+  mode) in the `02_`/`04_` intermediates, so plan host disk accordingly and
+  dispose of the host's storage under the same rules as the output directory.
+
+```bash
+# Chain the stages in one execution on a single box
+tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
+    --model StanfordAIMI/stanford-deidentifier-v2 --execution-mode streamed
+```
+
+#### Running under an external orchestrator
+
+This section is for people who launch many tide2 workers from a scheduler
+(Kubernetes, Airflow, a batch queue) and need a crashed worker to be relaunched
+without reprocessing notes it already finished. It applies to `discrete` mode.
+
+With checkpointing on (the default), re-running a stage on the same output
+location skips notes already written. The mechanism, and why the rules below
+follow from it, is described in the `_configure_checkpoint` docstring in the
+[API reference](#api-reference).
+
+**The contract.** tide2 does the resuming; the orchestrator keeps these four
+guarantees:
+
+| # | Guarantee | Why |
+|---|---|---|
+| 1 | Shards are disjoint: no note is in two shards. | tide2 does not deduplicate across jobs. |
+| 2 | Each shard has its own stable output location, reused by every retry. | The checkpoint lives next to the output (`<output>_ray_checkpoint`). A new location means a new start. |
+| 3 | At most one live attempt per shard. Launch a replacement only after the previous attempt is dead. | Ray's startup cleanup deletes the pending checkpoints and output files of any job using the same location, and committed IDs are loaded once at start. |
+| 4 | Retries use the same input, model, settings and keys. Change any of them and use a new `<run_id>`. | The checkpoint is keyed on `row_id` only, so it cannot tell that a note was processed with different settings. |
+
+No manifest and no lock are required. A lock only guards against a duplicate
+attempt, which guarantee 3 already rules out.
+
+**Recommended layout.** One location per shard under a run:
+
+```text
+gs://bucket/<run_id>/<shard>/                       # outputs, salt.bin, key.bin
+    02_transformer_output/  04_recognizer_output/  06_anonymizer_output/
+gs://bucket/<run_id>/<shard>/<stage>_ray_checkpoint  # per-stage checkpoints
+```
+
+```bash
+# One worker; the same command is used for every retry of this shard
+tide2-runner run pipeline \
+    -i gs://bucket/input/shard-0007.parquet \
+    -o gs://bucket/run-2026-10/shard-0007 \
+    --model StanfordAIMI/stanford-deidentifier-v2
+```
+
+Output locations may be a local path, a network mount (NFS, Filestore, gcsfuse;
+the same path must be visible on every node), or a `gs://` URI. `--execution-mode
+streamed` and `--produce-visualizer-json` need a local directory.
+
+**What happens when something fails.**
+
+| Event | Result | Action |
+|---|---|---|
+| Worker process crashes or is killed | Blocks in flight are discarded; committed blocks are kept. | Relaunch the same command. |
+| A Ray task fails and is retried inside a live job | Handled by Ray; a block is committed once. | None. |
+| Node is lost | Same as a crash. | Confirm the old attempt is dead, then relaunch the same command. |
+| Relaunch after the shard completed | Reads the input, writes nothing. | None. |
+| Two attempts live on one shard | One deletes the other's pending files; output can be lost or duplicated. | Prevent it (guarantee 3). |
+| Model, settings or keys changed | Notes already written are skipped and keep the old result. | Use a new `<run_id>`. |
+
+**`row_id`.** If the input has no `row_id`, tide2 derives it inside the read as
+`sha256(text_hash:patient_id)` (`"None"` for a null patient). It depends only on
+the note and the patient, so it is identical on every run and machine, and no
+extra copy of the input is written. Call `tide2.runner.local_runner.add_row_id`
+upstream to produce the same value.
+
+When the derived value is used, tide2 logs a WARNING: notes with the same text
+and `patient_id` share a `row_id`. On a first run each is processed. After an
+interruption and resume, once one of them has been committed the others are
+treated as already processed, even if their note IDs differ. **tide2 does not
+deduplicate.** If notes can repeat, supply a unique `row_id` per source row in
+your data preparation. If identical notes must land in the same shard, shard by a
+hash of `row_id`.
+
+**Do not**
+
+- share an output or checkpoint location between live jobs;
+- reuse a location after changing the model or keys;
+- rely on tide2 to deduplicate.
+
+**Cloud setup.** Every worker needs credentials for the bucket. `salt.bin` and
+`key.bin` are written under the run's output location, so access to that
+location also grants access to the key material. The `02_` and `04_`
+intermediates contain raw notes and need the same retention rules as the input.
+
 #### Why small boxes deadlock (and how to size knobs by hardware)
+
+This section is about **`discrete` mode**, which is fully supported on ≲4-CPU
+boxes and always has been. `streamed` is refused there outright — do not try to
+size these knobs for it.
 
 Ray Data runs every operator of a stage concurrently and, under Ray 2.55's
 reservation allocator, must reserve a minimum CPU slice for **every** eligible
@@ -194,7 +350,7 @@ the stage hangs forever at `0/1` (`backpressured:tasks(ResourceBudget)`). On a
 2-CPU box there are **two independent causes — both must be fixed together**:
 
 1. **Whole-CPU operator reservations.** Defaults reserve ~1 CPU per operator;
-   read + flat_map + actor + agg + write exceeds 2. Fix with fractional CPUs.
+   read + actor + agg + write exceeds 2. Fix with fractional CPUs.
 2. **The checkpoint shuffle.** Row-level resume injects a sort + repartition
    shuffle (extra operators) that re-triggers the deadlock *even with* fractional
    CPUs. Fix with `--no-checkpoint` (trades resume capability, not correctness).
@@ -204,14 +360,117 @@ on, so omitting them preserves large-VM behavior. Size them to fit the sum of a
 stage's *concurrent* operator reservations within the available CPUs (C = total CPUs):
 
 - **Big box (C ≳ 16)**: use defaults (omit all knobs).
-- **Transformer stage**: `--read-cpus`, `--flat-map-cpus`, `--write-cpus`,
+- **Transformer stage**: `--read-cpus`, `--write-cpus`,
   `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
   transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
   caps the actor's torch threads).
-- **Recognizer / anonymizer stages**: `--cpus-per-actor` (supervisor), `--worker-num-cpus`
-  (worker actor), `--read-cpus`, `--write-cpus`. Each pool slot needs supervisor +
-  worker CPUs, so budget both.
+- **Recognizer / anonymizer stages**: `--worker-num-cpus` (CPUs per worker actor),
+  `--read-cpus`, `--write-cpus`. Note: `--cpus-per-actor` is deprecated in favor of
+  `--worker-num-cpus`; both are additively resolved so existing configurations
+  reserve identical slot CPUs. Do not confuse actor CPUs (`--cpus-per-actor` /
+  `--worker-num-cpus`) with total cluster CPUs (`--num-cpus`).
 - **All stages on C ≲ 4**: add `--no-checkpoint`.
+
+On a `small-box-*` host the pipeline now applies both fixes for you — see
+*Hardware autotuning* below. The knobs above remain the way to override it.
+
+### Hardware autotuning
+
+`tide2-runner run pipeline` (and `LocalJobRunner.run_pipeline`) detect the cluster
+shape once and recommend per-stage settings from it, replacing the per-call
+hardware guesses that used to be scattered across the runner. `tide2.runner.hardware`
+is the only module that reads `ray.cluster_resources()`, `ray.nodes()`, or `psutil`
+for tuning.
+
+**Recommendations only fill knobs you left unset.** Any value you pass — Python
+kwarg, CLI flag, or YAML key — wins unconditionally and is never overridden,
+clamped, or corrected. Every run logs the resolved table, tagging each knob
+`USER`, `auto`, or `default`:
+
+```text
+Detected: 16 CPU | 1× NVIDIA L4 (22.5 GB) | 62.7 GB RAM | 1 node (homogeneous)
+Profile:  gpu-workstation   Model: stanford-med-hdr/tide2-sentry-clinical-ner (measured, L4)
+
+ stage        knob                     value   source
+ transformer  num_transformer_actors       3   auto
+ transformer  num_gpus                  0.33   auto
+ recognizer   num_actors                  14   auto
+ recognizer   worker_num_cpus            1.0   auto
+ transformer  gpu_batch_size              64   USER
+```
+
+**Opt out** with `--no-hardware-autotune` (CLI), `hardware_autotune: false`
+(YAML), or `hardware_autotune=False` (Python). The table is still logged, but
+nothing is applied and the previous hard-coded defaults run. Benchmark protocols
+should pass it — a benchmark whose settings change with the host is not a
+benchmark.
+
+#### Profiles
+
+Matched on `(gpu_present, cpu_count)` of the **node** shape, never the cluster
+total: fourteen 16-CPU GPU nodes are a `gpu-workstation` fleet, not one
+`large-cpu` box.
+
+| | `cpu ≤ 4` | `4 < cpu < 64` | `cpu ≥ 64` |
+|---|---|---|---|
+| **GPU present** | `small-box-gpu` | `gpu-workstation` ★ | `gpu-server` |
+| **No GPU** | `small-box-cpu` | `cpu-only` | `large-cpu` |
+
+★ the reference box (16 vCPU / 1× L4 24 GB / 64 GB RAM) and the only profile with
+end-to-end measurements behind it.
+
+- `small-box-*` emit fractional CPUs **and** `enable_checkpoint=False` together —
+  both are required to avoid the deadlock described above — plus a 1200 s hang
+  timeout, since cold model load dominates a short run.
+- `large-cpu` and `gpu-server` are **extrapolated** from reference-box ratios
+  (≈ `CPUs − 2` actors per node at 1.0 CPU each), not measured; they log as
+  `(extrapolated, unmeasured)`.
+- A **heterogeneous** cluster (more than one alive node shape) matches `unknown`
+  and emits nothing: averaging two machine types gives numbers correct for
+  neither. The run logs why and today's defaults stand.
+
+#### Batch sizes are recommended only where they were measured
+
+Transformer batch size depends on the *model*, not just the host, so the table is
+keyed by `(model, GPU family)`. **With no measured entry, no `gpu_batch_size` and
+no transformer `batch_size` are emitted** — the existing default stands and the
+table reports `source=default`. CPU-stage recommendations are model-independent
+and still apply. Two guards withhold even a measured entry: the node's VRAM must
+clear the measured peak plus a margin, and the GPU family must match (an L4
+sweep is evidence for an L4, not for a T4 or an A100).
+
+| Model | Measured | Recommends |
+|---|---|---|
+| `stanford-med-hdr/tide2-sentry-clinical-ner` | L4 24 GB (6.77 GB peak) | `gpu_batch_size=64`, `batch_size=512` |
+| `20260211_debertav3_finetuned` | same checkpoint, renamed | same as above; emits a `DeprecationWarning` |
+| all other registry entries | no | nothing |
+
+`20260211_debertav3_finetuned` is the pre-publication name for the canonical
+checkpoint. Both registry entries are kept intact because they differ in
+`DEFAULT_EXPLANATION`, which reaches recognizer output — switching names changes
+that string, so the deprecation warns and redirects rather than collapsing them.
+
+**To add a model**: run the sweep in `scripts/benchmark_stage_throughput.py` on
+the target GPU, record wall time and peak VRAM per batch size, and add one
+`MEASURED_MODELS` row in `src/tide2/runner/hardware.py`. Alias a name only on
+confirmed checkpoint identity (diff the registry entries), never on name
+similarity.
+
+### What happens when a run wedges
+
+Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
+
+- **Default timeout**: 600 seconds (~10× the slowest stage). If no operator in the
+  pipeline moves a block or emits an output for 600s, Ray Data raises `ExecutionTimeoutError`
+  and the run fails immediately rather than silently dropping rows.
+- **Raising or disabling the timeout**: For long wait times (e.g. cluster capacity delays
+  or unusually slow UDFs), raise the timeout via `--no-progress-timeout <seconds>`
+  (or in YAML config `no_progress_timeout_s: <seconds>`). Set `-1` to disable the guard.
+- **Legacy per-batch timeout**: `--batch-timeout` (formerly 120s) is deprecated and a no-op;
+  individual slow notes no longer cause entire batches to be discarded.
+- **Caveat on shuffle operators**: Ray Data's `NoProgressGuard` automatically disables itself
+  if the plan topology contains an `AllToAllOperator` or `HashShufflingOperatorBase`. Standard
+  pipeline stages and checkpointed pipelines retain active guard protection on primary execution.
 
 
 ### Interactive Visualizer
@@ -257,20 +516,18 @@ tide2/
 ├── recognizers/              # PII detection (Presidio EntityRecognizer subclasses)
 ├── anonymizers/              # PII replacement (Presidio Operator subclasses)
 ├── transformers/             # Core NER inference engine (TransformerCore)
-│   ├── core.py              # Model loading, direct inference, BIO aggregation
+│   ├── core.py              # Model loading, direct inference, tokenize+window primitive, BIO aggregation
 │   └── config.py            # Model configuration management
 ├── actors/                   # Ray actors for distributed batch processing
-│   ├── transformer.py       # GPU inference actor + CPU BIO aggregation actor
+│   ├── transformer.py       # GPU inference actor (tokenize→window→forward) + CPU aggregation actor
 │   ├── recognizer.py        # CPU recognizer actor
 │   ├── anonymizer.py        # CPU anonymizer actor
-│   ├── reassembly.py        # Chunk-to-document reassembly actor
 │   └── llm_recognizer.py    # LLM-based recognizer actor
 ├── cryptographic/            # FPE, key management, date jitter derivation
 ├── string_parsers/           # Name/address parsing, format detection
 ├── runner/                   # Ray-based single-node job runner + CLI
-│   ├── local_runner.py      # LocalJobRunner: transformer/recognizer/anonymizer/reassembly/pipeline/llm
+│   ├── local_runner.py      # LocalJobRunner: transformer/recognizer/anonymizer/pipeline/llm
 │   ├── cli.py               # tide2-runner CLI with YAML config support
-│   ├── transformer.py       # Document chunking and reassembly logic
 │   ├── fault_tolerance.py   # Actor restarts, graceful shutdown
 │   └── utils.py             # Runner utilities
 ├── cli/                      # Streamlit visualizer
@@ -353,6 +610,13 @@ Pages artifact.
 - Format-preserving encryption maintains data format during encryption
 - Key management supports generation, storage, and rotation
 - Anonymization strategies are designed to prevent re-identification
+- `--execution-mode streamed` keeps raw `note_text` in Ray's object store for the
+  whole run and may spill it, in plaintext, to Ray's local spill directory. The
+  host is the trust boundary in either mode — it already holds the input Parquet
+  and, in `discrete` mode, the `02_`/`04_` intermediates — so size host disk for
+  it and dispose of the host's storage under the same rules as the output
+  directory. If you point Ray's spill directory at a network mount or an
+  object-store FUSE path, that data leaves the host; keep it on local storage.
 
 ## Contributing
 

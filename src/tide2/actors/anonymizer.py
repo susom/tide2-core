@@ -13,17 +13,15 @@ Architecture:
 
 Output columns:
     - text_hash: SHA256 hash of original note_text
-    - patient_uid: Patient identifier (passed through from input)
+    - patient_id: Patient identifier (passed through from input)
     - anonymized_note_text: The anonymized text
     - anonymizer_results_json: JSON with anonymization details
     - entity_count: Number of entities anonymized
     - processing_timestamp: ISO timestamp of processing
 """
 
-import contextlib
 import hashlib
 import logging
-import math
 import os
 import secrets
 from datetime import UTC
@@ -31,9 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import orjson
-import pandas as pd
 import ray
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
@@ -50,6 +46,8 @@ from tide2.anonymizers import presidio_patches
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 
 logger = logging.getLogger(__name__)
@@ -57,46 +55,17 @@ logger = logging.getLogger(__name__)
 # Key size requirements
 REQUIRED_KEY_SIZE = 32
 
-# Per-note timeout - worker is killed if exceeded
-# 60s is sufficient based on benchmarks; anything longer indicates a hang
-NOTE_PROCESSING_TIMEOUT_SECONDS = 60
-
 # Chunk size for anonymization: notes longer than this are split into chunks
 # to avoid O(n*m) string concatenation in Presidio's TextReplaceBuilder.
 # Must match or exceed recognizer chunk size so entities don't cross boundaries.
 MAX_ANON_CHUNK_SIZE = 100_000
 
 
-class NoteProcessingTimeoutError(Exception):
-    """Raised when note processing exceeds the timeout limit."""
-
-    pass
-
-
-def _is_null(value: Any) -> bool:
-    """Check if a scalar value is null/NaN (handles None, numpy NaN, and pandas NA)."""
-    if value is None:
-        return True
-    with contextlib.suppress(Exception):
-        res = pd.isna(value)
-        if isinstance(res, (bool, np.bool_)):
-            return bool(res)
-    with contextlib.suppress(TypeError, ValueError):
-        if isinstance(value, float) and math.isnan(value):
-            return True
-        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
-            return True
-    return False
-
-
-@ray.remote
 class AnonymizerWorker:
     """
-    Ray Actor that does the actual anonymization processing.
+    Worker class that executes anonymization processing directly under Ray Data.
 
-    This worker holds the AnonymizerEngine state and processes individual notes.
-    It is managed by AnonymizerSupervisor which handles timeouts by killing
-    and respawning this worker if a note hangs.
+    This worker holds the AnonymizerEngine state and processes batches of notes.
 
     Attributes:
         anonymizer_engine: The Presidio AnonymizerEngine instance.
@@ -109,6 +78,7 @@ class AnonymizerWorker:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -120,7 +90,13 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
+        from tide2.actors import check_deprecated_actor_kwargs
+
+        check_deprecated_actor_kwargs(kwargs, "AnonymizerWorker")
+
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
 
@@ -160,9 +136,9 @@ class AnonymizerWorker:
         logger.info("AnonymizerWorker initialized with Presidio AnonymizerEngine")
 
     @staticmethod
-    def compute_text_hash(text: str) -> str:
+    def compute_text_hash(text: str | None) -> str:
         """Compute SHA256 hash of text."""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
     def _create_base_operators(self) -> dict[str, OperatorConfig]:
         """Create base operator configuration with the provided keys."""
@@ -233,7 +209,7 @@ class AnonymizerWorker:
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key},
             ),
-            # ACC_NUM is handled separately with per-note patient_uid
+            # ACC_NUM is handled separately with per-note patient_id
             # See _create_operators_for_note()
             "ID": OperatorConfig(
                 "hips_alphanumeric",
@@ -248,18 +224,20 @@ class AnonymizerWorker:
     def _create_operators_for_note(
         self,
         date_jitter: int | None = None,
-        patient_uid: Any = None,
+        patient_id: Any = None,
+        **kwargs: Any,
     ) -> dict[str, OperatorConfig]:
         """
         Create operators including per-note parameters.
 
         Args:
             date_jitter: Jitter value for date anonymization.
-            patient_uid: Patient UID used as entity param for ACC_NUM hashing.
+            patient_id: Patient ID used as entity param for ACC_NUM hashing.
 
         Returns:
             Dictionary of operator configurations for this note.
         """
+        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker._create_operators_for_note")
         operators = self._base_operators.copy()
 
         # Random jitter between 4-60 days if not provided
@@ -273,18 +251,20 @@ class AnonymizerWorker:
             }
         )
 
-        # Convert numeric patient_uid to string, map null/NaN to None
-        clean_patient_uid: str | None = None
-        if not _is_null(patient_uid):
-            clean_patient_uid = str(patient_uid)
+        # Convert numeric patient_id to string, map null/NaN/nan/none to None
+        clean_patient_id: str | None = None
+        if not is_null(patient_id):
+            val_str = str(patient_id).strip()
+            if val_str.lower() not in ("nan", "none", "null", ""):
+                clean_patient_id = val_str
 
-        # ACC_NUM uses accession_number_hash with per-note patient_uid as SQL entity
+        # ACC_NUM uses accession_number_hash with per-note patient_id as SQL entity
         operators["ACC_NUM"] = OperatorConfig(
             "accession_number_hash",
             {
                 "salt": self.acc_num_salt,
                 "study_id": self.acc_num_study_id,
-                "patient_uid": clean_patient_uid,
+                "patient_id": clean_patient_id,
             },
         )
 
@@ -318,7 +298,7 @@ class AnonymizerWorker:
             logger.warning(f"Failed to parse recognizer results: {e}")
             return []
 
-    def _compute_jitter_for_patient(self, patient_uid: Any) -> int:
+    def _compute_jitter_for_patient(self, patient_id: Any = None, **kwargs: Any) -> int:
         """
         Compute deterministic jitter for a patient when not provided.
 
@@ -326,18 +306,21 @@ class AnonymizerWorker:
         consistent jitter for the same patient across runs.
 
         Args:
-            patient_uid: Patient identifier. If None, NaN, or empty,
+            patient_id: Patient identifier. If None, NaN, or empty,
                 generates a random jitter.
 
         Returns:
             Integer jitter value in days.
         """
-        if _is_null(patient_uid) or str(patient_uid).strip() == "":
-            # Fallback to random jitter if no patient ID
+        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker._compute_jitter_for_patient")
+        if is_null(patient_id):
+            return secrets.randbelow(357) - 178  # Random between -178 and +178
+        val_str = str(patient_id).strip()
+        if val_str.lower() in ("nan", "none", "null", ""):
             return secrets.randbelow(357) - 178  # Random between -178 and +178
 
         return derive_date_jitter(
-            patient_id=str(patient_uid),
+            patient_id=val_str,
             salt=self.salt,
             key=self.key,
             max_jitter_days=180,
@@ -451,8 +434,9 @@ class AnonymizerWorker:
         note_text: str,
         original_text_hash: str,
         recognizer_results_json: str | list | None,
-        patient_uid: str | None,
-        jitter: int | None,
+        patient_id: str | None = None,
+        jitter: int | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """
         Process a single note and return results.
@@ -464,18 +448,19 @@ class AnonymizerWorker:
             note_text: The note text to anonymize.
             original_text_hash: SHA256 hash of the note.
             recognizer_results_json: Pre-computed recognizer results (JSON string).
-            patient_uid: Patient identifier.
+            patient_id: Patient identifier.
             jitter: Per-note jitter value (computed if None/NaN).
 
         Returns:
             Dictionary with processing results for this note.
         """
+        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker.process_note")
         # Compute jitter from patient ID if not provided or if NaN
-        jitter_missing = _is_null(jitter)
+        jitter_missing = is_null(jitter)
         if jitter_missing:
             if self.jitter_required:
                 raise ValueError(f"Jitter value is required but missing for note {original_text_hash[:16]}")
-            jitter = self._compute_jitter_for_patient(patient_uid)
+            jitter = self._compute_jitter_for_patient(patient_id)
 
         # Parse recognizer results
         recognizer_results = self._parse_recognizer_results(recognizer_results_json)
@@ -500,8 +485,8 @@ class AnonymizerWorker:
             text=note_text,
         )
 
-        # Create operators with jitter and per-note patient_uid
-        operators = self._create_operators_for_note(jitter, patient_uid)
+        # Create operators with jitter and per-note patient_id
+        operators = self._create_operators_for_note(jitter, patient_id)
 
         # Use chunked anonymization for long notes to avoid O(n*m) string copies
         if len(note_text) > MAX_ANON_CHUNK_SIZE:
@@ -534,7 +519,7 @@ class AnonymizerWorker:
 
         return {
             "text_hash": original_text_hash,
-            "patient_uid": patient_uid,
+            "patient_id": patient_id,
             "anonymized_note_text": anonymized_text,
             "anonymizer_results_json": anonymizer_json,
             "entity_count": entity_count,
@@ -548,9 +533,9 @@ class AnonymizerWorker:
 
         Called by AnonymizerSupervisor to avoid per-note ray.get() overhead.
 
-        Input columns are read into ``input_*`` locals (e.g. ``input_patient_uids``)
+        Input columns are read into ``input_*`` locals (e.g. ``input_patient_ids``)
         and kept distinct from the output accumulators they feed (e.g.
-        ``patient_uids``). This separation is deliberate: collapsing an input column
+        ``patient_ids``). This separation is deliberate: collapsing an input column
         and its output accumulator onto one name appends results back onto the input
         list, producing a ragged result dict that Ray silently drops at block-build
         time (0-row output).
@@ -563,7 +548,7 @@ class AnonymizerWorker:
             has the same length (one entry per successfully processed note).
         """
         original_text_hashes = []
-        patient_uids = []
+        patient_ids = []
         anonymized_texts = []
         anonymizer_results_json_list = []
         entity_counts = []
@@ -572,17 +557,19 @@ class AnonymizerWorker:
         row_ids = []
 
         cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="AnonymizerWorker.process_batch")
         batch_size = len(cols["note_text"])
         jitters = cols.get("jitter", [None] * batch_size)
-        input_patient_uids = cols.get("patient_uid", [None] * batch_size)
+        input_patient_ids = cols.get("patient_id", [None] * batch_size)
         input_row_ids = cols.get("row_id", [None] * batch_size)
         recognizer_results_list = cols.get("recognizer_results_json", [None] * batch_size)
 
         note_texts = cols["note_text"]
         for i in range(batch_size):
-            note_text = note_texts[i]
+            raw_note = note_texts[i]
+            note_text = "" if is_null(raw_note) else str(raw_note)
             recognizer_results_json = recognizer_results_list[i] if i < len(recognizer_results_list) else None
-            patient_uid = input_patient_uids[i] if i < len(input_patient_uids) else None
+            patient_id = input_patient_ids[i] if i < len(input_patient_ids) else None
             jitter = jitters[i] if i < len(jitters) else None
 
             original_text_hash = self.compute_text_hash(note_text)
@@ -594,11 +581,11 @@ class AnonymizerWorker:
                     note_text=note_text,
                     original_text_hash=original_text_hash,
                     recognizer_results_json=recognizer_results_json,
-                    patient_uid=patient_uid,
+                    patient_id=patient_id,
                     jitter=jitter,
                 )
                 original_text_hashes.append(result["text_hash"])
-                patient_uids.append(result["patient_uid"])
+                patient_ids.append(result["patient_id"])
                 anonymized_texts.append(result["anonymized_note_text"])
                 anonymizer_results_json_list.append(result["anonymizer_results_json"])
                 entity_counts.append(result["entity_count"])
@@ -611,32 +598,35 @@ class AnonymizerWorker:
                 )
                 continue
 
+        batch_timestamp = datetime.now(UTC).isoformat()
         result = {
             "text_hash": original_text_hashes,
-            "patient_uid": patient_uids,
+            "patient_id": patient_ids,
             "anonymized_note_text": anonymized_texts,
             "anonymizer_results_json": anonymizer_results_json_list,
             "entity_count": entity_counts,
+            "processing_timestamp": [batch_timestamp] * len(original_text_hashes),
             "processing_status": processing_statuses,
             "error_message": error_messages,
         }
         # Preserve row_id for checkpointing when input batch has the column
-        if "row_id" in batch:
+        if "row_id" in cols:
             result["row_id"] = row_ids
         return result
+
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+        """Process a batch of notes directly under Ray Data map_batches."""
+        return self.process_batch(batch)
 
 
 class AnonymizerSupervisor:
     """
-    Supervisor that wraps AnonymizerWorker with batch-level timeout.
+    Deprecated supervisor shim for backwards compatibility.
 
-    This class is used by Ray Data's map_batches(). It sends the entire batch
-    to the worker in a single remote call to avoid per-note IPC overhead.
-    If the batch times out, the worker is killed and respawned.
+    Delegates directly to AnonymizerWorker in-process. Ray Data now drives
+    AnonymizerWorker directly with hang protection provided by Ray Data's
+    execution-level no-progress timeout.
     """
-
-    # Batch timeout: generous enough for large/slow batches, short enough to detect hangs.
-    BATCH_TIMEOUT_SECONDS = 120
 
     def __init__(
         self,
@@ -644,137 +634,49 @@ class AnonymizerSupervisor:
         key: bytes,
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
-        timeout: int = NOTE_PROCESSING_TIMEOUT_SECONDS,
         jitter_required: bool = False,
-        worker_num_cpus: int | float | None = None,
+        **kwargs: Any,
     ) -> None:
         """
-        Initialize supervisor with a worker actor.
+        Initialize supervisor shim (deprecated).
 
         Args:
             salt: 32-byte salt for HIPS anonymizers.
             key: 32-byte key for HIPS anonymizers.
             acc_num_salt: Salt for accession number hashing.
             acc_num_study_id: Study ID for accession number hashing.
-            timeout: Legacy per-note timeout (kept for backwards compatibility).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
-            worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
-                default (1). Set lower to fit small boxes.
+            **kwargs: Deprecated parameters. Passing any deprecated argument
+                will raise a ValueError with a deprecation warning.
         """
-        self.salt = salt
-        self.key = key
-        self.acc_num_salt = acc_num_salt
-        self.acc_num_study_id = acc_num_study_id
-        self.timeout = timeout
-        self.jitter_required = jitter_required
-        self._worker_num_cpus = worker_num_cpus
-        self.worker = self._spawn_worker()
-        self.worker_kills = 0
-        logger.info(
-            f"AnonymizerSupervisor initialized with {self.BATCH_TIMEOUT_SECONDS}s batch timeout, "
-            f"worker_num_cpus={self._worker_num_cpus}"
-        )
+        import warnings
 
-    def _spawn_worker(self) -> ray.actor.ActorHandle:
-        """Create a new AnonymizerWorker actor, applying the CPU override when set."""
-        cls = AnonymizerWorker
-        if self._worker_num_cpus is not None:
-            cls = cls.options(num_cpus=self._worker_num_cpus)
-        return cls.remote(
-            salt=self.salt,
-            key=self.key,
-            acc_num_salt=self.acc_num_salt,
-            acc_num_study_id=self.acc_num_study_id,
-            jitter_required=self.jitter_required,
-        )
+        from tide2.actors import check_deprecated_actor_kwargs
 
-    @staticmethod
-    def compute_text_hash(text: str) -> str:
-        """Compute SHA256 hash of text."""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        warnings.warn(
+            "AnonymizerSupervisor is deprecated and will be removed in a future release. "
+            "Pass AnonymizerWorker (or AnonymizerActor) directly to map_batches.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        check_deprecated_actor_kwargs(kwargs, "AnonymizerSupervisor")
+        self.worker = AnonymizerWorker(
+            salt=salt,
+            key=key,
+            acc_num_salt=acc_num_salt,
+            acc_num_study_id=acc_num_study_id,
+            jitter_required=jitter_required,
+        )
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """
-        Process a batch of notes via a single remote call to worker.
-
-        Sends the entire batch to worker.process_batch() in one ray.get().
-        If timeout occurs, kills worker, respawns, and marks all notes as failed.
-
-        Args:
-            batch: Dictionary with columnar data from Ray Data.
-
-        Returns:
-            Dictionary with processed results in columnar format.
-        """
-        cols = BatchColumns(batch)
-        batch_size = len(cols["note_text"])
-        batch_timestamp = datetime.now(UTC).isoformat()
-
-        try:
-            ref = self.worker.process_batch.remote(batch)
-            result = ray.get(ref, timeout=self.BATCH_TIMEOUT_SECONDS)
-
-            # Add timestamp column (use actual result size since failed notes are skipped)
-            result_size = len(result["text_hash"])
-            result["processing_timestamp"] = [batch_timestamp] * result_size
-
-        except ray.exceptions.GetTimeoutError:
-            logger.warning(f"Batch timeout after {self.BATCH_TIMEOUT_SECONDS}s ({batch_size} notes), killing worker")
-            ray.kill(self.worker)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"BatchTimeout: exceeded {self.BATCH_TIMEOUT_SECONDS}s for {batch_size} notes",
-            )
-
-        except ray.exceptions.ActorDiedError as e:
-            logger.warning("Worker died anonymizing batch of %d notes, respawning", batch_size)
-            self.worker = self._spawn_worker()
-            self.worker_kills += 1
-
-            return self._failed_batch(
-                batch,
-                f"ActorDiedError: {str(e)[:400]}",
-            )
-
-        except Exception as e:
-            logger.exception("Error anonymizing batch of %d notes", batch_size)
-
-            return self._failed_batch(
-                batch,
-                f"{type(e).__name__}: {str(e)[:400]}",
-            )
-
-        else:
-            return result
-
-    def _failed_batch(self, batch: dict[str, Any], error: str) -> dict[str, list[Any]]:
-        """Log failure and return empty result so failed notes are not checkpointed."""
-        cols = BatchColumns(batch)
-        for note_text in cols["note_text"]:
-            th = self.compute_text_hash(note_text)
-            logger.error("Note %s failed: %s (will retry on next run)", th[:16], error)
-        result = {
-            "text_hash": [],
-            "patient_uid": [],
-            "anonymized_note_text": [],
-            "anonymizer_results_json": [],
-            "entity_count": [],
-            "processing_timestamp": [],
-            "processing_status": [],
-            "error_message": [],
-        }
-        # Preserve row_id column in output schema when input has it
-        if "row_id" in batch:
-            result["row_id"] = []
-        return result
+        """Delegate batch processing directly to in-process worker."""
+        return self.worker.process_batch(batch)
 
 
-# Backwards compatibility alias
-AnonymizerActor = AnonymizerSupervisor
+# Backwards compatibility aliases
+AnonymizerActor = AnonymizerWorker
+AnonymizerWorkerActor = ray.remote(AnonymizerWorker)
 
 
 def _load_key_material(key_material: bytes | str | os.PathLike) -> bytes:
@@ -792,10 +694,10 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
-    worker_num_cpus: int | float | None = None,
-) -> type[AnonymizerSupervisor]:
+    **kwargs: Any,
+) -> type[AnonymizerWorker]:
     """
-    Factory function to create an AnonymizerSupervisor class with specific keys.
+    Factory function to create an AnonymizerWorker subclass with specific keys.
 
     This unified factory accepts keys as either raw bytes or file paths,
     making it work for both local/batch processing and cluster modes.
@@ -807,8 +709,8 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
-        worker_num_cpus: CPUs to reserve for each worker actor. None = Ray
-            default (1). Set lower to fit small boxes.
+        **kwargs: Deprecated parameters. Passing any deprecated argument
+            will raise a ValueError with a deprecation warning.
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -823,12 +725,15 @@ def create_anonymizer_actor(
         # Mixed
         Actor = create_anonymizer_actor(Path("/keys/salt.key"), key_bytes)
     """
+    from tide2.actors import check_deprecated_actor_kwargs
+
+    check_deprecated_actor_kwargs(kwargs, "create_anonymizer_actor")
     # Load key material (handles both bytes and file paths)
     salt_bytes = _load_key_material(salt)
     key_bytes = _load_key_material(key)
 
-    class ConfiguredAnonymizerActor(AnonymizerSupervisor):
-        """Pre-configured AnonymizerSupervisor with captured key material."""
+    class ConfiguredAnonymizerActor(AnonymizerWorker):
+        """Pre-configured AnonymizerWorker with captured key material."""
 
         def __init__(self):
             super().__init__(
@@ -837,7 +742,6 @@ def create_anonymizer_actor(
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
                 jitter_required=jitter_required,
-                worker_num_cpus=worker_num_cpus,
             )
 
     return ConfiguredAnonymizerActor

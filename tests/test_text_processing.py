@@ -1,4 +1,6 @@
-"""Tests for utils/text_processing.py — chunking, BIO aggregation, span reconstruction."""
+"""Tests for utils/text_processing.py — chunking, BIO aggregation, span dedup."""
+
+import itertools
 
 import pytest
 
@@ -10,7 +12,6 @@ from tide2.utils.text_processing import aggregate_bio_tokens
 from tide2.utils.text_processing import calculate_iou
 from tide2.utils.text_processing import compute_text_hash
 from tide2.utils.text_processing import deduplicate_overlapping_entities
-from tide2.utils.text_processing import reconstruct_document_spans
 from tide2.utils.text_processing import sort_tokens_by_position
 from tide2.utils.text_processing import split_text_to_word_chunks
 
@@ -66,6 +67,19 @@ class TestSplitTextToWordChunks:
         result = split_text_to_word_chunks(1000, 50, 10)
         # Last chunk should reach end of text
         assert result[-1][1] == 1000
+
+    def test_long_note_chunks_cover_to_final_char(self):
+        # Regression for C2: with production token-space params (CHUNK_SIZE=512,
+        # CHUNK_OVERLAP_SIZE=40), a long note must be fully covered to its last
+        # character, and consecutive chunks must overlap (no gaps in coverage).
+        char_len = 5170  # ~1292 estimated tokens, well past model_max_length
+        result = split_text_to_word_chunks(char_len, 512, 40)
+        assert len(result) > 1
+        assert result[0][0] == 0
+        assert result[-1][1] == char_len
+        # No gaps: each chunk starts before the previous chunk ends.
+        for prev, curr in itertools.pairwise(result):
+            assert curr[0] < prev[1]
 
 
 class TestSortTokensByPosition:
@@ -218,43 +232,6 @@ class TestFinalizeSpan:
     def test_empty_raises(self):
         with pytest.raises(ValueError, match="empty"):
             _finalize_span([], "text")
-
-
-class TestReconstructDocumentSpans:
-    def test_single_chunk(self):
-        chunks = [
-            {
-                "chunk_id": 0,
-                "char_offset_start": 0,
-                "predictions": [
-                    {"entity_group": "PERSON", "score": 0.9, "start": 0, "end": 4},
-                ],
-            }
-        ]
-        result = reconstruct_document_spans(chunks, "John lives in Seattle")
-        assert len(result) == 1
-        assert result[0]["start"] == 0
-        assert result[0]["text"] == "John"
-
-    def test_offset_applied(self):
-        chunks = [
-            {
-                "chunk_id": 1,
-                "char_offset_start": 100,
-                "predictions": [
-                    {"entity_group": "LOCATION", "score": 0.8, "start": 10, "end": 17},
-                ],
-            }
-        ]
-        # Need a text long enough for the global span
-        text = "x" * 200
-        result = reconstruct_document_spans(chunks, text)
-        assert result[0]["start"] == 110
-        assert result[0]["end"] == 117
-
-    def test_empty_predictions(self):
-        chunks = [{"chunk_id": 0, "char_offset_start": 0, "predictions": []}]
-        assert reconstruct_document_spans(chunks, "text") == []
 
 
 class TestCalculateIou:
