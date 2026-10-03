@@ -314,7 +314,7 @@ class TransformerInferenceActor:
         """Get the model pipeline (for backwards compatibility)."""
         return self._core.pipeline
 
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
         Process a batch of **whole notes** through transformer inference (raw tokens).
 
@@ -397,11 +397,7 @@ class TransformerInferenceActor:
             results_json_list: list[str] = ["[]"] * batch_size
             entity_counts: list[int] = [0] * batch_size
             for idx, preds in zip(valid_indices, raw_results, strict=True):
-                try:
-                    r_json, count = self._format_note(preds, note_texts[idx] or "")
-                except Exception:
-                    logger.exception(f"Error aggregating predictions for note {text_hashes[idx]}")
-                    r_json, count = "[]", 0
+                r_json, count = self._format_note(preds, note_texts[idx] or "")
                 results_json_list[idx] = r_json
                 entity_counts[idx] = count
 
@@ -417,10 +413,7 @@ class TransformerInferenceActor:
             # Map predictions back to original indices and serialize to JSON
             predictions_raw_json_list = ["[]"] * batch_size
             for idx, preds in zip(valid_indices, raw_results, strict=True):
-                try:
-                    predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
-                except Exception:
-                    logger.exception(f"Error serializing raw predictions for note {text_hashes[idx]}")
+                predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
 
             res = {
                 "text_hash": list(text_hashes),
@@ -704,11 +697,7 @@ class BIOAggregationActor:
         results_json_list: list[str] = []
         entity_counts: list[int] = []
         for i in range(batch_size):
-            try:
-                results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
-            except Exception:
-                logger.exception(f"Error aggregating predictions for note {text_hashes[i]}")
-                results_json, count = "[]", 0
+            results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
             results_json_list.append(results_json)
             entity_counts.append(count)
 

@@ -404,7 +404,12 @@ Examples:
     )
     run_p.add_argument("--config", "-c", help="Path to YAML config file (CLI flags override config values)")
     run_p.add_argument("--input", "-i", help="Input path (local dir or gs://)")
-    run_p.add_argument("--output", "-o", help="Output path")
+    run_p.add_argument(
+        "--output",
+        "-o",
+        help="Output path: local dir, network mount, or gs://. Re-running with the same output path resumes: "
+        "notes already written are skipped. Use one live job per output path.",
+    )
     run_p.add_argument("--num-actors", type=int, help="Number of actors (auto-detect if not set)")
     run_p.add_argument("--batch-size", type=int, help="Batch size per actor (default: 150 recognizer, 200 anonymizer)")
     run_p.add_argument(
@@ -471,7 +476,8 @@ Examples:
         default=None,
         help="Disable Ray Data row-level checkpointing (recognizer/anonymizer/transformer/"
         "llm-recognizer/pipeline). REQUIRED on tiny clusters (≲4 CPUs, e.g. Colab): the checkpoint "
-        "shuffle deadlocks Ray's reservation allocator. Trades resume capability, not correctness.",
+        "shuffle deadlocks Ray's reservation allocator. Trades resume capability, not correctness. "
+        "With checkpointing on, a restart on the same output path skips notes already written.",
     )
     run_p.add_argument("--model", help="Model name (required for transformer jobs)")
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")
