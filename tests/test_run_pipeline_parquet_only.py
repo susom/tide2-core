@@ -387,8 +387,8 @@ def test_no_intermediate_parquet_files_written_in_discrete(tmp_path, monkeypatch
     assert not (out_dir / "03_llm_recognizer_input.parquet").exists()
 
 
-def test_materialization_pass_section_2c(tmp_path, monkeypatch):
-    """Section 2c pass materializes 01_normalized_input when checkpointing=True and row_id is absent."""
+def test_pipeline_does_not_materialize_normalized_input(tmp_path, monkeypatch):
+    """With checkpointing on and no row_id, the first stage gets the original input and normalizes it in the read."""
     f = tmp_path / "in.parquet"
     pq.write_table(pa.table({"note_text": ["note without row id"]}), f)
 
@@ -406,55 +406,29 @@ def test_materialization_pass_section_2c(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "run_recognition", lambda **_k: {"recognizer": True})
     monkeypatch.setattr(runner, "run_anonymization", lambda **_k: {"anonymizer": True})
 
-    # Case 1: enable_checkpoint=True, row_id absent -> materialization runs
-    runner.run_pipeline(
-        input_path=str(f),
-        output_dir=str(out_dir),
-        model_name="test-model",
-        transformer_kwargs={"enable_checkpoint": True},
-    )
-
-    norm_dir = out_dir / "01_normalized_input"
-    assert norm_dir.exists()
-    assert (norm_dir / "_SUCCESS").exists()
-    assert stages_called["transformer"]["input_path"] == str(norm_dir)
-    assert stages_called["transformer"]["_normalize"] is False
-    assert stages_called["transformer"]["_id_column"] == "row_id"
-
-    # Case 2: Resume reuses existing normalized dir with _SUCCESS
-    stages_called.clear()
-    runner.run_pipeline(
-        input_path=str(f),
-        output_dir=str(out_dir),
-        model_name="test-model",
-        transformer_kwargs={"enable_checkpoint": True},
-    )
-    assert stages_called["transformer"]["input_path"] == str(norm_dir)
-
-    # Case 3: enable_checkpoint=False -> no materialization pass
-    out_dir_no_chk = tmp_path / "out_no_chk"
-    stages_called.clear()
-    runner.run_pipeline(
-        input_path=str(f),
-        output_dir=str(out_dir_no_chk),
-        model_name="test-model",
-        transformer_kwargs={"enable_checkpoint": False},
-        recognizer_kwargs={"enable_checkpoint": False},
-        anonymizer_kwargs={"enable_checkpoint": False},
-    )
-    assert not (out_dir_no_chk / "01_normalized_input").exists()
-    assert stages_called["transformer"]["_normalize"] is True
+    for enable_checkpoint in (True, False):
+        stages_called.clear()
+        out = out_dir / str(enable_checkpoint)
+        runner.run_pipeline(
+            input_path=str(f),
+            output_dir=str(out),
+            model_name="test-model",
+            transformer_kwargs={"enable_checkpoint": enable_checkpoint},
+        )
+        assert not (out / "01_normalized_input").exists()
+        assert stages_called["transformer"]["input_path"] == [str(f)]
+        assert stages_called["transformer"]["_normalize"] is True
+        assert stages_called["transformer"]["_id_column"] == "row_id"
 
 
-def test_standalone_run_anonymization_row_id(tmp_path, monkeypatch):
-    """Standalone run_anonymization materializes 00_normalized_anonymizer_input only when checkpointing on and row_id absent."""
+def test_standalone_run_anonymization_row_id(tmp_path):
+    """Standalone run_anonymization never writes a normalized copy, with or without row_id."""
     runner = LocalJobRunner()
     salt_file = tmp_path / "salt.bin"
     key_file = tmp_path / "key.bin"
     salt_file.write_text("00" * 32)
     key_file.write_text("11" * 32)
 
-    # Case 1: input already has row_id
     f_with_row_id = tmp_path / "with_row_id.parquet"
     pq.write_table(
         pa.table(
@@ -467,42 +441,27 @@ def test_standalone_run_anonymization_row_id(tmp_path, monkeypatch):
         ),
         f_with_row_id,
     )
-    out_1 = tmp_path / "out_1"
-    res_1 = runner.run_anonymization(
-        input_path=str(f_with_row_id),
-        output_path=str(out_1),
-        salt_path=str(salt_file),
-        key_path=str(key_file),
-        dry_run=True,
-    )
-    assert "row_id" in res_1["columns_detected"]
-    assert not (out_1 / "00_normalized_anonymizer_input").exists()
-
-    # Case 2: input lacks row_id and checkpointing is on -> materializes with _SUCCESS
     f_no_row_id = tmp_path / "no_row_id.parquet"
     pq.write_table(
-        pa.table(
-            {
-                "text_hash": ["h2"],
-                "note_text": ["text 2"],
-                "recognizer_results_json": ["[]"],
-            }
-        ),
+        pa.table({"text_hash": ["h2"], "note_text": ["text 2"], "recognizer_results_json": ["[]"]}),
         f_no_row_id,
     )
-    out_2 = tmp_path / "out_2"
-    res_2 = runner.run_anonymization(
-        input_path=str(f_no_row_id),
-        output_path=str(out_2),
-        salt_path=str(salt_file),
-        key_path=str(key_file),
-        enable_checkpoint=True,
-        dry_run=True,
-    )
-    norm_anon_dir = out_2 / "00_normalized_anonymizer_input"
-    assert norm_anon_dir.exists()
-    assert (norm_anon_dir / "_SUCCESS").exists()
-    assert "row_id" in res_2["columns_detected"]
+
+    for name, source, expect_row_id in (
+        ("out_1", f_with_row_id, True),
+        ("out_2", f_no_row_id, False),
+    ):
+        out = tmp_path / name
+        res = runner.run_anonymization(
+            input_path=str(source),
+            output_path=str(out),
+            salt_path=str(salt_file),
+            key_path=str(key_file),
+            enable_checkpoint=True,
+            dry_run=True,
+        )
+        assert ("row_id" in res["columns_detected"]) is expect_row_id
+        assert not (out / "00_normalized_anonymizer_input").exists()
 
 
 def test_merge_mode_ray_join_no_fanout(tmp_path):

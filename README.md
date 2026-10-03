@@ -210,7 +210,7 @@ it changed.**
 | Ray Data executions | one per stage | one for the whole pipeline |
 | Stage boundary | Parquet on disk | blocks in the object store |
 | GPU/CPU overlap | none (stages are sequential) | yes — the GPU stage overlaps the CPU stages |
-| Files written | `01_`, `02_`, `04_`, `06_` | `06_anonymizer_output` only |
+| Files written | `02_`, `04_`, `06_` | `06_anonymizer_output` only |
 | Row-level resume (`--no-checkpoint` off) | yes | **no** — a mid-run failure re-runs GPU inference |
 | Multi-machine (stage 1 on a GPU box, 2/3 elsewhere) | yes — this is the point of the mode | no, refused |
 | Nodes with ≤ 4 CPUs | supported (see below) | refused |
@@ -222,7 +222,8 @@ it changed.**
 > LLM outputs are joined on `row_id` (`sha256(text_hash:patient_id)`). Input
 > datasets must have unique `(text_hash, patient_id)` records. Repeated identical
 > notes for the same patient will experience Cartesian join expansion; upstream
-> deduplication or unique patient/note IDs are required.
+> deduplication or unique patient/note IDs are required. See
+> [Running under an external orchestrator](#running-under-an-external-orchestrator).
 
 Use `streamed` for development, benchmarks, and single-box batches, where one
 cluster does all three stages. Stay on `discrete` for production, for anything
@@ -255,6 +256,86 @@ Two consequences worth planning for:
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --model StanfordAIMI/stanford-deidentifier-v2 --execution-mode streamed
 ```
+
+#### Running under an external orchestrator
+
+This section is for people who launch many tide2 workers from a scheduler
+(Kubernetes, Airflow, a batch queue) and need a crashed worker to be relaunched
+without reprocessing notes it already finished. It applies to `discrete` mode.
+
+With checkpointing on (the default), re-running a stage on the same output
+location skips notes already written. The mechanism, and why the rules below
+follow from it, is described in the `_configure_checkpoint` docstring in the
+[API reference](#api-reference).
+
+**The contract.** tide2 does the resuming; the orchestrator keeps these four
+guarantees:
+
+| # | Guarantee | Why |
+|---|---|---|
+| 1 | Shards are disjoint: no note is in two shards. | tide2 does not deduplicate across jobs. |
+| 2 | Each shard has its own stable output location, reused by every retry. | The checkpoint lives next to the output (`<output>_ray_checkpoint`). A new location means a new start. |
+| 3 | At most one live attempt per shard. Launch a replacement only after the previous attempt is dead. | Ray's startup cleanup deletes the pending checkpoints and output files of any job using the same location, and committed IDs are loaded once at start. |
+| 4 | Retries use the same input, model, settings and keys. Change any of them and use a new `<run_id>`. | The checkpoint is keyed on `row_id` only, so it cannot tell that a note was processed with different settings. |
+
+No manifest and no lock are required. A lock only guards against a duplicate
+attempt, which guarantee 3 already rules out.
+
+**Recommended layout.** One location per shard under a run:
+
+```text
+gs://bucket/<run_id>/<shard>/                       # outputs, salt.bin, key.bin
+    02_transformer_output/  04_recognizer_output/  06_anonymizer_output/
+gs://bucket/<run_id>/<shard>/<stage>_ray_checkpoint  # per-stage checkpoints
+```
+
+```bash
+# One worker; the same command is used for every retry of this shard
+tide2-runner run pipeline \
+    -i gs://bucket/input/shard-0007.parquet \
+    -o gs://bucket/run-2026-10/shard-0007 \
+    --model StanfordAIMI/stanford-deidentifier-v2
+```
+
+Output locations may be a local path, a network mount (NFS, Filestore, gcsfuse;
+the same path must be visible on every node), or a `gs://` URI. `--execution-mode
+streamed` and `--produce-visualizer-json` need a local directory.
+
+**What happens when something fails.**
+
+| Event | Result | Action |
+|---|---|---|
+| Worker process crashes or is killed | Blocks in flight are discarded; committed blocks are kept. | Relaunch the same command. |
+| A Ray task fails and is retried inside a live job | Handled by Ray; a block is committed once. | None. |
+| Node is lost | Same as a crash. | Confirm the old attempt is dead, then relaunch the same command. |
+| Relaunch after the shard completed | Reads the input, writes nothing. | None. |
+| Two attempts live on one shard | One deletes the other's pending files; output can be lost or duplicated. | Prevent it (guarantee 3). |
+| Model, settings or keys changed | Notes already written are skipped and keep the old result. | Use a new `<run_id>`. |
+
+**`row_id`.** If the input has no `row_id`, tide2 derives it inside the read as
+`sha256(text_hash:patient_id)` (`"None"` for a null patient). It depends only on
+the note and the patient, so it is identical on every run and machine, and no
+extra copy of the input is written. Call `tide2.runner.local_runner.add_row_id`
+upstream to produce the same value.
+
+When the derived value is used, tide2 logs a WARNING: notes with the same text
+and `patient_id` share a `row_id`. On a first run each is processed. After an
+interruption and resume, once one of them has been committed the others are
+treated as already processed, even if their note IDs differ. **tide2 does not
+deduplicate.** If notes can repeat, supply a unique `row_id` per source row in
+your data preparation. If identical notes must land in the same shard, shard by a
+hash of `row_id`.
+
+**Do not**
+
+- share an output or checkpoint location between live jobs;
+- reuse a location after changing the model or keys;
+- rely on tide2 to deduplicate.
+
+**Cloud setup.** Every worker needs credentials for the bucket. `salt.bin` and
+`key.bin` are written under the run's output location, so access to that
+location also grants access to the key material. The `02_` and `04_`
+intermediates contain raw notes and need the same retention rules as the input.
 
 #### Why small boxes deadlock (and how to size knobs by hardware)
 

@@ -6,6 +6,14 @@ Execution Environments:
     - Any host or orchestration task that instantiates LocalJobRunner to
       execute recognition, anonymization, or transformer stages.
 
+Resumability and shared storage:
+    Stages checkpoint per row, so a restarted job on the same output location
+    skips notes already written. Use one live job per output location; see
+    ``_configure_checkpoint`` for the mechanism and ``LocalJobRunner.run_pipeline``
+    for the shard layout an orchestrator should use. Output locations may be
+    local paths, network mounts visible at the same path on every node, or
+    ``gs://`` URIs.
+
 Examples:
     # Local development
     runner = LocalJobRunner()
@@ -62,8 +70,16 @@ from .hardware import render_settings_table
 from .utils import DEFAULT_DASHBOARD_HOST
 from .utils import detect_columns
 from .utils import gpu_worker_runtime_env
+from .utils import is_uri
+from .utils import join_location
+from .utils import list_parquet_files
 from .utils import log_ray_cluster_info
+from .utils import make_output_dir
+from .utils import output_location
+from .utils import read_parquet_schema
+from .utils import read_text_file
 from .utils import resolve_input_files
+from .utils import write_text_file
 
 logger = logging.getLogger(__name__)
 
@@ -161,14 +177,34 @@ def _configure_checkpoint(
     ctx: "ray.data.DataContext",
     *,
     enable: bool,
-    output_dir: Path,
+    output_dir: Path | str,
     id_column: str,
 ) -> None:
     """Configure (or clear) Ray Data row-level checkpointing on ``ctx``.
 
     When ``enable`` is True, points the checkpoint at a sibling
-    ``<output_dir>_ray_checkpoint`` directory keyed on ``id_column``. When False,
+    ``<output_dir>_ray_checkpoint`` location keyed on ``id_column``. When False,
     clears any checkpoint config so it does not leak into the stage.
+
+    How Ray's checkpoint behaves, and the rules that follow from it:
+
+    - Each written block is committed in two phases: a ``.pending`` checkpoint,
+      then the data file, then a rename to committed. An interrupted block is
+      discarded and redone on restart; a committed block is never rewritten.
+    - Committed IDs are loaded once at start and filtered at read time. The
+      filter keeps no state during a run, so it does not deduplicate within a
+      run. Rows that share an ID are all treated as already processed once any
+      one of them is committed.
+    - Startup cleanup deletes every ``.pending`` file in the checkpoint
+      location, and every matching data file in the output location,
+      regardless of which job created them. Use **one live job per output
+      location**. Independent jobs must not share one.
+    - The checkpoint location is ``<output_dir>_ray_checkpoint``. A local path
+      must be a network mount visible at the same path on every node; a URI
+      such as ``gs://bucket/run/shard`` uses Ray's cloud-object-storage backend.
+    - A restart must use the same input, model, settings and keys. Ray keys
+      the checkpoint on ``id_column`` only, so changing any of them requires a
+      new output location.
 
     CRITICAL on tiny clusters (≲4 CPUs, e.g. 2-CPU Colab): enabling checkpointing
     injects a sort + repartition shuffle whose per-operator CPU reservations,
@@ -182,10 +218,13 @@ def _configure_checkpoint(
     fractional-CPU knobs + ``enable=False`` are the validated fix.
     """
     if enable:
-        checkpoint_dir = output_dir.parent / (output_dir.name + "_ray_checkpoint")
+        if isinstance(output_dir, Path):
+            checkpoint_dir = str(output_dir.parent / (output_dir.name + "_ray_checkpoint"))
+        else:
+            checkpoint_dir = f"{output_dir.rstrip('/')}_ray_checkpoint"
         ctx.checkpoint_config = CheckpointConfig(
             id_column=id_column,
-            checkpoint_path=str(checkpoint_dir),
+            checkpoint_path=checkpoint_dir,
             delete_checkpoint_on_success=False,
         )
     else:
@@ -214,6 +253,13 @@ def add_row_id(table: pa.Table) -> pa.Table:
 
     Derives row_id from text_hash and patient_id using sha256(f"{text_hash}:{patient_id}").
     When patient_id is absent or null, uses DEFAULT_ROW_ID_PATIENT_ID ("None").
+
+    The value depends only on the note content and the patient, so it is the same
+    on every run and every machine. Orchestrators can call this function to
+    produce the identical row_id upstream. Rows with the same text and patient_id
+    share a row_id, and tide2 does not deduplicate them: once one is committed by
+    a checkpointed run, the others are treated as already processed on resume.
+    Supply a unique row_id column to give each source row its own identity.
     """
     if "row_id" in table.column_names:
         return table
@@ -233,7 +279,11 @@ def add_row_id(table: pa.Table) -> pa.Table:
 
 
 def normalize_source_batch(batch: pa.Table) -> pa.Table:
-    """Normalize source batch: lowercase column names, add text_hash and row_id if absent."""
+    """Normalize source batch: lowercase column names, add text_hash and row_id if absent.
+
+    Accepts an empty table, which Ray passes when it infers a schema. See
+    ``add_row_id`` for how row_id is derived.
+    """
     from tide2.utils.text_processing import compute_text_hash
 
     lower_names = [c.lower() for c in batch.column_names]
@@ -298,15 +348,41 @@ def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
     )
 
 
+_DERIVED_ROW_ID_WARNING = (
+    "row_id was not supplied and is derived as sha256(text_hash:patient_id). Notes with the same text and "
+    "patient_id share a row_id. If a run is interrupted and resumed, once any one of them has been committed "
+    "the others are treated as already processed and are not processed again, even if their note IDs differ. "
+    "tide2 does not deduplicate. Supply a unique row_id to give each source row its own identity."
+)
+
+
 def _read_stage_source(
     files: str | list[str],
     columns: list[str] | None = None,
     *,
     normalize: bool = False,
+    derive_ids_in_read: bool = False,
     num_blocks: int | None = None,
     read_cpus: float | None = None,
 ) -> Dataset:
-    """Read a Parquet source with optional normalization fused into the read."""
+    """Read a Parquet source, optionally deriving ``text_hash`` and ``row_id`` from the note.
+
+    With ``derive_ids_in_read`` the derivation runs inside the read tasks, so the
+    ID column exists before Ray's checkpoint filter, which runs right after the
+    read. A later ``map_batches`` would run too late, and no normalized copy of
+    the input is written. Otherwise normalization, if requested, is fused as a
+    ``map_batches`` after the read.
+
+    Args:
+        files: Parquet file or files.
+        columns: Columns to read. None reads all.
+        normalize: Lowercase column names and add ``text_hash`` and ``row_id`` if
+            absent. When False, only ``row_id`` is derived (with ``derive_ids_in_read``).
+        derive_ids_in_read: Derive the IDs inside the read. Use this when
+            checkpointing is on and ``row_id`` may be absent.
+        num_blocks: Explicit number of read blocks.
+        read_cpus: CPUs reserved per read task.
+    """
     kwargs: dict[str, Any] = {}
     if columns is not None:
         kwargs["columns"] = columns
@@ -315,8 +391,14 @@ def _read_stage_source(
     if read_cpus is not None:
         kwargs["ray_remote_args"] = {"num_cpus": read_cpus}
 
+    if derive_ids_in_read:
+        if columns is not None and "row_id" not in {c.lower() for c in columns}:
+            logger.warning(_DERIVED_ROW_ID_WARNING)
+        # Private Ray argument; tests guard it. A hook runs before the checkpoint filter, map_batches does not.
+        kwargs["_block_udf"] = normalize_source_batch if normalize else add_row_id
+
     ds: Dataset = ray.data.read_parquet(files, **kwargs)
-    if normalize:
+    if normalize and not derive_ids_in_read:
         ds = ds.map_batches(normalize_source_batch, batch_format="pyarrow")
     return ds
 
@@ -978,9 +1060,19 @@ class LocalJobRunner:
         """
         Run recognition job with Ray Data checkpointing for resume.
 
+        Resumability:
+            With ``enable_checkpoint=True`` a restart on the same ``output_path``
+            skips notes already written, so a crashed job loses only the blocks in
+            flight. When ``row_id`` is absent it is derived from the note inside
+            the read stage (see ``add_row_id``) and no copy of the input is
+            written. Notes with the same text and patient share a ``row_id``;
+            tide2 does not deduplicate them. See ``_configure_checkpoint`` for the
+            rules: one live job per ``output_path``, and the same input, model
+            and keys on restart.
+
         Args:
             input_path: Input parquet files (local path or GCS URI)
-            output_path: Output directory
+            output_path: Output directory (local path, network mount, or ``gs://`` URI)
             num_actors: Actor count (auto-detect if None)
             batch_size: Batch size per actor
             num_cpus: CPUs per actor (affects streaming executor scheduling)
@@ -1001,6 +1093,9 @@ class LocalJobRunner:
                 sort+repartition shuffle whose per-operator CPU reservations
                 exceed the cluster, deadlocking the stage at 0/1. Disabling it
                 trades resume capability (not correctness) for the ability to run.
+                A restart skips notes already written to ``output_path``, so it
+                must use the same input, settings and keys, with one live job
+                per ``output_path``.
             override_num_blocks: Explicit number of Ray Data blocks to split the
                 input into (e.g. 32 to fix single-block starvation on multicore nodes).
             dry_run: If True, validate setup and show plan without processing
@@ -1022,8 +1117,8 @@ class LocalJobRunner:
 
         start_time = time.time()
 
-        output_dir = Path(output_path).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = output_location(output_path, resolve=True)
+        make_output_dir(output_dir)
         shutdown = GracefulShutdown()
 
         # Warn if batch_timeout was passed
@@ -1120,6 +1215,7 @@ class LocalJobRunner:
                 input_files,
                 columns=columns,
                 normalize=_normalize,
+                derive_ids_in_read=enable_checkpoint and _normalize,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
@@ -1191,10 +1287,14 @@ class LocalJobRunner:
         regex/rule-based RecognizerActor. Each actor makes LLM API calls to
         detect PHI entities in clinical text.
 
+        Resumability follows ``run_recognition``: a restart on the same
+        ``output_path`` skips notes already written, and ``row_id`` is derived in
+        the read stage when absent.
+
         Args:
             input_path: Input parquet files (local path or GCS URI).
                 Required columns: text_hash, note_text.
-            output_path: Output directory
+            output_path: Output directory (local path, network mount, or ``gs://`` URI)
             project_id: GCP project ID for LLM API access
             model_name: LLM model name (default: "gemini-2.5-flash")
             prompt_name: Name of the prompt config in resources/llm_prompts/ (default: "phi_detection")
@@ -1223,7 +1323,9 @@ class LocalJobRunner:
             enable_checkpoint: If True (default), enable Ray Data row-level
                 checkpointing for resume. Set False on tiny clusters (≲4 CPUs):
                 the checkpoint sort+repartition shuffle deadlocks Ray 2.55's
-                reservation allocator. See run_recognition for details.
+                reservation allocator. See run_recognition for details. A restart
+                skips notes already written to ``output_path``; use one live job
+                per ``output_path``.
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -1243,8 +1345,8 @@ class LocalJobRunner:
 
         start_time = time.time()
 
-        output_dir = Path(output_path).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = output_location(output_path, resolve=True)
+        make_output_dir(output_dir)
         shutdown = GracefulShutdown()
 
         # Warn if batch_timeout was passed
@@ -1329,6 +1431,7 @@ class LocalJobRunner:
                 input_files,
                 columns=columns,
                 normalize=_normalize,
+                derive_ids_in_read=enable_checkpoint and _normalize,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
@@ -1406,11 +1509,17 @@ class LocalJobRunner:
         """
         Run anonymization job with Ray Data checkpointing for resume.
 
+        Resumability follows ``run_recognition``: a restart on the same
+        ``output_path`` skips notes already written. When ``row_id`` is absent and
+        checkpointing is on, it is derived from the note inside the read stage
+        (see ``add_row_id``), the ``row_id`` WARNING is logged, and no copy of
+        the input is written.
+
         Args:
             input_path: Input parquet files with recognizer results
-            output_path: Output directory
+            output_path: Output directory (local path, network mount, or ``gs://`` URI)
             salt_path: Path to FPE salt file
-            key_path: Path to FPE key file
+            key_path: Path to FPE key file (local path or ``gs://`` URI)
             num_actors: Actor count (auto-detect if None)
             batch_size: Batch size per actor
             num_cpus: CPUs per actor (affects streaming executor scheduling)
@@ -1437,6 +1546,8 @@ class LocalJobRunner:
                 sort+repartition shuffle whose per-operator CPU reservations
                 exceed the cluster, deadlocking the stage at 0/1. Disabling it
                 trades resume capability (not correctness) for the ability to run.
+                A restart skips notes already written to ``output_path``; use
+                one live job per ``output_path``.
             override_num_blocks: Explicit number of Ray Data blocks to split the
                 input into (e.g. 32 to fix single-block starvation on multicore nodes).
             dry_run: If True, validate setup and show plan without processing
@@ -1471,8 +1582,8 @@ class LocalJobRunner:
         salt = self._load_key(salt_path)
         key = self._load_key(key_path)
 
-        output_dir = Path(output_path).resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = output_location(output_path, resolve=True)
+        make_output_dir(output_dir)
         shutdown = GracefulShutdown()
 
         # Resolve slot CPU reservation
@@ -1497,27 +1608,11 @@ class LocalJobRunner:
         optional_cols = ["patient_id", "jitter", "row_id"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
-        # Check if row_id is present
+        # Without row_id and with checkpointing, it is derived inside the read (see
+        # _read_stage_source); without checkpointing it is fused after the read.
         has_row_id = "row_id" in [c.lower() for c in columns]
-        fuse_add_row_id = False
-        if not has_row_id:
-            if enable_checkpoint:
-                norm_dir = Path(output_path).resolve() / "00_normalized_anonymizer_input"
-                if not (norm_dir / "_SUCCESS").exists():
-                    logger.info(
-                        "Checkpointing is enabled and input lacks 'row_id'; materializing input with 'row_id' to %s. "
-                        "Writing 'row_id' upstream avoids this pass.",
-                        norm_dir,
-                    )
-                    norm_dir.mkdir(parents=True, exist_ok=True)
-                    norm_ds = ray.data.read_parquet(input_files, columns=columns)
-                    norm_ds = norm_ds.map_batches(add_row_id, batch_format="pyarrow")
-                    norm_ds.write_parquet(str(norm_dir), compression="zstd")
-                    (norm_dir / "_SUCCESS").touch()
-                input_files = resolve_input_files(str(norm_dir))
-                columns = detect_columns(input_files[0], required_cols, optional_cols)
-            else:
-                fuse_add_row_id = True
+        derive_ids_in_read = enable_checkpoint and (_normalize or not has_row_id)
+        fuse_add_row_id = not has_row_id and not enable_checkpoint
 
         ctx = ray.data.DataContext.get_current()
         logger.info("Anonymization job starting")
@@ -1572,6 +1667,7 @@ class LocalJobRunner:
                 input_files,
                 columns=columns,
                 normalize=_normalize,
+                derive_ids_in_read=derive_ids_in_read,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
@@ -1590,7 +1686,7 @@ class LocalJobRunner:
             # every dropped batch into a successful-looking 0-row write.
             # Surface that as a hard error instead.
             try:
-                output_files = list(output_dir.glob("*.parquet"))
+                output_files = list_parquet_files(output_dir, recursive=False)
                 if output_files:
                     output_rows = pads.dataset(output_files).count_rows()
                 elif hasattr(processed, "count"):
@@ -1662,6 +1758,10 @@ class LocalJobRunner:
         the downstream aggregation actor produces document-level entities directly.
         There is no separate char-chunking stage or reassembly stage.
 
+        Resumability follows ``run_recognition``: a restart on the same
+        ``output_path`` skips notes already written, and ``row_id`` is derived in
+        the read stage when absent.
+
         Hardware sizing (CPU/actor knobs)
         ---------------------------------
         Ray Data runs every operator of this stage concurrently
@@ -1706,7 +1806,7 @@ class LocalJobRunner:
 
         Args:
             input_path: Input parquet files
-            output_path: Output directory
+            output_path: Output directory (local path, network mount, or ``gs://`` URI)
             model_name: Name of transformer model configuration
             model_path: Optional explicit model path
             bucket_name: Optional GCS bucket for model loading
@@ -1745,7 +1845,8 @@ class LocalJobRunner:
                 (≲4 CPUs): the checkpoint sort+repartition shuffle deadlocks the
                 stage regardless of the fractional CPU knobs above (see the
                 "Hardware sizing" section). Disabling it loses resume capability,
-                not correctness.
+                not correctness. A restart skips notes already written to
+                ``output_path``; use one live job per ``output_path``.
             override_num_blocks: Explicit number of Ray Data blocks to split the
                 input into.
 
@@ -1837,20 +1938,20 @@ class LocalJobRunner:
             columns = ["text_hash", "note_text", "patient_id"]
             read_target = self._resolve_input_pattern(input_path)
 
-        self._ensure_output_dir(output_path)
+        output_dir = output_location(output_path, resolve=True)
+        make_output_dir(output_dir)
 
         # Configure Ray Data checkpointing for row-level resume, keyed on _id_column
         # (one row per note through the whole stage now — no chunk_uid).
         ctx = ray.data.DataContext.get_current()
-        _configure_checkpoint(
-            ctx, enable=enable_checkpoint, output_dir=Path(output_path).resolve(), id_column=_id_column
-        )
+        _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=output_dir, id_column=_id_column)
 
         # Phase 1: Read whole notes (the actor's token-windowing is the sole chunker)
         ds: Dataset = _read_stage_source(
             read_target,
             columns=columns,
             normalize=_normalize,
+            derive_ids_in_read=enable_checkpoint and _normalize,
             num_blocks=override_num_blocks,
             read_cpus=read_cpus,
         )
@@ -1958,6 +2059,35 @@ class LocalJobRunner:
         **raises** on multi-node clusters and on nodes with ≤4 CPUs, where a
         chained plan cannot be scheduled (see ``check_streamed_admission``).
 
+        Resumability and shard layout
+        -----------------------------
+        With checkpointing on (the default for discrete mode), re-running a stage
+        on the same ``output_dir`` skips notes already written, so a crashed
+        worker can be relaunched with the same command. Each stage uses its own
+        subdirectory (``02_transformer_output``, ``04_recognizer_output``,
+        ``06_anonymizer_output``) and a sibling ``*_ray_checkpoint`` location.
+        When ``row_id`` is absent it is derived from the note in the first
+        stage's read; no normalized copy of the input is written.
+
+        An orchestrator that runs many workers must give each worker its own
+        shard:
+
+        - Shards are disjoint: no note appears in two shards.
+        - Each shard has a stable ``output_dir`` of its own, for example
+          ``gs://bucket/<run_id>/<shard>/``. Independent jobs must not share one:
+          Ray's startup cleanup deletes other jobs' pending checkpoints and
+          output files.
+        - At most one live attempt per shard. Start a replacement only after the
+          previous attempt is dead.
+        - Retries use the same input, model, settings and keys. Change any of
+          them and use a new ``<run_id>``.
+
+        tide2 does not deduplicate. Notes with the same text and ``patient_id``
+        share a derived ``row_id``; once one is committed, the others are
+        treated as already processed on resume. Supply a unique ``row_id`` (see
+        ``add_row_id``) when notes can repeat. See the README section
+        "Running under an external orchestrator".
+
         Merge mode limitation
         ---------------------
         When ``llm_recognizer_mode="merge"``, regex and LLM outputs are joined
@@ -1966,14 +2096,18 @@ class LocalJobRunner:
         contains repeated rows with the identical note text and identical patient ID,
         they share the same ``row_id`` and will experience Cartesian join expansion.
         Upstream deduplication or supplying unique record IDs is expected when
-        using merge mode.
+        using merge mode (see "Resumability and shard layout").
 
         Args:
             input_path: Path to input parquet file, directory, glob, or list of file paths (local or gs://).
+                A ``gs://`` URI may name a file or a directory prefix; globs are local only.
                 Required column: note_text.
                 Optional columns: text_hash, patient_identifiers (JSON string),
                 patient_id, recognizer_results_json, jitter, row_id.
-            output_dir: Output directory for all intermediate and final files.
+            output_dir: Output directory for all intermediate and final files: a local
+                path, a network mount, or a ``gs://`` URI. ``salt.bin`` and ``key.bin``
+                are written here too. ``execution_mode="streamed"`` and
+                ``produce_visualizer_json=True`` need a local directory.
             model_name: Transformer model name (e.g. "StanfordAIMI/stanford-deidentifier-base").
             run_transformer: Run GPU transformer NER stage.
             run_recognizer: Run CPU recognizer stage.
@@ -2008,8 +2142,8 @@ class LocalJobRunner:
             "operator_stats"}``. Both carry ``execution_mode``.
         """
         start_time = time.time()
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        output_path = output_location(output_dir)
+        make_output_dir(output_path)
 
         if not isinstance(input_path, (str, list)) or (
             isinstance(input_path, list) and not all(isinstance(f, str) for f in input_path)
@@ -2025,9 +2159,7 @@ class LocalJobRunner:
                 "If you have a DataFrame, write it to a Parquet file using df.to_parquet(...) and pass the file path."
             )
 
-        if isinstance(input_path, str) and input_path.startswith("gs://"):
-            resolved_files = [input_path]
-        elif isinstance(input_path, list) and any(f.startswith("gs://") for f in input_path):
+        if isinstance(input_path, list) and any(is_uri(f) for f in input_path):
             resolved_files = input_path
         else:
             resolved_files = resolve_input_files(input_path)
@@ -2036,17 +2168,17 @@ class LocalJobRunner:
             raise ValueError(f"No input files found matching: {input_path}")
 
         for f in resolved_files:
-            if not f.startswith("gs://") and not f.endswith(".parquet"):
+            if not is_uri(f) and not f.endswith(".parquet"):
                 raise ValueError(f"Resolved file does not end with .parquet: {f}")
 
         input_info = _inspect_pipeline_input(resolved_files)
 
         # --- Intermediate paths ---
-        transformer_output_path = output_path / "02_transformer_output"
-        recognizer_output_path = output_path / "04_recognizer_output"
-        anonymizer_output_path = output_path / "06_anonymizer_output"
+        transformer_output_path = join_location(output_path, "02_transformer_output")
+        recognizer_output_path = join_location(output_path, "04_recognizer_output")
+        anonymizer_output_path = join_location(output_path, "06_anonymizer_output")
 
-        llm_recognizer_output_path = output_path / "03b_llm_recognizer_output"
+        llm_recognizer_output_path = join_location(output_path, "03b_llm_recognizer_output")
 
         # Validate llm_recognizer_mode
         valid_llm_modes = ("off", "only", "merge")
@@ -2067,6 +2199,8 @@ class LocalJobRunner:
         # ------------------------------------------------------------------
         if execution_mode not in ("discrete", "streamed"):
             raise ValueError(f"execution_mode must be 'discrete' or 'streamed', got {execution_mode!r}")
+        if produce_visualizer_json and not isinstance(output_path, Path):
+            raise ValueError(f"produce_visualizer_json=True needs a local output_dir, got {output_dir!r}.")
 
         if execution_mode == "streamed":
             reason = self._streamed_fallback_reason(
@@ -2089,6 +2223,11 @@ class LocalJobRunner:
                 execution_mode = "discrete"
 
         if execution_mode == "streamed":
+            if not isinstance(output_path, Path):
+                raise ValueError(
+                    "execution_mode='streamed' needs a local output_dir; use execution_mode='discrete' for "
+                    f"{output_dir!r}."
+                )
             return self._run_pipeline_streamed(
                 input_files=resolved_files,
                 input_info=input_info,
@@ -2116,43 +2255,10 @@ class LocalJobRunner:
         # Resolve settings via hardware recommender
         self._apply_pipeline_recommendations(model_name, t_kw, r_kw, a_kw, hardware_autotune)
 
-        use_llm = llm_recognizer_mode == "only"
-        if use_llm:
-            first_stage = "llm"
-            first_stage_enable_checkpoint = bool(llm_kw.get("enable_checkpoint", True))
-        elif run_transformer:
-            first_stage = "transformer"
-            first_stage_enable_checkpoint = bool(t_kw.get("enable_checkpoint", True))
-        elif run_recognizer or llm_recognizer_mode == "merge":
-            first_stage = "recognizer"
-            first_stage_enable_checkpoint = bool(r_kw.get("enable_checkpoint", True))
-        elif run_anonymizer:
-            first_stage = "anonymizer"
-            first_stage_enable_checkpoint = bool(a_kw.get("enable_checkpoint", True))
-        else:
-            first_stage = None
-            first_stage_enable_checkpoint = False
-
+        # Each stage derives text_hash and row_id from the note when they are absent. With
+        # checkpointing on this happens inside the first stage's read; no normalized copy is written.
         first_stage_input_path: str | list[str] = resolved_files
         first_stage_normalize = True
-
-        if first_stage and first_stage_enable_checkpoint and not input_info.has_row_id:
-            normalized_input_dir = output_path / "01_normalized_input"
-            if not (normalized_input_dir / "_SUCCESS").exists():
-                logger.info(
-                    "Checkpointing is enabled and input lacks 'row_id'; materializing normalized input to %s. "
-                    "Writing 'row_id' upstream (e.g. in BigQuery export) avoids this pass.",
-                    normalized_input_dir,
-                )
-                normalized_input_dir.mkdir(parents=True, exist_ok=True)
-                norm_ds = ray.data.read_parquet(resolved_files)
-                norm_ds = norm_ds.map_batches(normalize_source_batch, batch_format="pyarrow")
-                norm_ds.write_parquet(str(normalized_input_dir), compression="zstd")
-                (normalized_input_dir / "_SUCCESS").touch()
-            else:
-                logger.info("Reusing existing normalized input with _SUCCESS marker from %s", normalized_input_dir)
-            first_stage_input_path = str(normalized_input_dir)
-            first_stage_normalize = False
 
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
@@ -2200,7 +2306,7 @@ class LocalJobRunner:
         elif llm_recognizer_mode == "merge":
             # Run both regex recognizer and LLM recognizer, then merge
             logger.info("Pipeline phase 2/3: Recognizer + LLM Recognizer (merge mode)")
-            regex_output_path = output_path / "04a_regex_recognizer_output"
+            regex_output_path = join_location(output_path, "04a_regex_recognizer_output")
 
             # --- Standard regex recognizer ---
             if run_recognizer:
@@ -2230,8 +2336,8 @@ class LocalJobRunner:
 
             # --- Merge results via Ray Data join ---
             logger.info("Merging regex and LLM recognizer results")
-            rec_files = list(regex_output_path.glob("**/*.parquet")) if run_recognizer else []
-            llm_files = list(llm_recognizer_output_path.glob("**/*.parquet"))
+            rec_files = list_parquet_files(regex_output_path) if run_recognizer else []
+            llm_files = list_parquet_files(llm_recognizer_output_path)
 
             alive_cpus = alive_node_cpus()
             node_cpus = max(alive_cpus or [1.0])
@@ -2241,7 +2347,7 @@ class LocalJobRunner:
             n_partitions = min(MIN_STREAMED_NODE_CPUS, max(1, int(node_cpus)))
 
             if rec_files and llm_files:
-                sample_schema = pq.read_schema(rec_files[0])
+                sample_schema = read_parquet_schema(rec_files[0])
                 regex_names = set(sample_schema.names)
                 passthrough_cols = ["note_text", "patient_id", "jitter", "patient_identifiers"]
                 reg_passthrough = [c for c in passthrough_cols if c in regex_names]
@@ -2257,7 +2363,7 @@ class LocalJobRunner:
                     regex_renames[c] = f"{c}_regex"
                 regex_ds = regex_ds.rename_columns(regex_renames)
 
-                llm_schema = pq.read_schema(llm_files[0])
+                llm_schema = read_parquet_schema(llm_files[0])
                 llm_names = set(llm_schema.names)
                 llm_passthrough = [c for c in passthrough_cols if c in llm_names]
 
@@ -2294,7 +2400,7 @@ class LocalJobRunner:
                 merged_ds = llm_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
                 merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
 
-            out_files = list(recognizer_output_path.glob("**/*.parquet"))
+            out_files = list_parquet_files(recognizer_output_path)
             merged_count = pads.dataset(out_files).count_rows() if out_files else 0
             logger.info("Merged %d notes from regex + LLM recognizers", merged_count)
 
@@ -2319,10 +2425,10 @@ class LocalJobRunner:
             logger.info("Pipeline phase 3/3: Anonymizer")
 
             # Write hex keys to temp files
-            salt_file = output_path / "salt.bin"
-            key_file = output_path / "key.bin"
-            salt_file.write_text(salt_hex)
-            key_file.write_text(key_hex)
+            salt_file = join_location(output_path, "salt.bin")
+            key_file = join_location(output_path, "key.bin")
+            write_text_file(salt_file, salt_hex)
+            write_text_file(key_file, key_hex)
 
             a_kwargs: dict[str, Any] = dict(a_kw)
 
@@ -2355,10 +2461,10 @@ class LocalJobRunner:
         if produce_visualizer_json:
             logger.info("Creating visualizer JSON files")
             self._write_visualizer_json(
-                output_path=output_path,
-                transformer_output_path=transformer_output_path,
-                recognizer_output_path=recognizer_output_path,
-                anonymizer_output_path=anonymizer_output_path,
+                output_path=Path(output_path),
+                transformer_output_path=Path(transformer_output_path),
+                recognizer_output_path=Path(recognizer_output_path),
+                anonymizer_output_path=Path(anonymizer_output_path),
             )
             results["visualizer_json"] = True
 
@@ -2798,9 +2904,8 @@ class LocalJobRunner:
     # ------------------------------------------------------------------
 
     def _load_key(self, key_path: str) -> bytes:
-        """Load a 32-byte key from a file (hex-encoded)."""
-        with Path(key_path).open("r", encoding="utf-8") as f:
-            hex_key = f.read().strip()
+        """Load a 32-byte key from a hex-encoded file (local path or URI)."""
+        hex_key = read_text_file(key_path).strip()
         key = bytes.fromhex(hex_key)
         if len(key) != KEY_SIZE_BYTES:
             raise ValueError(f"Key must be exactly {KEY_SIZE_BYTES} bytes, got {len(key)}")
@@ -2821,11 +2926,6 @@ class LocalJobRunner:
         if not input_path.startswith("gs://") and Path(input_path).is_dir():
             return input_path
         return f"{input_path}/*.parquet"
-
-    def _ensure_output_dir(self, output_path: str) -> None:
-        """Ensure output directory exists."""
-        if not output_path.startswith("gs://"):
-            Path(output_path).mkdir(parents=True, exist_ok=True)
 
     def _get_text_source(
         self,

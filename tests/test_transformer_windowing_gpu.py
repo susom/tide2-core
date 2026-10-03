@@ -33,7 +33,7 @@ def actor():
 
     try:
         return create_transformer_actor(model_name=_MODEL, allow_huggingface_download=True)()
-    except Exception as e:
+    except (OSError, ValueError) as e:
         pytest.skip(f"model {_MODEL} unavailable: {e}")
 
 
