@@ -313,7 +313,7 @@ streamed` and `--produce-visualizer-json` need a local directory.
 | Model, settings or keys changed | Notes already written are skipped and keep the old result. | Use a new `<run_id>`. |
 
 **`row_id`.** If the input has no `row_id`, tide2 derives it inside the read as
-`sha256(text_hash:patient_id)` (`"None"` for a null patient). It depends only on
+`sha256(text_hash:patient_id)` (`"None"` for a null, NaN or blank patient). It depends only on
 the note and the patient, so it is identical on every run and machine, and no
 extra copy of the input is written. Call `tide2.runner.local_runner.add_row_id`
 upstream to produce the same value.
@@ -455,6 +455,51 @@ the target GPU, record wall time and peak VRAM per batch size, and add one
 `MEASURED_MODELS` row in `src/tide2/runner/hardware.py`. Alias a name only on
 confirmed checkpoint identity (diff the registry entries), never on name
 similarity.
+
+### When a note fails
+
+Every stage writes one row per input row. A note that cannot be processed is
+recorded in the row instead of being dropped, and an anonymizer problem never
+leaves unmasked text behind.
+
+`processing_status` is the worst status across stages: `success`, `degraded` or
+`failed`. `stage_status_json` holds one entry per stage that handled the row, for
+example `{"anonymizer": {"status": "degraded", "reason": "AGE"}}`. A `reason` is
+an exception class and a fixed code, or entity types; it never contains note text
+or an exception message.
+
+| What happened | Output row | Status |
+|---|---|---|
+| An entity has no applicable anonymization path (an age format that is not recognized, a date that cannot be parsed, an unknown entity type) | The entity is replaced by `[ENTITY_TYPE]`; the rest is anonymized normally. | `degraded` |
+| An operator raises while anonymizing one entity, or `jitter_required` is set and the jitter is missing | That entity (all dates, for jitter) becomes `[ENTITY_TYPE]`; the rest is anonymized normally. | `failed`, with the entity and exception class |
+| A note's recognizer results or patient identifiers are malformed, a span is outside the text, or a stage raises for that note | Null results and null `anonymized_note_text`. | `failed`, with the stage and reason |
+| The GPU forward fails after the OOM recovery | Every note of that batch has null results. | `failed` (`transformer`) |
+| A stage receives a row that already failed | The row passes through unchanged. | `failed` |
+
+No text is removed without a placeholder, and a failed row never carries the
+original text of the anonymizer output.
+
+**What to do.** `success` and `degraded` rows are complete. A `failed` row with
+anonymized text has masked entities and can be used. A `failed` row with null
+text must be processed again: select `processing_status = 'failed'`, write those
+rows as a new input, and run with a new `<run_id>`. Failed rows are committed to
+the checkpoint like any other row, so resuming a run does not retry them.
+
+**Known limitations**
+
+- All input files must have the same columns. The column list is read from the
+  first file; a later file without `jitter`, `patient_identifiers`, `patient_id`
+  or `row_id` gets nulls for them without an error.
+- A note that crashes or hangs a worker is not a per-note failure. Ray retries the
+  worker and then aborts the job (`max_errored_blocks` is 0); a hang stops at the
+  no-progress timeout below. There is no per-note timeout.
+- Malformed items in an otherwise valid LLM response are skipped with a warning.
+  Known-value lists above the per-type caps (`acc_num` 1000, `csn_id` 1500, `har`
+  700, 200 otherwise) are truncated with a warning, and unsupported
+  `patient_identifiers` keys are ignored.
+- Some values are left unchanged on purpose: stopwords and single letters,
+  titles and suffixes without a name, standalone months and years, gestational
+  ages and single characters. A standalone birth year over 89 passes through.
 
 ### What happens when a run wedges
 

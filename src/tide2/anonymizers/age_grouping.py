@@ -9,6 +9,8 @@ import re
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.anonymizers.guarded import mask
+from tide2.anonymizers.guarded import record_fallback
 from tide2.string_parsers.format_detector import FormatDetector
 from tide2.string_parsers.format_detector import FormatType
 
@@ -77,8 +79,8 @@ class AgeGroupAnonymizer(Operator):
 
         Returns:
             The text with the age value capped at upper_limit, formatted to
-            match the original style. Returns the original text unchanged if
-            no age format is detected.
+            match the original style. Returns the entity mask (``[AGE]``) when
+            no age format is detected or the age cannot be rewritten.
         """
 
         upper_limit = params.get("upper_limit", 80)
@@ -91,23 +93,30 @@ class AgeGroupAnonymizer(Operator):
             format_type = FormatType.AGE_WRITTEN_NUMBERS
 
         if format_type is None:
-            # If still no format detected, return original text
-            return text
+            # No path applies; never leave an unrecognized age in the text
+            return self._fallback(params)
 
         # Extract the numeric age from the text
         age_value = self._extract_age_value(text, format_type)
 
         if age_value is None:
-            # If we can't extract age value, return original text
-            return text
+            return self._fallback(params)
 
         # Apply the upper limit
         limited_age = min(age_value, upper_limit)
 
         # Format the limited age back to the original format
-        return self._format_age(text, limited_age, format_type)
+        result = self._format_age(text, limited_age, format_type)
+        return result if result is not None else self._fallback(params)
 
-    def _extract_age_value(self, text: str, format_type: FormatType) -> int | None:
+    @staticmethod
+    def _fallback(params: dict) -> str:
+        """Return the entity mask and record that no path applied."""
+        entity_type = params.get("entity_type", "AGE")
+        record_fallback(entity_type)
+        return mask(entity_type)
+
+    def _extract_age_value(self, text: str, format_type: FormatType) -> int | None:  # noqa: PLR0911
         """Extract the numeric age value from the text based on format type."""
 
         if format_type == FormatType.AGE_NUMERIC_ONLY:
@@ -128,11 +137,8 @@ class AgeGroupAnonymizer(Operator):
             # This is a special case - we'll preserve the format but limit the weeks
             weeks_match = re.search(r"(\d+)w", text.lower())
             if weeks_match:
-                weeks = int(weeks_match.group(1))
-                # Convert gestational weeks to approximate months (rough approximation)
-                # Gestational age typically ranges from 20-42 weeks
-                # We'll treat this differently and limit weeks instead of converting to years
-                return weeks
+                # Gestational age typically ranges from 20-42 weeks; the weeks are limited, not converted to years
+                return int(weeks_match.group(1))
             return None
 
         if format_type == FormatType.AGE_WRITTEN_NUMBERS:
@@ -209,8 +215,8 @@ class AgeGroupAnonymizer(Operator):
 
         return None
 
-    def _format_age(self, original_text: str, age_value: int, format_type: FormatType) -> str:
-        """Format the age value back to the original format."""
+    def _format_age(self, original_text: str, age_value: int, format_type: FormatType) -> str | None:
+        """Format the age value back to the original format; None when it cannot be rewritten."""
 
         if format_type == FormatType.AGE_NUMERIC_ONLY:
             # Replace the number while preserving surrounding characters
@@ -230,10 +236,10 @@ class AgeGroupAnonymizer(Operator):
             # Convert numeric age back to written form
             return self._convert_number_to_words(age_value, original_text)
 
-        return original_text
+        return None
 
-    def _convert_number_to_words(self, number: int, original_text: str) -> str:
-        """Convert a number back to written words, preserving the original format."""
+    def _convert_number_to_words(self, number: int, original_text: str) -> str | None:
+        """Convert a number back to written words, preserving the original format; None if no number word matched."""
 
         ones = [
             "",
@@ -260,9 +266,9 @@ class AgeGroupAnonymizer(Operator):
 
         tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"]
 
-        if number < 20:
+        if number < 20:  # noqa: PLR2004
             word_number = ones[number]
-        elif number < 100:
+        elif number < 100:  # noqa: PLR2004
             tens_digit = number // 10
             ones_digit = number % 10
             if ones_digit == 0:
@@ -309,8 +315,8 @@ class AgeGroupAnonymizer(Operator):
         if re.search(ones_pattern, text_lower):
             return re.sub(ones_pattern, word_number, original_text, flags=re.IGNORECASE)
 
-        # If no pattern matched, return original text
-        return original_text
+        # No number word matched: the caller falls back to the entity mask
+        return None
 
     def validate(self, params: dict) -> None:
         """Validate operator parameters."""
@@ -321,9 +327,8 @@ class AgeGroupAnonymizer(Operator):
 
         # Validate upper_limit parameter
         upper_limit = params.get("upper_limit")
-        if upper_limit is not None:
-            if not isinstance(upper_limit, int) or upper_limit <= 0:
-                raise ValueError("Parameter 'upper_limit' must be a positive integer.")
+        if upper_limit is not None and (not isinstance(upper_limit, int) or upper_limit <= 0):
+            raise ValueError("Parameter 'upper_limit' must be a positive integer.")
 
     def operator_name(self) -> str:
         """Return the operator name."""

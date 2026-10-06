@@ -55,8 +55,17 @@ from tide2.recognizers import create_cached_recognizer
 from tide2.recognizers import create_recognizers_for_patient
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.batch_columns import type_all_null_columns
 from tide2.utils.nulls import is_null
+from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.span_metrics import resolve_recognizer_results
+from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import SUCCESS
+from tide2.utils.stage_status import NoteError
+from tide2.utils.stage_status import append_status
+from tide2.utils.stage_status import failure_reason
+from tide2.utils.stage_status import is_failed
+from tide2.utils.stage_status import log_note_failure
 
 
 class _BlankSpacyNlpEngine(SpacyNlpEngine):
@@ -313,8 +322,6 @@ class RecognizerWorker:
                 "text_hash": text_hash,
                 "recognizer_results_json": "[]",
                 "entity_count": 0,
-                "processing_status": "success",
-                "error_message": None,
             }
 
         note_len = len(note_text)
@@ -355,8 +362,6 @@ class RecognizerWorker:
             "text_hash": text_hash,
             "recognizer_results_json": results_json,
             "entity_count": len(analyzer_results),
-            "processing_status": "success",
-            "error_message": None,
         }
 
     def _build_ad_hoc_recognizers(
@@ -365,7 +370,11 @@ class RecognizerWorker:
         patient_identifiers: str | dict | None,
         text_hash: str,
     ) -> list:
-        """Build list of ad-hoc recognizers for a note."""
+        """Build list of ad-hoc recognizers for a note.
+
+        Raises:
+            NoteError: If ``patient_identifiers`` or the cached results are malformed.
+        """
         ad_hoc_recognizers = []
 
         # Add cached DL results recognizer if available
@@ -375,19 +384,19 @@ class RecognizerWorker:
 
         # Add known values recognizers if patient PHI is available
         if not is_null(patient_identifiers) and patient_identifiers:
-            try:
-                if isinstance(patient_identifiers, dict):
-                    phi_dict = patient_identifiers
-                elif isinstance(patient_identifiers, (str, bytes)):
+            if isinstance(patient_identifiers, dict):
+                phi_dict = patient_identifiers
+            elif isinstance(patient_identifiers, (str, bytes)):
+                try:
                     phi_dict = orjson.loads(patient_identifiers)
-                else:
-                    phi_dict = None
+                except orjson.JSONDecodeError as e:
+                    raise NoteError("patient_identifiers") from e
+            else:
+                raise NoteError("patient_identifiers")
 
-                if phi_dict and isinstance(phi_dict, dict):
-                    known_value_recognizers = create_recognizers_for_patient(phi_dict)
-                    ad_hoc_recognizers.extend(known_value_recognizers)
-            except (orjson.JSONDecodeError, json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Failed to parse patient_identifiers for note {text_hash}: {e}")
+            if not isinstance(phi_dict, dict):
+                raise NoteError("patient_identifiers")
+            ad_hoc_recognizers.extend(create_recognizers_for_patient(phi_dict))
 
         return ad_hoc_recognizers
 
@@ -509,7 +518,7 @@ class RecognizerWorker:
         results_json_list = []
         entity_counts = []
         processing_statuses = []
-        error_messages = []
+        stage_statuses = []
 
         cols = BatchColumns(batch)
         _check_deprecated_patient_uid(cols, location="RecognizerWorker.process_batch")
@@ -521,6 +530,8 @@ class RecognizerWorker:
         patient_ids_col = cols.get("patient_id", [None] * batch_size)
         jitters_col = cols.get("jitter", [None] * batch_size)
         row_ids_col = cols.get("row_id", [None] * batch_size)
+        upstream_status_col = cols.get("processing_status", [None] * batch_size)
+        upstream_stage_col = cols.get("stage_status_json", [None] * batch_size)
         has_jitter = "jitter" in cols
         has_row_id = "row_id" in cols
 
@@ -528,37 +539,41 @@ class RecognizerWorker:
             raw_note = note_texts[i]
             note_text = "" if is_null(raw_note) else str(raw_note)
             text_hash = input_text_hashes[i]
-            cached_results = cached_results_col[i]
-            patient_identifiers = patient_identifiers_col[i]
+            p_id = patient_ids_col[i]
 
-            try:
-                result = self.process_note(
-                    note_text=note_text,
-                    text_hash=text_hash,
-                    cached_results=cached_results,
-                    patient_identifiers=patient_identifiers,
-                )
-                p_id = patient_ids_col[i]
-                pid_for_row_id = "None" if is_null(p_id) or str(p_id).strip() == "" else str(p_id)
+            if has_row_id and not is_null(row_ids_col[i]):
+                r_id = row_ids_col[i]
+            else:
+                r_id = hashlib.sha256(f"{text_hash}:{row_id_patient_part(p_id)}".encode()).hexdigest()
 
-                if has_row_id and not is_null(row_ids_col[i]):
-                    r_id = row_ids_col[i]
-                else:
-                    r_id = hashlib.sha256(f"{text_hash}:{pid_for_row_id}".encode()).hexdigest()
+            upstream_stage = upstream_stage_col[i]
+            result = None
+            if is_failed(upstream_status_col[i]):
+                stage_json, status = upstream_stage, FAILED
+            else:
+                try:
+                    result = self.process_note(
+                        note_text=note_text,
+                        text_hash=text_hash,
+                        cached_results=cached_results_col[i],
+                        patient_identifiers=patient_identifiers_col[i],
+                    )
+                    stage_json, status = append_status(upstream_stage, "recognizer", SUCCESS)
+                except Exception as exc:
+                    result = None
+                    log_note_failure(logger, "recognizer", text_hash, exc)
+                    stage_json, status = append_status(upstream_stage, "recognizer", FAILED, failure_reason(exc))
 
-                out_text_hashes.append(result["text_hash"])
-                out_note_texts.append(note_text)
-                out_patient_ids.append(p_id)
-                out_row_ids.append(r_id)
-                if has_jitter:
-                    out_jitters.append(jitters_col[i])
-                results_json_list.append(result["recognizer_results_json"])
-                entity_counts.append(result["entity_count"])
-                processing_statuses.append(result["processing_status"])
-                error_messages.append(result["error_message"])
-            except Exception:
-                logger.exception("Error processing note %s in batch, skipping (will retry on next run)", text_hash)
-                continue
+            out_text_hashes.append(text_hash)
+            out_note_texts.append(note_text)
+            out_patient_ids.append(p_id)
+            out_row_ids.append(r_id)
+            if has_jitter:
+                out_jitters.append(jitters_col[i])
+            results_json_list.append(None if result is None else result["recognizer_results_json"])
+            entity_counts.append(None if result is None else result["entity_count"])
+            processing_statuses.append(status)
+            stage_statuses.append(stage_json)
 
         batch_timestamp = datetime.now(UTC).isoformat()
         res = {
@@ -570,11 +585,11 @@ class RecognizerWorker:
             "entity_count": entity_counts,
             "processing_timestamp": [batch_timestamp] * len(out_text_hashes),
             "processing_status": processing_statuses,
-            "error_message": error_messages,
+            "stage_status_json": stage_statuses,
         }
         if has_jitter:
             res["jitter"] = out_jitters
-        return res
+        return type_all_null_columns(res)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""

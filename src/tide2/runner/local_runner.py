@@ -56,6 +56,9 @@ from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.nulls import row_id_patient_part
+from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import merge_stage_status
 
 from .fault_tolerance import GracefulShutdown
 from .fault_tolerance import configure_data_context
@@ -252,7 +255,8 @@ def add_row_id(table: pa.Table) -> pa.Table:
     """Compute and append a row_id column to an Arrow table if not present.
 
     Derives row_id from text_hash and patient_id using sha256(f"{text_hash}:{patient_id}").
-    When patient_id is absent or null, uses DEFAULT_ROW_ID_PATIENT_ID ("None").
+    When patient_id is absent, null (including float NaN) or blank, uses
+    DEFAULT_ROW_ID_PATIENT_ID ("None"), the same rule the recognizer applies.
 
     The value depends only on the note content and the patient, so it is the same
     on every run and every machine. Orchestrators can call this function to
@@ -265,16 +269,13 @@ def add_row_id(table: pa.Table) -> pa.Table:
         return table
 
     n = len(table)
-    if "patient_id" in table.column_names:
-        pid = table["patient_id"]
-        if not pa.types.is_string(pid.type) and not pa.types.is_large_string(pid.type):
-            pid = pc.cast(pid, pa.string())
-    else:
-        pid = pa.nulls(n, pa.string())
+    patient_ids = table["patient_id"].to_pylist() if "patient_id" in table.column_names else [None] * n
 
-    pid_str = pc.fill_null(pid, DEFAULT_ROW_ID_PATIENT_ID)
-    key = pc.binary_join_element_wise(table["text_hash"], pid_str, ":")
-    row_ids = [hashlib.sha256(k.encode("utf-8")).hexdigest() for k in key.to_pylist()]
+    text_hashes = table["text_hash"].to_pylist()
+    row_ids = [
+        hashlib.sha256(f"{h}:{row_id_patient_part(p)}".encode()).hexdigest()
+        for h, p in zip(text_hashes, patient_ids, strict=True)
+    ]
     return table.append_column("row_id", pa.array(row_ids, type=pa.string()))
 
 
@@ -403,7 +404,7 @@ def _read_stage_source(
     return ds
 
 
-def _resolve_merged_batch(batch: pa.Table) -> pa.Table:
+def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
     """Resolve regex and LLM recognizer results per row with longest_wins strategy."""
     from presidio_anonymizer.entities import RecognizerResult
 
@@ -429,8 +430,8 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:
     reg_raw = batch["results_regex"].to_pylist() if "results_regex" in col_names else [None] * n
     llm_raw = batch["results_llm"].to_pylist() if "results_llm" in col_names else [None] * n
 
-    resolved_jsons = []
-    entity_counts = []
+    resolved_jsons: list[str | None] = []
+    entity_counts: list[int | None] = []
     for r_json, l_json in zip(reg_raw, llm_raw, strict=True):
         r_list = json.loads(r_json) if r_json else []
         l_list = json.loads(l_json) if l_json else []
@@ -468,6 +469,24 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:
         resolved_jsons.append(json.dumps(resolved_dicts))
         entity_counts.append(len(resolved_dicts))
 
+    # Worst status of the two branches; a failed row has no usable results
+    status_out: list[str] | None = None
+    stage_json_out: list[str] | None = None
+    if "processing_status_regex" in col_names or "processing_status_llm" in col_names:
+        reg_stage = (
+            batch["stage_status_json_regex"].to_pylist() if "stage_status_json_regex" in col_names else [None] * n
+        )
+        llm_stage = batch["stage_status_json_llm"].to_pylist() if "stage_status_json_llm" in col_names else [None] * n
+        merged_status = [merge_stage_status(a, b) for a, b in zip(reg_stage, llm_stage, strict=True)]
+        stage_json_out = [m[0] for m in merged_status]
+        status_out = [m[1] for m in merged_status]
+    elif "processing_status" in col_names:
+        status_out = batch["processing_status"].to_pylist()
+    if status_out is not None:
+        for i, status in enumerate(status_out):
+            if status == FAILED:
+                resolved_jsons[i], entity_counts[i] = None, None
+
     drop_cols = {
         "results_regex",
         "results_llm",
@@ -482,11 +501,18 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:
         "jitter_llm",
         "patient_identifiers_regex",
         "patient_identifiers_llm",
+        "processing_status_regex",
+        "processing_status_llm",
+        "stage_status_json_regex",
+        "stage_status_json_llm",
     }
     res_cols = {col: batch[col] for col in col_names if col not in drop_cols}
     res_cols["text_hash"] = pa.array(text_hashes, type=pa.string())
     res_cols["recognizer_results_json"] = pa.array(resolved_jsons, type=pa.string())
     res_cols["entity_count"] = pa.array(entity_counts, type=pa.int64())
+    if stage_json_out is not None and status_out is not None:
+        res_cols["stage_status_json"] = pa.array(stage_json_out, type=pa.string())
+        res_cols["processing_status"] = pa.array(status_out, type=pa.string())
 
     for col in ("note_text", "patient_id", "jitter", "patient_identifiers"):
         col_reg = f"{col}_regex"
@@ -524,7 +550,17 @@ class StageColumns:
 TRANSFORMER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
     optional=frozenset({"patient_id", "patient_identifiers", "jitter"}),
-    produces=frozenset({"text_hash", "patient_id", "note_text", "recognizer_results_json", "row_id"}),
+    produces=frozenset(
+        {
+            "text_hash",
+            "patient_id",
+            "note_text",
+            "recognizer_results_json",
+            "row_id",
+            "processing_status",
+            "stage_status_json",
+        }
+    ),
 )
 RECOGNIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
@@ -539,7 +575,7 @@ RECOGNIZER_STAGE_COLUMNS = StageColumns(
             "entity_count",
             "processing_timestamp",
             "processing_status",
-            "error_message",
+            "stage_status_json",
         }
     ),
 )
@@ -556,7 +592,7 @@ LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
             "entity_count",
             "processing_timestamp",
             "processing_status",
-            "error_message",
+            "stage_status_json",
         }
     ),
 )
@@ -573,7 +609,7 @@ ANONYMIZER_STAGE_COLUMNS = StageColumns(
             "entity_count",
             "processing_timestamp",
             "processing_status",
-            "error_message",
+            "stage_status_json",
         }
     ),
 )
@@ -590,7 +626,7 @@ FINAL_OUTPUT_COLUMNS = frozenset(
         "entity_count",
         "processing_timestamp",
         "processing_status",
-        "error_message",
+        "stage_status_json",
     }
 )
 
@@ -1160,6 +1196,8 @@ class LocalJobRunner:
                 "patient_id",
                 "jitter",
                 "row_id",
+                "processing_status",
+                "stage_status_json",
             ]
         else:
             required_cols = ["text_hash", "note_text"]
@@ -1169,6 +1207,8 @@ class LocalJobRunner:
                 "patient_id",
                 "jitter",
                 "row_id",
+                "processing_status",
+                "stage_status_json",
             ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
@@ -1381,10 +1421,25 @@ class LocalJobRunner:
         # Detect columns — LLM recognizer needs text_hash, note_text, and forwards patient metadata
         if _normalize:
             required_cols = ["note_text"]
-            optional_cols = ["text_hash", "patient_id", "row_id", "jitter", "patient_identifiers"]
+            optional_cols = [
+                "text_hash",
+                "patient_id",
+                "row_id",
+                "jitter",
+                "patient_identifiers",
+                "processing_status",
+                "stage_status_json",
+            ]
         else:
             required_cols = ["text_hash", "note_text"]
-            optional_cols = ["patient_id", "row_id", "jitter", "patient_identifiers"]
+            optional_cols = [
+                "patient_id",
+                "row_id",
+                "jitter",
+                "patient_identifiers",
+                "processing_status",
+                "stage_status_json",
+            ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
@@ -1557,10 +1612,9 @@ class LocalJobRunner:
             of rows written) so a successful run is observable.
 
         Raises:
-            RuntimeError: If a non-empty input produces zero output rows. Ray's
-                ``max_errored_blocks`` and the supervisor's ``_failed_batch``
-                fallback can otherwise turn a total failure into a successful-looking
-                0-row write; this guard surfaces it as a hard error instead.
+            RuntimeError: If a non-empty input produces zero output rows. The
+                actors emit one row per input row, so this indicates a defect; the
+                guard surfaces it as a hard error.
         """
         from tide2.actors import create_anonymizer_actor_class
 
@@ -1605,7 +1659,7 @@ class LocalJobRunner:
 
         # Detect columns
         required_cols = ["text_hash", "note_text", "recognizer_results_json"]
-        optional_cols = ["patient_id", "jitter", "row_id"]
+        optional_cols = ["patient_id", "jitter", "row_id", "processing_status", "stage_status_json"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         # Without row_id and with checkpointing, it is derived inside the read (see
@@ -1682,9 +1736,7 @@ class LocalJobRunner:
             )
             processed.write_parquet(str(output_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
-            # Guard against silent total failure: Ray's max_errored_blocks can turn
-            # every dropped batch into a successful-looking 0-row write.
-            # Surface that as a hard error instead.
+            # Actors emit one row per input row, so a 0-row write from non-empty input is a defect.
             try:
                 output_files = list_parquet_files(output_dir, recursive=False)
                 if output_files:
@@ -1929,10 +1981,7 @@ class LocalJobRunner:
             required_cols = ["text_hash", "note_text"]
             optional_cols = ["patient_id", "patient_identifiers", "jitter", "row_id"]
         if input_files:
-            try:
-                columns = detect_columns(input_files[0], required_cols, optional_cols)
-            except (FileNotFoundError, OSError):
-                columns = ["text_hash", "note_text", "patient_id"]
+            columns = detect_columns(input_files[0], required_cols, optional_cols)
             read_target = input_files
         else:
             columns = ["text_hash", "note_text", "patient_id"]
@@ -2350,29 +2399,32 @@ class LocalJobRunner:
                 sample_schema = read_parquet_schema(rec_files[0])
                 regex_names = set(sample_schema.names)
                 passthrough_cols = ["note_text", "patient_id", "jitter", "patient_identifiers"]
+                status_cols = ["processing_status", "stage_status_json"]
                 reg_passthrough = [c for c in passthrough_cols if c in regex_names]
+                reg_status = [c for c in status_cols if c in regex_names]
 
                 regex_ds = ray.data.read_parquet(str(regex_output_path)).select_columns(
-                    ["row_id", "text_hash", "recognizer_results_json", *reg_passthrough]
+                    ["row_id", "text_hash", "recognizer_results_json", *reg_passthrough, *reg_status]
                 )
                 regex_renames = {
                     "recognizer_results_json": "results_regex",
                     "text_hash": "text_hash_regex",
                 }
-                for c in reg_passthrough:
+                for c in [*reg_passthrough, *reg_status]:
                     regex_renames[c] = f"{c}_regex"
                 regex_ds = regex_ds.rename_columns(regex_renames)
 
                 llm_schema = read_parquet_schema(llm_files[0])
                 llm_names = set(llm_schema.names)
                 llm_passthrough = [c for c in passthrough_cols if c in llm_names]
+                llm_status = [c for c in status_cols if c in llm_names]
 
-                llm_cols = ["row_id", "recognizer_results_json", *llm_passthrough]
+                llm_cols = ["row_id", "recognizer_results_json", *llm_passthrough, *llm_status]
                 llm_renames = {"recognizer_results_json": "results_llm"}
                 if "text_hash" in llm_schema.names:
                     llm_cols.append("text_hash")
                     llm_renames["text_hash"] = "text_hash_llm"
-                for c in llm_passthrough:
+                for c in [*llm_passthrough, *llm_status]:
                     llm_renames[c] = f"{c}_llm"
 
                 llm_ds = ray.data.read_parquet(str(llm_recognizer_output_path)).select_columns(llm_cols)

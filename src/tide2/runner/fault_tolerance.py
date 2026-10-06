@@ -129,7 +129,7 @@ def configure_data_context(
     target_max_block_size_mb: int = 128,
     target_min_block_size_mb: int = 1,
     read_op_min_num_blocks: int = 2000,
-    max_errored_blocks: int = 100,
+    max_errored_blocks: int = 0,
     no_progress_timeout_s: float = 600.0,
 ) -> ray.data.DataContext:
     """
@@ -145,9 +145,11 @@ def configure_data_context(
         target_min_block_size_mb: Minimum block size in MB (default 1).
         read_op_min_num_blocks: Minimum number of read output blocks (default 2000).
             Higher values increase read parallelism for large datasets.
-        max_errored_blocks: Maximum number of blocks that can error before
-            aborting the dataset execution (default 100). Prevents node-level
-            OOM kills from aborting the entire job.
+        max_errored_blocks: Maximum number of errored blocks tolerated before the
+            dataset execution aborts (default 0). Ray drops every errored block from
+            the output, so a non-zero value silently loses the notes in it. Per-note
+            errors are handled inside the actors and recorded in the row, so only a
+            defect or a worker lost after Ray's retries reaches this setting.
         no_progress_timeout_s: Execution-level hang detection timeout in seconds
             (default 600.0, ~10x the slowest stage). Pass -1 to disable the
             no-progress guard. 0 is invalid and raises ValueError.
@@ -185,8 +187,7 @@ def configure_data_context(
     # read output blocks to keep actors fed.
     ctx.read_op_min_num_blocks = read_op_min_num_blocks
 
-    # Tolerate some errored blocks from node-level OOM kills instead of
-    # aborting the entire job. Failed blocks are skipped in the output.
+    # Ray drops errored blocks from the output without an error, so abort instead.
     ctx.max_errored_blocks = max_errored_blocks
 
     # Use datasource v1 for Parquet to enable SplitBlocks so override_num_blocks

@@ -225,8 +225,6 @@ def test_recognizer_worker_process_note_handles_pd_na():
         cached_results=None,
         patient_identifiers=None,
     )
-    if res["processing_status"] != "success":
-        raise ValueError(f"Expected success, got {res['processing_status']}")
     if res["entity_count"] != 0:
         raise ValueError(f"Expected 0 entities, got {res['entity_count']}")
     if res["recognizer_results_json"] != "[]":
@@ -249,8 +247,6 @@ def test_recognizer_worker_process_batch_passthrough():
             "text_hash": text_hash,
             "recognizer_results_json": "[]",
             "entity_count": 0,
-            "processing_status": "success",
-            "error_message": None,
         }
 
     worker.process_note = mock_process_note

@@ -53,7 +53,14 @@ from tide2.transformers.core import plan_windows
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import copy_passthrough
+from tide2.utils.batch_columns import type_all_null_columns
 from tide2.utils.nulls import is_null
+from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import SUCCESS
+from tide2.utils.stage_status import append_status
+from tide2.utils.stage_status import failure_reason
+from tide2.utils.stage_status import is_failed
+from tide2.utils.stage_status import log_note_failure
 from tide2.utils.text_processing import aggregate_bio_tokens
 from tide2.utils.text_processing import deduplicate_overlapping_entities
 
@@ -314,7 +321,7 @@ class TransformerInferenceActor:
         """Get the model pipeline (for backwards compatibility)."""
         return self._core.pipeline
 
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
         """
         Process a batch of **whole notes** through transformer inference (raw tokens).
 
@@ -356,6 +363,8 @@ class TransformerInferenceActor:
                 "text_hash": [],
                 "patient_id": [],
                 "note_text": [],
+                "processing_status": [],
+                "stage_status_json": [],
             }
             if self._aggregate_bio:
                 res["recognizer_results_json"] = []
@@ -369,62 +378,63 @@ class TransformerInferenceActor:
         # Filter out None/empty texts, normalizing nullable scalars (e.g. pd.NA, float nan)
         note_texts = ["" if is_null(t) else str(t) for t in note_texts]
         valid_indices = [i for i, t in enumerate(note_texts) if t]
-        if not valid_indices:
-            res = {
-                "text_hash": list(text_hashes),
-                "patient_id": list(patient_ids),
-                "note_text": note_texts,
-            }
-            if self._aggregate_bio:
-                timestamp = datetime.now(tz=UTC).isoformat()
-                res["recognizer_results_json"] = ["[]"] * batch_size
-                res["entity_count"] = [0] * batch_size
-                res["processing_timestamp"] = [timestamp] * batch_size
+
+        # One payload per note: recognizer_results_json (fused) or predictions_raw_json.
+        payloads: list[str | None] = ["[]"] * batch_size
+        entity_counts: list[int | None] = [0] * batch_size
+        ok_json, ok_status = append_status(None, "transformer", SUCCESS)
+        stage_jsons = [ok_json] * batch_size
+        statuses = [ok_status] * batch_size
+
+        def _fail(idx: int, exc: Exception) -> None:
+            fail_json, fail_status = append_status(None, "transformer", FAILED, failure_reason(exc))
+            payloads[idx], entity_counts[idx] = None, None
+            stage_jsons[idx], statuses[idx] = fail_json, fail_status
+
+        if valid_indices:
+            valid_texts = [note_texts[i] for i in valid_indices]
+
+            # Run raw inference with OOM recovery (no BIO aggregation). A failure that
+            # survives the recovery fails every note in the batch; the rows are kept.
+            self._log_gpu_mem(f"before __call__ (n={len(valid_texts)})")
+            try:
+                raw_results = self._run_inference_raw_with_oom_recovery(valid_texts)
+            except Exception as exc:
+                logger.error(  # noqa: TRY400 - the traceback can echo note text, so it is debug-only
+                    "transformer failed a batch of %d notes: %s", len(valid_texts), failure_reason(exc)
+                )
+                logger.debug("transformer failure detail", exc_info=True)
+                for idx in valid_indices:
+                    _fail(idx, exc)
             else:
-                res["predictions_raw_json"] = ["[]"] * batch_size
-            copy_passthrough(cols, res)
-            return res
+                self._log_gpu_mem(f"after __call__ (n={len(valid_texts)})")
+                for idx, preds in zip(valid_indices, raw_results, strict=True):
+                    try:
+                        if self._aggregate_bio:
+                            payloads[idx], entity_counts[idx] = self._format_note(preds, note_texts[idx])
+                        else:
+                            payloads[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
+                    except Exception as exc:
+                        log_note_failure(logger, "transformer", text_hashes[idx], exc)
+                        _fail(idx, exc)
 
-        valid_texts = [note_texts[i] for i in valid_indices]
-
-        # Run raw inference with OOM recovery (no BIO aggregation)
-        self._log_gpu_mem(f"before __call__ (n={len(valid_texts)})")
-        raw_results = self._run_inference_raw_with_oom_recovery(valid_texts)
-        self._log_gpu_mem(f"after __call__ (n={len(valid_texts)})")
-
+        res = {
+            "text_hash": list(text_hashes),
+            "patient_id": list(patient_ids),
+            "note_text": note_texts,
+        }
         if self._aggregate_bio:
-            timestamp = datetime.now(tz=UTC).isoformat()
-            results_json_list: list[str] = ["[]"] * batch_size
-            entity_counts: list[int] = [0] * batch_size
-            for idx, preds in zip(valid_indices, raw_results, strict=True):
-                r_json, count = self._format_note(preds, note_texts[idx] or "")
-                results_json_list[idx] = r_json
-                entity_counts[idx] = count
-
-            res = {
-                "text_hash": list(text_hashes),
-                "patient_id": list(patient_ids),
-                "note_text": note_texts,
-                "recognizer_results_json": results_json_list,
-                "entity_count": entity_counts,
-                "processing_timestamp": [timestamp] * batch_size,
-            }
+            res["recognizer_results_json"] = payloads
+            res["entity_count"] = entity_counts
+            res["processing_timestamp"] = [datetime.now(tz=UTC).isoformat()] * batch_size
         else:
-            # Map predictions back to original indices and serialize to JSON
-            predictions_raw_json_list = ["[]"] * batch_size
-            for idx, preds in zip(valid_indices, raw_results, strict=True):
-                predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
-
-            res = {
-                "text_hash": list(text_hashes),
-                "patient_id": list(patient_ids),
-                "note_text": note_texts,
-                "predictions_raw_json": predictions_raw_json_list,
-            }
+            res["predictions_raw_json"] = payloads
+        res["processing_status"] = statuses
+        res["stage_status_json"] = stage_jsons
 
         copy_passthrough(cols, res)
 
-        return res
+        return type_all_null_columns(res)
 
     def _format_note(self, raw_tokens: list[dict], note_text: str) -> tuple[str, int]:
         """Aggregate one note's raw BIO tokens into ``recognizer_results_json``."""
@@ -680,6 +690,8 @@ class BIOAggregationActor:
         patient_ids = cols.get("patient_id", [None] * len(note_texts))
 
         batch_size = len(note_texts)
+        upstream_status_col = cols.get("processing_status", [None] * batch_size)
+        upstream_stage_col = cols.get("stage_status_json", [None] * batch_size)
 
         if batch_size == 0:
             res: dict[str, list[Any]] = {
@@ -689,17 +701,33 @@ class BIOAggregationActor:
                 "recognizer_results_json": [],
                 "entity_count": [],
                 "processing_timestamp": [],
+                "processing_status": [],
+                "stage_status_json": [],
             }
             copy_passthrough(cols, res, empty=True)
             return res
 
         timestamp = datetime.now(tz=UTC).isoformat()
-        results_json_list: list[str] = []
-        entity_counts: list[int] = []
+        results_json_list: list[str | None] = []
+        entity_counts: list[int | None] = []
+        statuses: list[str] = []
+        stage_jsons: list[str | None] = []
         for i in range(batch_size):
-            results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
+            upstream_stage = upstream_stage_col[i]
+            results_json, count = None, None
+            if is_failed(upstream_status_col[i]):
+                stage_json, status = upstream_stage, FAILED
+            else:
+                try:
+                    results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
+                    stage_json, status = append_status(upstream_stage, "bio_aggregation", SUCCESS)
+                except Exception as exc:
+                    log_note_failure(logger, "bio_aggregation", text_hashes[i], exc)
+                    stage_json, status = append_status(upstream_stage, "bio_aggregation", FAILED, failure_reason(exc))
             results_json_list.append(results_json)
             entity_counts.append(count)
+            statuses.append(status)
+            stage_jsons.append(stage_json)
 
         res = {
             "text_hash": list(text_hashes),
@@ -708,9 +736,11 @@ class BIOAggregationActor:
             "recognizer_results_json": results_json_list,
             "entity_count": entity_counts,
             "processing_timestamp": [timestamp] * batch_size,
+            "processing_status": statuses,
+            "stage_status_json": stage_jsons,
         }
         copy_passthrough(cols, res)
-        return res
+        return type_all_null_columns(res)
 
 
 def create_transformer_actor(

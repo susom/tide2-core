@@ -21,3 +21,10 @@ def test_configure_data_context_rejects_zero():
     """Passing 0 raises ValueError naming -1."""
     with pytest.raises(ValueError, match=r"no_progress_timeout_s=0 is invalid\. Pass -1"):
         configure_data_context(no_progress_timeout_s=0)
+
+
+def test_configure_data_context_aborts_on_errored_blocks_by_default():
+    """Ray drops errored blocks silently, so the default tolerates none."""
+    assert configure_data_context().max_errored_blocks == 0
+    assert configure_data_context(max_errored_blocks=5).max_errored_blocks == 5
+    configure_data_context()

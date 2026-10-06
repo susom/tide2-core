@@ -241,6 +241,7 @@ class TestPerOperatorReservations:
 
     def test_transformer_read_write(self, monkeypatch, tmp_path, captured_ds):
         runner = _make_runner(monkeypatch)
+        monkeypatch.setattr(lr, "detect_columns", lambda *_a, **_k: ["text_hash", "note_text"])
         # Avoid ray.cluster_resources(): force CPU-only, single actor each.
         monkeypatch.setattr(runner, "_resolve_transformer_resources", lambda *_a, **_k: (0, True, 1, 1))
         from tide2.transformers import config as tconfig

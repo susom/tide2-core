@@ -3,6 +3,8 @@
 import warnings
 from typing import Any
 
+import pyarrow as pa
+
 
 def _check_deprecated_patient_uid(container: Any, location: str = "") -> None:
     """Emit a DeprecationWarning and raise ValueError if deprecated patient_uid is present."""
@@ -102,3 +104,26 @@ def copy_passthrough(
                 res[col] = [src[i] for i in indices]
             else:
                 res[col] = list(cols[col])
+
+
+_NULLABLE_RESULT_TYPES: dict[str, pa.DataType] = {
+    "recognizer_results_json": pa.string(),
+    "predictions_raw_json": pa.string(),
+    "anonymized_note_text": pa.string(),
+    "anonymizer_results_json": pa.string(),
+    "entity_count": pa.int64(),
+}
+
+
+def type_all_null_columns(res: dict[str, Any]) -> dict[str, Any]:
+    """Give a result column that is entirely null its Arrow type, in place.
+
+    A batch where every note failed would otherwise write an Arrow ``null`` column,
+    and a Parquet directory mixing that file with typed files cannot be read as one
+    dataset by pyarrow. Columns with any value are left to Ray's type inference.
+    """
+    for name, arrow_type in _NULLABLE_RESULT_TYPES.items():
+        values = res.get(name)
+        if isinstance(values, list) and values and all(value is None for value in values):
+            res[name] = pa.array(values, type=arrow_type)
+    return res

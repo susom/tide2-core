@@ -1,5 +1,6 @@
 """Tests for the resumability contract: in-read row_id, URI-aware paths, and kill/restart."""
 
+import hashlib
 import logging
 import os
 import shutil
@@ -22,42 +23,10 @@ import ray.data
 
 import tide2.runner.local_runner as lr
 import tide2.runner.utils as runner_utils
-from tide2.actors.transformer import BIOAggregationActor
-from tide2.actors.transformer import TransformerInferenceActor
 from tide2.runner.local_runner import _configure_checkpoint
 from tide2.runner.local_runner import _read_stage_source
 from tide2.runner.local_runner import add_row_id
 from tide2.runner.local_runner import normalize_source_batch
-
-# ---------------------------------------------------------------------------
-# Aggregation failures propagate instead of becoming zero detections
-# ---------------------------------------------------------------------------
-
-
-def _boom(*_args, **_kwargs):
-    raise RuntimeError("malformed prediction")
-
-
-def test_bio_aggregation_actor_propagates_aggregation_failure(monkeypatch):
-    """A failing aggregation must raise, not emit a row with zero entities."""
-    monkeypatch.setattr("tide2.actors.transformer.format_note_entities", _boom)
-    actor = BIOAggregationActor("m", model_to_presidio_mapping={}, ignore_labels={"O"})
-    batch = {"text_hash": ["h"], "note_text": ["John"], "predictions_raw_json": ["[]"], "patient_id": ["p"]}
-    with pytest.raises(RuntimeError, match="malformed prediction"):
-        actor(batch)
-
-
-def test_transformer_actor_propagates_aggregation_failure():
-    """The in-actor aggregation path must raise as well."""
-    actor = object.__new__(TransformerInferenceActor)
-    actor._aggregate_bio = True
-    actor._log_gpu_mem = lambda *_a, **_k: None
-    actor._run_inference_raw_with_oom_recovery = lambda texts: [[] for _ in texts]
-    actor._format_note = _boom
-    batch = {"text_hash": ["h"], "note_text": ["John"], "patient_id": ["p"]}
-    with pytest.raises(RuntimeError, match="malformed prediction"):
-        actor(batch)
-
 
 # ---------------------------------------------------------------------------
 # normalize_source_batch / add_row_id on empty tables
@@ -77,6 +46,24 @@ def test_add_row_id_accepts_empty_table():
     out = add_row_id(empty)
     assert len(out) == 0
     assert "row_id" in out.column_names
+
+
+def test_add_row_id_treats_nan_blank_and_null_patient_ids_as_missing():
+    """A float NaN patient_id hashes like a null one, and whole-number floats keep their ".0"."""
+    table = pa.table(
+        {
+            "text_hash": ["a", "a", "a", "a", "a"],
+            "patient_id": pa.array([float("nan"), None, 123.0, 1.5, 0.0], pa.float64()),
+        }
+    )
+    row_ids = add_row_id(table)["row_id"].to_pylist()
+
+    def expected(part: str) -> str:
+        return hashlib.sha256(f"a:{part}".encode()).hexdigest()
+
+    assert row_ids == [expected("None"), expected("None"), expected("123.0"), expected("1.5"), expected("0.0")]
+    blank = add_row_id(pa.table({"text_hash": ["a"], "patient_id": ["  "]}))["row_id"].to_pylist()
+    assert blank == [expected("None")]
 
 
 # ---------------------------------------------------------------------------

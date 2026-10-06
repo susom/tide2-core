@@ -92,7 +92,7 @@ def test_llm_recognizer_worker_handles_pd_na_and_nulls():
         raise ValueError(f"Expected all success, got {out['processing_status']}")
     if out["entity_count"] != [0, 0, 0, 0]:
         raise ValueError(f"Expected all 0 entity_count, got {out['entity_count']}")
-    if any(err is not None for err in out["error_message"]):
-        raise ValueError(f"Expected no errors, got {out['error_message']}")
+    if any("failed" in (status or "") for status in out["stage_status_json"]):
+        raise ValueError(f"Expected no failures, got {out['stage_status_json']}")
     if worker.recognizer.analyze.called:
         raise ValueError("analyze should not have been called for null/empty notes")

@@ -39,3 +39,10 @@ def is_null(value: Any) -> bool:
         if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
             return True
     return False
+
+
+def row_id_patient_part(patient_id: Any) -> str:
+    """Return the patient part of a derived ``row_id``: ``"None"`` when missing or blank."""
+    if is_null(patient_id) or str(patient_id).strip() == "":
+        return "None"
+    return str(patient_id)

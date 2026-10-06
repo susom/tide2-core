@@ -18,6 +18,11 @@ Output columns:
     - anonymizer_results_json: JSON with anonymization details
     - entity_count: Number of entities anonymized
     - processing_timestamp: ISO timestamp of processing
+    - processing_status: ``success``, ``degraded`` or ``failed`` (worst across stages)
+    - stage_status_json: per-stage status and reason (see ``tide2.utils.stage_status``)
+
+A note that cannot be anonymized is emitted as a failed row with null text and
+results; a failure in one entity masks that entity as ``[ENTITY_TYPE]``.
 """
 
 import hashlib
@@ -42,13 +47,26 @@ from tide2.anonymizers import FakerAnonymizer
 from tide2.anonymizers import HipsAlphaNumericAnonymizer
 from tide2.anonymizers import HipsLocationAnonymizer
 from tide2.anonymizers import HipsNamesAnonymizer
+from tide2.anonymizers import MaskingAnonymizer
 from tide2.anonymizers import presidio_patches
+from tide2.anonymizers.guarded import end_note
+from tide2.anonymizers.guarded import guarded
+from tide2.anonymizers.guarded import record_error
+from tide2.anonymizers.guarded import start_note
+from tide2.anonymizers.guarded import summarize
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.batch_columns import type_all_null_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
+from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import NoteError
+from tide2.utils.stage_status import append_status
+from tide2.utils.stage_status import failure_reason
+from tide2.utils.stage_status import is_failed
+from tide2.utils.stage_status import log_note_failure
 
 logger = logging.getLogger(__name__)
 
@@ -122,13 +140,18 @@ class AnonymizerWorker:
 
         # Initialize Presidio AnonymizerEngine
         self.anonymizer_engine = AnonymizerEngine()
-        self.anonymizer_engine.add_anonymizer(AccessionNumberHashAnonymizer)
-        self.anonymizer_engine.add_anonymizer(FakerAnonymizer)
-        self.anonymizer_engine.add_anonymizer(DateJitterAnonymizer)
-        self.anonymizer_engine.add_anonymizer(HipsNamesAnonymizer)
-        self.anonymizer_engine.add_anonymizer(HipsAlphaNumericAnonymizer)
-        self.anonymizer_engine.add_anonymizer(HipsLocationAnonymizer)
-        self.anonymizer_engine.add_anonymizer(AgeGroupAnonymizer)
+        # Each operator is guarded so an error masks one entity instead of failing the note.
+        for operator_cls in (
+            AccessionNumberHashAnonymizer,
+            FakerAnonymizer,
+            DateJitterAnonymizer,
+            HipsNamesAnonymizer,
+            HipsAlphaNumericAnonymizer,
+            HipsLocationAnonymizer,
+            AgeGroupAnonymizer,
+        ):
+            self.anonymizer_engine.add_anonymizer(guarded(operator_cls))
+        self.anonymizer_engine.add_anonymizer(MaskingAnonymizer)
 
         # Pre-create base operators with the provided keys
         self._base_operators = self._create_base_operators()
@@ -143,10 +166,10 @@ class AnonymizerWorker:
     def _create_base_operators(self) -> dict[str, OperatorConfig]:
         """Create base operator configuration with the provided keys."""
         return {
-            # Use redact for unknown entity types (built-in Presidio operator)
-            "DEFAULT": OperatorConfig("redact"),
-            "OTHER": OperatorConfig("redact"),
-            "BASE64_IMAGE": OperatorConfig("redact"),
+            # Unknown entity types get a visible placeholder (recorded as a fallback), never a deletion.
+            "DEFAULT": OperatorConfig("masking", {"fallback": True}),
+            "OTHER": OperatorConfig("masking"),
+            "BASE64_IMAGE": OperatorConfig("masking"),
             "GENETIC_SEQUENCE": OperatorConfig("faker_anonymizer"),
             "AGE": OperatorConfig("age_grouping", {"upper_limit": 89}),
             "EMAIL_ADDRESS": OperatorConfig("faker_anonymizer"),
@@ -225,6 +248,7 @@ class AnonymizerWorker:
         self,
         date_jitter: int | None = None,
         patient_id: Any = None,
+        mask_dates: bool = False,
         **kwargs: Any,
     ) -> dict[str, OperatorConfig]:
         """
@@ -233,6 +257,7 @@ class AnonymizerWorker:
         Args:
             date_jitter: Jitter value for date anonymization.
             patient_id: Patient ID used as entity param for ACC_NUM hashing.
+            mask_dates: Replace dates with the entity mask instead of shifting them.
 
         Returns:
             Dictionary of operator configurations for this note.
@@ -244,12 +269,15 @@ class AnonymizerWorker:
         if date_jitter is None:
             date_jitter = secrets.randbelow(57) + 4
 
-        operators.update(
-            {
-                "DATE_TIME": OperatorConfig("date_jitter", {"jitter": date_jitter}),
-                "DATE": OperatorConfig("date_jitter", {"jitter": date_jitter}),
-            }
-        )
+        if mask_dates:
+            operators.update({"DATE_TIME": OperatorConfig("masking"), "DATE": OperatorConfig("masking")})
+        else:
+            operators.update(
+                {
+                    "DATE_TIME": OperatorConfig("date_jitter", {"jitter": date_jitter}),
+                    "DATE": OperatorConfig("date_jitter", {"jitter": date_jitter}),
+                }
+            )
 
         # Convert numeric patient_id to string, map null/NaN/nan/none to None
         clean_patient_id: str | None = None
@@ -270,33 +298,53 @@ class AnonymizerWorker:
 
         return operators
 
-    def _parse_recognizer_results(self, results_json: str | list | None) -> list[RecognizerResult]:
-        """Parse recognizer results from JSON string or list using orjson for speed."""
-        if not results_json:
-            return []
+    def _parse_recognizer_results(self, results_json: str | list | None, text_length: int) -> list[RecognizerResult]:
+        """Parse and validate recognizer results.
 
-        try:
-            # Use orjson for faster parsing (3-10x faster than stdlib json)
-            results_list = orjson.loads(results_json) if isinstance(results_json, (str, bytes)) else results_json
+        Args:
+            results_json: A JSON list (string or already parsed) of results.
+            text_length: Length of the note; every span must lie inside it.
 
-            if not results_list:
-                return []
+        Raises:
+            NoteError: If the results are null, malformed, or any span is invalid. A span we
+                cannot trust cannot be masked, so the note fails instead of passing through.
+        """
+        if is_null(results_json) or results_json == "":
+            raise NoteError("recognizer_results")
 
-            return [
-                result
-                if isinstance(result, RecognizerResult)
-                else RecognizerResult(
-                    entity_type=result.get("entity_type", "UNKNOWN"),
-                    start=result.get("start", 0),
-                    end=result.get("end", 0),
-                    score=result.get("score", 1.0),
-                )
-                for result in results_list
-            ]
+        if isinstance(results_json, (str, bytes)):
+            try:
+                # orjson parses 3-10x faster than the stdlib json
+                results_list = orjson.loads(results_json)
+            except orjson.JSONDecodeError as e:
+                raise NoteError("recognizer_results") from e
+        else:
+            results_list = results_json
 
-        except (orjson.JSONDecodeError, TypeError, KeyError) as e:
-            logger.warning(f"Failed to parse recognizer results: {e}")
-            return []
+        if not isinstance(results_list, list):
+            raise NoteError("recognizer_results")
+
+        parsed = []
+        for item in results_list:
+            if isinstance(item, RecognizerResult):
+                entity_type, start, end, score = item.entity_type, item.start, item.end, item.score
+            elif isinstance(item, dict):
+                entity_type = item.get("entity_type", "UNKNOWN")
+                start, end, score = item.get("start"), item.get("end"), item.get("score", 1.0)
+            else:
+                raise NoteError("invalid_span")
+
+            if (
+                not isinstance(entity_type, str)
+                or not isinstance(start, int)
+                or not isinstance(end, int)
+                or not (0 <= start <= end <= text_length)
+            ):
+                raise NoteError("invalid_span")
+            parsed.append(
+                item if isinstance(item, RecognizerResult) else RecognizerResult(entity_type, start, end, score)
+            )
+        return parsed
 
     def _compute_jitter_for_patient(self, patient_id: Any = None, **kwargs: Any) -> int:
         """
@@ -452,82 +500,94 @@ class AnonymizerWorker:
             jitter: Per-note jitter value (computed if None/NaN).
 
         Returns:
-            Dictionary with processing results for this note.
+            Dictionary with the anonymized note and ``stage_status`` (``success``,
+            ``degraded`` when an entity fell back to its mask, or ``failed`` when an
+            entity-level error was masked) with a ``stage_reason``.
+
+        Raises:
+            NoteError: If the recognizer results are unusable. Any other exception
+                comes from outside the operators; the caller fails the note.
         """
         _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker.process_note")
-        # Compute jitter from patient ID if not provided or if NaN
-        jitter_missing = is_null(jitter)
-        if jitter_missing:
-            if self.jitter_required:
-                raise ValueError(f"Jitter value is required but missing for note {original_text_hash[:16]}")
-            jitter = self._compute_jitter_for_patient(patient_id)
+        recognizer_results = self._parse_recognizer_results(recognizer_results_json, len(note_text))
 
-        # Parse recognizer results
-        recognizer_results = self._parse_recognizer_results(recognizer_results_json)
+        events = start_note()
+        try:
+            # With jitter_required and no jitter, dates are masked instead of shifted
+            mask_dates = False
+            if is_null(jitter):
+                if self.jitter_required:
+                    mask_dates = True
+                    record_error("DATE", "jitter_required")
+                else:
+                    jitter = self._compute_jitter_for_patient(patient_id)
 
-        # Resolve conflicts and merge adjacent date spans in one pass
-        recognizer_results = resolve_recognizer_results(
-            recognizer_results,
-            strategy="longest_wins",
-            merge_adjacent_types={
-                "HCW",
-                "DOCTOR",
-                "HOSPITAL",
-                "VENDOR",
-                "DATE",
-                "DATE_TIME",
-                "PATIENT",
-                "PERSON",
-                "PHONE",
-                "ORGANIZATION",
-                "LOCATION",
-            },
-            text=note_text,
-        )
-
-        # Create operators with jitter and per-note patient_id
-        operators = self._create_operators_for_note(jitter, patient_id)
-
-        # Use chunked anonymization for long notes to avoid O(n*m) string copies
-        if len(note_text) > MAX_ANON_CHUNK_SIZE:
-            anonymized_text, result_items = self._anonymize_chunked(note_text, recognizer_results, operators)
-            entity_count = len(result_items)
-            anonymizer_json = orjson.dumps(result_items).decode("utf-8")
-        else:
-            # Short notes: use standard Presidio path
-            anonymized_result = self.anonymizer_engine.anonymize(
+            # Resolve conflicts and merge adjacent date spans in one pass
+            recognizer_results = resolve_recognizer_results(
+                recognizer_results,
+                strategy="longest_wins",
+                merge_adjacent_types={
+                    "HCW",
+                    "DOCTOR",
+                    "HOSPITAL",
+                    "VENDOR",
+                    "DATE",
+                    "DATE_TIME",
+                    "PATIENT",
+                    "PERSON",
+                    "PHONE",
+                    "ORGANIZATION",
+                    "LOCATION",
+                },
                 text=note_text,
-                analyzer_results=recognizer_results,
-                operators=operators,
-                merge_entities_with_spaces=False,  # rename-proof public equiv. of disable_whitespace_merging()
             )
 
-            anonymized_text = anonymized_result.text
-            entity_count = len(anonymized_result.items)
+            # Create operators with jitter and per-note patient_id
+            operators = self._create_operators_for_note(jitter, patient_id, mask_dates=mask_dates)
 
-            result_items = [
-                {
-                    "start": item.start,
-                    "end": item.end,
-                    "entity_type": item.entity_type,
-                    "text": item.text,
-                    "operator": item.operator,
-                }
-                for item in anonymized_result.items
-            ]
-            anonymizer_json = orjson.dumps(result_items).decode("utf-8")
+            # Use chunked anonymization for long notes to avoid O(n*m) string copies
+            if len(note_text) > MAX_ANON_CHUNK_SIZE:
+                anonymized_text, result_items = self._anonymize_chunked(note_text, recognizer_results, operators)
+                entity_count = len(result_items)
+                anonymizer_json = orjson.dumps(result_items).decode("utf-8")
+            else:
+                # Short notes: use standard Presidio path
+                anonymized_result = self.anonymizer_engine.anonymize(
+                    text=note_text,
+                    analyzer_results=recognizer_results,
+                    operators=operators,
+                    merge_entities_with_spaces=False,  # rename-proof public equiv. of disable_whitespace_merging()
+                )
 
+                anonymized_text = anonymized_result.text
+                entity_count = len(anonymized_result.items)
+
+                result_items = [
+                    {
+                        "start": item.start,
+                        "end": item.end,
+                        "entity_type": item.entity_type,
+                        "text": item.text,
+                        "operator": item.operator,
+                    }
+                    for item in anonymized_result.items
+                ]
+                anonymizer_json = orjson.dumps(result_items).decode("utf-8")
+        finally:
+            end_note()
+
+        stage_status, stage_reason = summarize(events)
         return {
             "text_hash": original_text_hash,
             "patient_id": patient_id,
             "anonymized_note_text": anonymized_text,
             "anonymizer_results_json": anonymizer_json,
             "entity_count": entity_count,
-            "processing_status": "success",
-            "error_message": None,
+            "stage_status": stage_status,
+            "stage_reason": stage_reason,
         }
 
-    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
         """
         Process a batch of notes in a single call. No IPC per note.
 
@@ -545,7 +605,7 @@ class AnonymizerWorker:
 
         Returns:
             Dictionary with columnar results for all notes in the batch. Every list
-            has the same length (one entry per successfully processed note).
+            has one entry per input note; a failed note has null results.
         """
         original_text_hashes = []
         patient_ids = []
@@ -553,7 +613,7 @@ class AnonymizerWorker:
         anonymizer_results_json_list = []
         entity_counts = []
         processing_statuses = []
-        error_messages = []
+        stage_statuses = []
         row_ids = []
 
         cols = BatchColumns(batch)
@@ -563,6 +623,8 @@ class AnonymizerWorker:
         input_patient_ids = cols.get("patient_id", [None] * batch_size)
         input_row_ids = cols.get("row_id", [None] * batch_size)
         recognizer_results_list = cols.get("recognizer_results_json", [None] * batch_size)
+        upstream_status_col = cols.get("processing_status", [None] * batch_size)
+        upstream_stage_col = cols.get("stage_status_json", [None] * batch_size)
 
         note_texts = cols["note_text"]
         for i in range(batch_size):
@@ -575,31 +637,45 @@ class AnonymizerWorker:
             original_text_hash = self.compute_text_hash(note_text)
 
             row_id = input_row_ids[i] if i < len(input_row_ids) else None
+            upstream_stage = upstream_stage_col[i]
 
-            try:
-                result = self.process_note(
-                    note_text=note_text,
-                    original_text_hash=original_text_hash,
-                    recognizer_results_json=recognizer_results_json,
-                    patient_id=patient_id,
-                    jitter=jitter,
-                )
-                original_text_hashes.append(result["text_hash"])
-                patient_ids.append(result["patient_id"])
-                anonymized_texts.append(result["anonymized_note_text"])
-                anonymizer_results_json_list.append(result["anonymizer_results_json"])
-                entity_counts.append(result["entity_count"])
-                processing_statuses.append(result["processing_status"])
-                error_messages.append(result["error_message"])
-                row_ids.append(row_id)
-            except Exception:
-                logger.exception(
-                    "Error anonymizing note %s in batch, skipping (will retry on next run)", original_text_hash[:8]
-                )
-                continue
+            result = None
+            if is_failed(upstream_status_col[i]):
+                stage_json, status = upstream_stage, FAILED
+            else:
+                try:
+                    result = self.process_note(
+                        note_text=note_text,
+                        original_text_hash=original_text_hash,
+                        recognizer_results_json=recognizer_results_json,
+                        patient_id=patient_id,
+                        jitter=jitter,
+                    )
+                    stage_json, status = append_status(
+                        upstream_stage, "anonymizer", result["stage_status"], result["stage_reason"]
+                    )
+                    if result["stage_status"] == FAILED:
+                        logger.error(
+                            "anonymizer masked an entity of note %s: %s",
+                            original_text_hash[:16],
+                            result["stage_reason"],
+                        )
+                except Exception as exc:
+                    result = None
+                    log_note_failure(logger, "anonymizer", original_text_hash, exc)
+                    stage_json, status = append_status(upstream_stage, "anonymizer", FAILED, failure_reason(exc))
+
+            original_text_hashes.append(original_text_hash)
+            patient_ids.append(patient_id)
+            anonymized_texts.append(None if result is None else result["anonymized_note_text"])
+            anonymizer_results_json_list.append(None if result is None else result["anonymizer_results_json"])
+            entity_counts.append(None if result is None else result["entity_count"])
+            processing_statuses.append(status)
+            stage_statuses.append(stage_json)
+            row_ids.append(row_id)
 
         batch_timestamp = datetime.now(UTC).isoformat()
-        result = {
+        out = {
             "text_hash": original_text_hashes,
             "patient_id": patient_ids,
             "anonymized_note_text": anonymized_texts,
@@ -607,12 +683,12 @@ class AnonymizerWorker:
             "entity_count": entity_counts,
             "processing_timestamp": [batch_timestamp] * len(original_text_hashes),
             "processing_status": processing_statuses,
-            "error_message": error_messages,
+            "stage_status_json": stage_statuses,
         }
         # Preserve row_id for checkpointing when input batch has the column
         if "row_id" in cols:
-            result["row_id"] = row_ids
-        return result
+            out["row_id"] = row_ids
+        return type_all_null_columns(out)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""
