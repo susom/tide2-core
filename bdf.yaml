@@ -48,7 +48,7 @@ output:
 collaborations: []
 
 container:
-  container_type: "Docker"   # multi-stage Dockerfile: production-cpu/gpu, development, test
+  container_type: "Docker"   # single-stage Dockerfile (GPU base image, entrypoint tide2-runner)
 
 maturity:
   beginning_maturity: 3

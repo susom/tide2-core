@@ -7,8 +7,9 @@ A data de-identification and anonymization toolkit that combines multiple anonym
 ### Dev Container (recommended)
 
 The repository includes a [Dev Container](https://containers.dev/) configuration that sets up
-the full development environment automatically: Python 3.12, `uv`, all dependencies (including
-GPU group), pre-commit hooks.
+the development environment automatically: Python 3.12, `uv`, all dependencies (including the
+`llm` extra and the `dev` group), pre-commit hooks. It does not pass a GPU through to the container;
+GPU-dependent tests need a host with CUDA.
 
 **Prerequisites:**
 - [Docker](https://docs.docker.com/get-docker/)
@@ -23,10 +24,10 @@ GPU group), pre-commit hooks.
    ```
 2. When VS Code detects `.devcontainer/devcontainer.json`, click **Reopen in Container**
    (or run the command **Dev Containers: Reopen in Container** from the command palette).
-3. The virtual environment at `/opt/tide2-core/.venv` is activated by default in all terminals.
+3. The virtual environment at `.venv` in the workspace is activated by default in all terminals.
 
-The Dev Container includes these VS Code extensions pre-installed: Python, Ruff, Jupyter,
-Docker, and TOML support.
+The Dev Container includes these VS Code extensions pre-installed: Python, ty, Ruff, Jupyter,
+and TOML support.
 
 ### Local Installation (without Dev Container)
 
@@ -527,19 +528,13 @@ tide2-visualizer
 
 ## Docker Images
 
-Several targets are built from a single multi-stage `Dockerfile`:
-
-- `production-cpu` — slim CPU-only image (no CUDA). Used by recognizer, anonymizer, and BigQuery tasks.
-- `production-gpu` — GPU image based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`. Used by transformer inference. (The ML stack — `torch`, `transformers`, `spacy` — ships in both images, since it is a required core dependency.)
-- `development` — Dev Container target with `git`, `gcloud`, build tools, and the full dev environment.
-- `test` — extends `development` and runs the test suite (used by `make test-docker`).
-
-Build and push the GPU image (requires `DOCKER_REGISTRY` and `DOCKER_IMAGE_GPU` in `.env`):
+The `Dockerfile` builds one image, based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`, whose entrypoint is
+`tide2-runner`. The same image runs on CPU-only hosts.
 
 ```bash
-make docker         # build + push the GPU image (alias for docker-gpu)
-make docker-gpu     # build + push the GPU image
-make test-docker    # build the test target and run the suite in Docker
+make docker                  # build tide2:dev
+make docker TAG=1.2.3        # build with another tag
+make docker-push             # build and push (set DOCKER_REGISTRY and DOCKER_IMAGE in .env)
 ```
 
 ## Dependency Groups
