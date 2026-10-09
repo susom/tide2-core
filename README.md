@@ -194,7 +194,7 @@ tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
 # fractionally; CPU-only box: also give the transformer actor ~C-1.
 tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --model StanfordAIMI/stanford-deidentifier-v2 \
-    --num-actors 1 --cpus-per-actor 0.5 --worker-num-cpus 1.0 \
+    --num-actors 1 --worker-num-cpus 1.5 \
     --read-cpus 0.25 --write-cpus 0.25 \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 ```
@@ -366,10 +366,9 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
   transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
   caps the actor's torch threads).
 - **Recognizer / anonymizer stages**: `--worker-num-cpus` (CPUs per worker actor),
-  `--read-cpus`, `--write-cpus`. Note: `--cpus-per-actor` is deprecated in favor of
-  `--worker-num-cpus`; both are additively resolved so existing configurations
-  reserve identical slot CPUs. Do not confuse actor CPUs (`--cpus-per-actor` /
-  `--worker-num-cpus`) with total cluster CPUs (`--num-cpus`).
+  `--read-cpus`, `--write-cpus`. `--cpus-per-actor` (a float) is deprecated; it is added to
+  `--worker-num-cpus`, so `--cpus-per-actor 0.5 --worker-num-cpus 1.0` is the same as
+  `--worker-num-cpus 1.5`. Do not confuse `--worker-num-cpus` with total cluster CPUs (`--num-cpus`).
 - **All stages on C ≲ 4**: add `--no-checkpoint`.
 
 On a `small-box-*` host the pipeline now applies both fixes for you — see
@@ -512,8 +511,8 @@ Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
 - **Raising or disabling the timeout**: For long wait times (e.g. cluster capacity delays
   or unusually slow UDFs), raise the timeout via `--no-progress-timeout <seconds>`
   (or in YAML config `no_progress_timeout_s: <seconds>`). Set `-1` to disable the guard.
-- **Legacy per-batch timeout**: `--batch-timeout` (formerly 120s) is deprecated and a no-op;
-  individual slow notes no longer cause entire batches to be discarded.
+- **Legacy per-batch timeout**: `--batch-timeout` (formerly 120s) is no longer supported; passing it
+  prints an error and exits with code 2. Individual slow notes no longer cause entire batches to be discarded.
 - **Caveat on shuffle operators**: Ray Data's `NoProgressGuard` automatically disables itself
   if the plan topology contains an `AllToAllOperator` or `HashShufflingOperatorBase`. Standard
   pipeline stages and checkpointed pipelines retain active guard protection on primary execution.

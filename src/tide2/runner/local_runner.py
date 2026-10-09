@@ -67,7 +67,6 @@ from .fault_tolerance import get_ray_remote_args_gpu
 from .hardware import alive_node_cpus
 from .hardware import apply_recommendations
 from .hardware import detect_hardware
-from .hardware import recommend_object_store_gb
 from .hardware import recommend_settings
 from .hardware import render_settings_table
 from .utils import DEFAULT_DASHBOARD_HOST
@@ -112,7 +111,7 @@ def _resolve_slot_cpus(
     Returns:
         Tuple of (slot_cpus, ray_remote_args, resolved_config_dict).
     """
-    if num_cpus is not None:
+    if num_cpus:
         import warnings
 
         warnings.warn(
@@ -325,6 +324,10 @@ def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
 
     if "note_text" not in lower_to_actual:
         raise ValueError("Input data must contain a 'note_text' column")
+
+    note_type = schema.field(lower_to_actual["note_text"]).type
+    if not (pa.types.is_string(note_type) or pa.types.is_large_string(note_type) or pa.types.is_null(note_type)):
+        raise TypeError(f"Column 'note_text' has unsupported type {note_type}; expected string")
 
     is_patient_id_numeric = False
     if "patient_id" in lower_to_actual:
@@ -792,14 +795,15 @@ class LocalJobRunner:
         Args:
             num_cpus: CPU count override
             num_gpus: GPU count override (supports fractional e.g. 0.33)
-            object_store_gb: Object store size in GB (default: ~30% of system RAM)
+            object_store_gb: Object store size in GB. Default: Ray sizes it itself, which respects
+                its platform and /dev/shm caps (an explicit value bypasses them).
             dashboard_host: Dashboard host
             include_dashboard: Enable Ray dashboard
             no_progress_timeout_s: Ray Data hang-detection timeout applied to every
                 stage this runner launches. None = Ray Data's default. Stages reset
                 the DataContext per job, so the value is re-applied on each one.
             hardware_autotune: Whether automatic hardware recommendations are enabled.
-                If False, automatic object store and stage sizing recommendations are skipped.
+                If False, automatic stage sizing recommendations are skipped.
         """
         self.num_cpus = num_cpus
         self.num_gpus = num_gpus
@@ -860,10 +864,6 @@ class LocalJobRunner:
             kwargs["num_gpus"] = cluster_gpus
         if self.object_store_gb:
             kwargs["object_store_memory"] = self.object_store_gb * 1024**3
-        elif self.hardware_autotune:
-            rec_gb = recommend_object_store_gb(detect_hardware())
-            if rec_gb is not None:
-                kwargs["object_store_memory"] = int(rec_gb * 1024**3)
 
         ray.init(**kwargs)
         logger.info("Ray initialized")
@@ -2182,6 +2182,8 @@ class LocalJobRunner:
                 max_tokens, num_actors, batch_size.
             hardware_autotune: Enable hardware autotuning of per-stage settings.
                 When False, today's defaults run and recommendations are not applied.
+                It does not affect the Ray object store, which is sized by the
+                constructor's ``object_store_gb`` or by Ray.
             execution_mode: "discrete" (default) or "streamed" — see above.
 
         Returns:

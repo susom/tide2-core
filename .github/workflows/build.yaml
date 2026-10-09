@@ -112,6 +112,26 @@ jobs:
         with:
           extra_args: --from-ref ${{ steps.push_base.outputs.from_ref }} --to-ref ${{ github.event.after }}
 
+  test:
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'push' && github.ref_name != 'main')
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          python-version: "3.12"
+
+      # llm: the unit tests import the LLM SDK wrappers. Integration tests need a GPU or private data and are skipped.
+      - run: uv sync --locked --extra llm
+
+      - run: uv run pytest -m "not integration" --no-cov -q
+
   validate-tool:
     if: >-
       !inputs.skip_tests &&

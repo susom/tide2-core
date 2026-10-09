@@ -179,6 +179,13 @@ def test_resolve_slot_cpus_deprecation_warning():
     assert slot_cpus == 3.0
 
 
+@pytest.mark.parametrize("num_cpus", [None, 0])
+def test_resolve_slot_cpus_does_not_warn_without_a_legacy_value(num_cpus, recwarn):
+    """Autotune and the legacy defaults inject num_cpus=0; that must not trigger the deprecation warning."""
+    _resolve_slot_cpus(num_cpus=num_cpus, worker_num_cpus=1.0)
+    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+
 @pytest.mark.parametrize(
     ("num_cpus", "worker_num_cpus", "expected_slot_cpus"),
     [

@@ -441,7 +441,7 @@ Examples:
         "the actor halves and retries on OOM. Nominal default if not set.",
     )
     run_p.add_argument("--object-store-gb", type=int, help="Object store memory in GB")
-    run_p.add_argument("--cpus-per-actor", type=int, help="CPUs per actor (default: 2)")
+    run_p.add_argument("--cpus-per-actor", type=float, help="Deprecated: use --worker-num-cpus (default: 2)")
     run_p.add_argument("--read-parallelism", type=int, help="Number of read output blocks")
     run_p.add_argument("--read-cpus", type=float, help="CPUs per read task (default: 0.25)")
     run_p.add_argument("--read-op-min-num-blocks", type=int, help="Min read output blocks (default: 200)")
@@ -451,7 +451,7 @@ Examples:
         "--worker-num-cpus",
         type=float,
         help="CPUs per supervisor worker actor (recognizer/anonymizer/llm-recognizer/pipeline). "
-        "Lower (with --cpus-per-actor) to fit small boxes; default: Ray default (1)",
+        "Lower to fit small boxes; default: Ray default (1)",
     )
     run_p.add_argument(
         "--write-cpus",

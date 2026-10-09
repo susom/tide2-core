@@ -508,7 +508,63 @@ def test_all_null_result_columns_keep_their_arrow_type():
     assert res["recognizer_results_json"].type == pa.string()
     assert res["entity_count"].type == pa.int64()
     assert res["anonymized_note_text"] == [None, "x"]
-    assert res["patient_id"] == [None, None]
+    assert res["patient_id"].type == pa.string()
+
+
+def test_all_null_passthrough_columns_keep_their_arrow_type():
+    from tide2.utils.batch_columns import type_all_null_columns
+
+    res = type_all_null_columns(
+        {
+            "patient_identifiers": [None, None],
+            "patient_id": [None, None],
+            "jitter": [None, None],
+            "row_id": [None, None],
+        }
+    )
+    assert res["patient_identifiers"].type == pa.string()
+    assert res["patient_id"].type == pa.string()
+    assert res["jitter"].type == pa.int64()
+    assert res["row_id"].type == pa.string()
+
+    partial = type_all_null_columns({"jitter": [None, 3], "patient_id": ["p1", None]})
+    assert partial == {"jitter": [None, 3], "patient_id": ["p1", None]}
+
+
+@pytest.mark.parametrize("null_block_first", [True, False])
+def test_directory_with_an_all_null_passthrough_block_reads_back(tmp_path, null_block_first):
+    """Blocks with and without patient_id and jitter must read as one dataset in any file order."""
+    import pyarrow.dataset as pads
+    import pyarrow.parquet as pq
+    from ray.data.block import BlockAccessor
+
+    from tide2.utils.batch_columns import type_all_null_columns
+
+    def block(patient_id, jitter, patient_identifiers):
+        batch = type_all_null_columns(
+            {
+                "row_id": ["r1", "r2"],
+                "patient_id": patient_id,
+                "jitter": jitter,
+                "patient_identifiers": patient_identifiers,
+            }
+        )
+        return BlockAccessor.batch_to_block(batch)
+
+    blocks = [block([None, None], [None, None], [None, None]), block(["p1", "p2"], [3, 4], ["{}", "{}"])]
+    if not null_block_first:
+        blocks.reverse()
+    out = tmp_path / "out"
+    out.mkdir()
+    for i, tbl in enumerate(blocks):
+        pq.write_table(tbl, out / f"{i}.parquet")
+
+    for read in (lambda: pq.read_table(out), lambda: pads.dataset(out).to_table()):
+        table = read()
+        assert table.num_rows == 4
+        assert sorted(table["row_id"].to_pylist()) == ["r1", "r1", "r2", "r2"]
+        assert table["patient_id"].null_count == 2
+        assert table["jitter"].null_count == 2
 
 
 @pytest.mark.integration

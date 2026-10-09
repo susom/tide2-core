@@ -337,9 +337,14 @@ def run_ray(args) -> bool:
     import os
 
     import pandas as pd
+    import ray
 
     from tide2.runner.local_runner import LocalJobRunner
     from tide2.utils.text_processing import compute_text_hash
+
+    # Workers inherit TIDE2_OOM_COUNT_FILE only if Ray starts after it is set.
+    if ray.is_initialized():
+        ray.shutdown()
 
     source = load_texts(args.parquet, args.column, args.limit)
     logger.info("ray: loaded %d source notes", len(source))

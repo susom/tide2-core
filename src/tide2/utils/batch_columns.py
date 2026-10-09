@@ -106,23 +106,29 @@ def copy_passthrough(
                 res[col] = list(cols[col])
 
 
-_NULLABLE_RESULT_TYPES: dict[str, pa.DataType] = {
+_NULLABLE_COLUMN_TYPES: dict[str, pa.DataType] = {
     "recognizer_results_json": pa.string(),
     "predictions_raw_json": pa.string(),
     "anonymized_note_text": pa.string(),
     "anonymizer_results_json": pa.string(),
     "entity_count": pa.int64(),
+    "patient_identifiers": pa.string(),
+    "patient_id": pa.string(),
+    "jitter": pa.int64(),
+    "row_id": pa.string(),
 }
 
 
 def type_all_null_columns(res: dict[str, Any]) -> dict[str, Any]:
-    """Give a result column that is entirely null its Arrow type, in place.
+    """Give a result or passthrough column that is entirely null its Arrow type, in place.
 
-    A batch where every note failed would otherwise write an Arrow ``null`` column,
-    and a Parquet directory mixing that file with typed files cannot be read as one
+    A batch where every value is null would otherwise write an Arrow ``null`` column,
+    and a Parquet directory whose first file has that column cannot be read as one
     dataset by pyarrow. Columns with any value are left to Ray's type inference.
+    ``patient_id`` is typed as string because its source type is not known here; a
+    numeric ``patient_id`` then reads back as string only when an all-null file sorts first.
     """
-    for name, arrow_type in _NULLABLE_RESULT_TYPES.items():
+    for name, arrow_type in _NULLABLE_COLUMN_TYPES.items():
         values = res.get(name)
         if isinstance(values, list) and values and all(value is None for value in values):
             res[name] = pa.array(values, type=arrow_type)

@@ -1,6 +1,7 @@
 """Unit tests verifying deprecation warnings and errors for patient_uid."""
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from tide2.actors.anonymizer import AnonymizerWorker
@@ -224,7 +225,7 @@ def test_transformer_worker_preserves_missing_patient_id_as_none():
         "ROW_ID": ["row_abc"],
     }
     out = worker(batch)
-    assert out["patient_id"] == [None]
+    assert pa.array(out["patient_id"]).to_pylist() == [None]
     assert out["row_id"] == ["row_abc"]
 
     agg_cls = getattr(BIOAggregationActor, "__ray_actor_class__", BIOAggregationActor)

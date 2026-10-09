@@ -194,6 +194,16 @@ class TestAggregationFold:
         assert meta["matched_pattern"] == "John"
         assert meta["recognizer_identifier"].startswith("TransformersRecognizer[MODEL_X]_")
 
+    def test_recognizer_identifier_is_deterministic(self):
+        note_text = "John lives in Seattle"
+        raw = json.dumps([{"entity": "B-PERSON", "score": 0.9, "start": 0, "end": 4, "word": "John", "index": 1}])
+        first, _ = self._actor()._format_note(raw, note_text)
+        second, _ = self._actor()._format_note(raw, note_text)
+        assert first == second
+        assert json.loads(first)[0]["recognition_metadata"]["recognizer_identifier"] == (
+            "TransformersRecognizer[MODEL_X]_0_4"
+        )
+
     def test_overlap_region_duplicates_are_deduped(self):
         # The same PHI span surfaces from two overlapping windows with different
         # token ``index`` values (so the raw-token tuple dedup can't collapse it).

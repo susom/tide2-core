@@ -152,6 +152,33 @@ def test_inspect_pipeline_input_patient_id_types(tmp_path):
         _inspect_pipeline_input([str(f_bad)])
 
 
+@pytest.mark.parametrize("with_text_hash", [False, True])
+@pytest.mark.parametrize(
+    "bad_values",
+    [[b"raw bytes"], [12345], [1.5]],
+    ids=["binary", "integer", "float"],
+)
+def test_inspect_pipeline_input_rejects_non_string_note_text(tmp_path, bad_values, with_text_hash):
+    """A non-string note_text fails the same way with or without a supplied text_hash."""
+    columns = {"note_text": bad_values}
+    if with_text_hash:
+        columns["text_hash"] = ["h1"]
+    f = tmp_path / "bad_note.parquet"
+    pq.write_table(pa.table(columns), f)
+
+    with pytest.raises(TypeError, match=r"Column 'note_text' has unsupported type"):
+        _inspect_pipeline_input([str(f)])
+
+
+@pytest.mark.parametrize("note_type", [pa.string(), pa.large_string(), pa.null()])
+def test_inspect_pipeline_input_accepts_string_note_text(tmp_path, note_type):
+    """String, large_string and an all-null note_text column are accepted."""
+    f = tmp_path / "ok_note.parquet"
+    pq.write_table(pa.table({"note_text": pa.array([None], type=note_type)}), f)
+
+    assert "note_text" in _inspect_pipeline_input([str(f)]).columns
+
+
 # ---------------------------------------------------------------------------
 # 3b. normalize_source_batch
 # ---------------------------------------------------------------------------

@@ -441,7 +441,7 @@ def test_reference_box_parity():
     assert applied.anonymizer["override_num_blocks"] == 32
 
     assert applied.runner["no_progress_timeout_s"] == 600
-    assert applied.runner["object_store_gb"] == 19.2
+    assert "object_store_gb" not in applied.runner
 
 
 # ---------------------------------------------------------------------------
@@ -675,3 +675,31 @@ def test_recommend_object_store_gb():
         profile="unknown",
     )
     assert recommend_object_store_gb(hw_no_node) is None
+
+
+@pytest.mark.parametrize("hardware_autotune", [True, False])
+def test_init_ray_leaves_object_store_to_ray_by_default(monkeypatch, hardware_autotune):
+    """Without object_store_gb the runner passes no object_store_memory, so Ray applies its own caps."""
+    import tide2.runner.local_runner as lr
+
+    captured: dict = {}
+    monkeypatch.setattr(lr.ray, "init", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(lr, "log_ray_cluster_info", lambda: None)
+    monkeypatch.setattr(lr, "configure_data_context", lambda **_kwargs: None)
+
+    LocalJobRunner(hardware_autotune=hardware_autotune)._init_ray()
+
+    assert "object_store_memory" not in captured
+
+
+def test_init_ray_applies_an_explicit_object_store_gb(monkeypatch):
+    import tide2.runner.local_runner as lr
+
+    captured: dict = {}
+    monkeypatch.setattr(lr.ray, "init", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setattr(lr, "log_ray_cluster_info", lambda: None)
+    monkeypatch.setattr(lr, "configure_data_context", lambda **_kwargs: None)
+
+    LocalJobRunner(object_store_gb=2)._init_ray()
+
+    assert captured["object_store_memory"] == 2 * 1024**3

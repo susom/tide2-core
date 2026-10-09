@@ -377,7 +377,11 @@ def detect_hardware() -> HardwareFacts:
 
 
 def recommend_object_store_gb(hw: HardwareFacts) -> float | None:
-    """Recommend Ray object store memory in GB (~30% of system RAM)."""
+    """Return ~30% of system RAM in GB as a sizing hint for ``object_store_gb``.
+
+    Advisory only: the runner does not apply it, because Ray's own default also honours its macOS,
+    /dev/shm and size caps, which this value ignores.
+    """
     if hw.node is not None and hw.node.ram_gb > 0:
         return round(hw.node.ram_gb * 0.3, 1)
     return None
@@ -504,14 +508,11 @@ def _small_box_transformer_recs(
     return recs
 
 
-def _runner_recs(hw: HardwareFacts, no_progress_timeout_s: int, *, disable_checkpoint: bool = False) -> dict[str, Any]:
-    """Cluster-level settings: hang guard, object store, and the small-box opt-out."""
+def _runner_recs(no_progress_timeout_s: int, *, disable_checkpoint: bool = False) -> dict[str, Any]:
+    """Cluster-level settings: hang guard and the small-box opt-out."""
     recs: dict[str, Any] = {"no_progress_timeout_s": no_progress_timeout_s}
     if disable_checkpoint:
         recs["enable_checkpoint"] = False
-    obj_gb = recommend_object_store_gb(hw)
-    if obj_gb is not None:
-        recs["object_store_gb"] = obj_gb
     return recs
 
 
@@ -557,7 +558,7 @@ def recommend_settings(
     if hw.profile in ("small-box-cpu", "small-box-gpu"):
         t_rec = _small_box_transformer_recs(hw, batch_size_rec, gpu_batch_size_rec)
         cpu_stage = _small_box_cpu_stage_recs()
-        run_rec = _runner_recs(hw, SLOW_START_NO_PROGRESS_TIMEOUT_S, disable_checkpoint=True)
+        run_rec = _runner_recs(SLOW_START_NO_PROGRESS_TIMEOUT_S, disable_checkpoint=True)
     else:
         if hw.profile in ("gpu-workstation", "gpu-server"):
             t_rec = _gpu_transformer_recs(hw, batch_size_rec, gpu_batch_size_rec)
@@ -576,7 +577,7 @@ def recommend_settings(
             num_actors = max(1, round(hw.cluster_cpu * REFERENCE_CPU_ACTOR_RATIO))
 
         cpu_stage = _cpu_stage_recs(num_actors)
-        run_rec = _runner_recs(hw, timeout)
+        run_rec = _runner_recs(timeout)
 
     return Recommendations(
         hw=hw,
@@ -639,14 +640,13 @@ def apply_recommendations(
 
     legacy_runner = {
         "no_progress_timeout_s": 600,
-        "object_store_gb": recommend_object_store_gb(rec.hw),
     }
 
     core_knobs = {
         "transformer": ["num_transformer_actors", "num_gpus", "transformer_cpus", "gpu_batch_size"],
         "recognizer": ["num_actors", "worker_num_cpus"],
         "anonymizer": ["num_actors", "worker_num_cpus"],
-        "runner": ["no_progress_timeout_s", "object_store_gb"],
+        "runner": ["no_progress_timeout_s"],
     }
 
     stages_config = [

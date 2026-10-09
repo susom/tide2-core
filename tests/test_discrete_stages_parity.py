@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import numpy as np
+import pyarrow as pa
 import ray
 
 import tide2.runner.local_runner as lr
@@ -275,7 +276,7 @@ def test_recognizer_worker_process_batch_passthrough():
         "patient_id": [None],
     }
     res_null = worker.process_batch(batch_null_pid)
-    assert res_null["patient_id"] == [None]
+    assert pa.array(res_null["patient_id"]).to_pylist() == [None]
     assert res_null["row_id"][0] == hashlib.sha256(b"h2:None").hexdigest()
 
 

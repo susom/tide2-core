@@ -163,7 +163,7 @@ def format_note_entities(
                 "recognition_metadata": {
                     "recognizer_name": recognizer_name,
                     "matched_pattern": matched_text,
-                    "recognizer_identifier": f"{recognizer_name}_{id(e)}",
+                    "recognizer_identifier": f"{recognizer_name}_{start}_{end}",
                 },
             }
         )

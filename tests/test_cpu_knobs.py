@@ -39,6 +39,9 @@ class TestSlotCpuResolution:
             (0, 0.25, 0.25),
             (2, 0.75, 2.75),
             (0, 0, 0.0),
+            (0.5, 1.0, 1.5),
+            (0.5, None, 1.5),
+            (None, 1.5, 1.5),
         ],
     )
     def test_resolve_slot_cpus(self, num_cpus, worker_num_cpus, expected_slot_cpus):
@@ -341,3 +344,54 @@ def test_cli_llm_recognizer_forwards_cpu_knobs(monkeypatch):
     assert captured["worker_num_cpus"] == 0.0
     assert captured["write_cpus"] == 0.25
     assert captured["enable_checkpoint"] is False
+
+
+def test_cli_cpus_per_actor_accepts_fractional_value(monkeypatch):
+    """--cpus-per-actor takes a float, so legacy small-box commands such as 0.5 still parse."""
+    from tide2.runner import cli
+    from tide2.runner.local_runner import LocalJobRunner
+
+    captured: dict = {}
+
+    def fake_run_recognition(self, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(LocalJobRunner, "run_recognition", fake_run_recognition)
+    monkeypatch.setattr(LocalJobRunner, "shutdown", lambda _self: None)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["tide2-runner", "run", "recognizer", "-i", "in", "-o", "out", "--cpus-per-actor", "0.5"],
+    )
+
+    cli.main()
+
+    assert captured["num_cpus"] == 0.5
+
+
+def test_cli_small_box_recipe_from_readme_parses(monkeypatch):
+    """The README small-box recipe parses and reserves 1.5 CPUs per recognizer and anonymizer slot."""
+    from tide2.runner import cli
+    from tide2.runner.local_runner import LocalJobRunner
+
+    captured: dict = {}
+
+    def fake_run_pipeline(self, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(LocalJobRunner, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(LocalJobRunner, "shutdown", lambda _self: None)
+    recipe = (
+        "tide2-runner run pipeline -i in.parquet -o out --model StanfordAIMI/stanford-deidentifier-v2 "
+        "--num-actors 1 --worker-num-cpus 1.5 --read-cpus 0.25 --write-cpus 0.25 "
+        "--agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint"
+    )
+    monkeypatch.setattr("sys.argv", recipe.split())
+
+    cli.main()
+
+    for stage in ("recognizer_kwargs", "anonymizer_kwargs"):
+        kwargs = captured[stage]
+        assert "num_cpus" not in kwargs
+        assert _resolve_slot_cpus(kwargs.get("num_cpus"), kwargs["worker_num_cpus"])[0] == 1.5
