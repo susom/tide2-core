@@ -16,6 +16,7 @@ Design principles:
 import re
 from typing import ClassVar
 
+import usaddress
 from presidio_analyzer import EntityRecognizer
 from presidio_analyzer.nlp_engine import NlpArtifacts
 from presidio_analyzer.recognizer_result import RecognizerResult
@@ -81,7 +82,7 @@ class AddressRecognizer(EntityRecognizer):
     )
 
     # Pattern 1: Full US address with ZIP
-    # Matches: "456 Oak Ave, Oakland, CA 94612-1234"
+    # Example: 456 Oak Ave, Oakland, CA 94612-1234
     # Requires commas between street/city/state to avoid catastrophic
     # backtracking — the original [\,\s]+ separator overlapped with \s in
     # the street-name and city-name character classes, causing exponential
@@ -109,7 +110,7 @@ class AddressRecognizer(EntityRecognizer):
     )
 
     # Pattern 2: Address with state and ZIP (city may be part of street line)
-    # Matches: "725 Welch Rd. Palo Alto, CA 94304"
+    # Example: 725 Welch Rd. Palo Alto, CA 94304
     # Requires comma before state to avoid backtracking — the original
     # separator [\,\s]+ overlapped with \s in the middle group causing
     # exponential backtracking on dense clinical text.
@@ -224,7 +225,7 @@ class AddressRecognizer(EntityRecognizer):
 
         return results
 
-    def _is_valid_address(self, text: str) -> bool:
+    def _is_valid_address(self, text: str) -> bool:  # noqa: PLR0911
         """
         Validate address using usaddress and additional filters.
 
@@ -262,8 +263,6 @@ class AddressRecognizer(EntityRecognizer):
 
         # Filter 6: Validate with usaddress
         try:
-            import usaddress
-
             parsed_components, _ = usaddress.tag(text)
         except Exception:
             return False
@@ -273,18 +272,13 @@ class AddressRecognizer(EntityRecognizer):
         has_street_type = "StreetNamePostType" in parsed_components
         has_zip = "ZipCode" in parsed_components
 
-        if not (has_street_num and has_street_type and has_zip):
-            # PO Box is acceptable
-            if "USPSBoxType" not in parsed_components:
-                return False
+        # PO Box is acceptable
+        if not (has_street_num and has_street_type and has_zip) and "USPSBoxType" not in parsed_components:
+            return False
 
         # Filter out credential false positives
         state_val = parsed_components.get("StateName", "")
-        if state_val.upper() in self.CREDENTIAL_ABBREVS:
-            if not has_zip:
-                return False
-
-        return True
+        return not (state_val.upper() in self.CREDENTIAL_ABBREVS and not has_zip)
 
     def get_supported_entities(self) -> list[str]:
         """Return supported entities."""

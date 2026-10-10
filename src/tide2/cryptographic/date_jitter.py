@@ -48,7 +48,7 @@ def derive_date_jitter(
     [min_jitter_days, max_jitter_days].
 
     Args:
-        patient_id: Unique patient identifier (e.g., patient_uid).
+        patient_id: Unique patient identifier.
         salt: 32-byte salt for HMAC derivation.
         key: 32-byte key used as additional entropy.
         max_jitter_days: Maximum absolute jitter in days (default: 180).

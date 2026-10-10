@@ -1,0 +1,18 @@
+# Minimize the Docker build context: ignore everything, then re-include only the
+# files the Dockerfile actually COPYs (keep this in sync with ./Dockerfile).
+*
+
+# Files/dirs the build needs (see the COPY lines in ./Dockerfile).
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE-MIT
+!src
+
+# Drop caches/artifacts that may live inside the re-included directories.
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/.ipynb_checkpoints

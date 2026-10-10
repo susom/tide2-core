@@ -35,7 +35,6 @@ Auto-populated when absent:
   patient_identifiers   JSON string of known PHI values per entity type.
 
 Optional pass-through columns:
-  patient_uid
   jitter
   recognizer_results_json
 """
@@ -70,8 +69,21 @@ def _resolve_parquet_files(path: str | Path) -> list[Path]:
         return [p]
     if p.is_dir():
         return sorted(p.rglob("*.parquet"))
-    matches = sorted(glob.glob(str(path), recursive=True))
-    return [Path(m) for m in matches if Path(m).is_file()]
+    # Treat *path* as a glob pattern. Path.glob needs a base directory plus a
+    # relative pattern, so anchor absolute patterns at the filesystem root; the
+    # "**" segment keeps the previous recursive=True behavior.
+    pattern = Path(str(path))
+    base = Path(pattern.anchor) if pattern.is_absolute() else Path()
+    rel = pattern.relative_to(pattern.anchor) if pattern.is_absolute() else pattern
+    try:
+        matches = sorted(base.glob(str(rel)))
+    except ValueError:
+        # Path.glob rejects patterns where "**" is not a standalone path
+        # component (e.g. "part-**.parquet"). glob.glob accepts "**" as a
+        # substring, so fall back to it for exactly those patterns while keeping
+        # Path.glob (and the PTH207 cleanup) for the well-formed cases above.
+        matches = sorted(Path(m) for m in glob.glob(str(path), recursive=True))  # noqa: PTH207
+    return [m for m in matches if m.is_file()]
 
 
 # ---------------------------------------------------------------------------
@@ -113,10 +125,7 @@ def create_pipeline_parquet(
         patient_id: str = note.get("patient_id") or text_hash
 
         raw_pi = note.get("patient_identifiers", "{}")
-        if isinstance(raw_pi, dict):
-            patient_identifiers = json.dumps(raw_pi)
-        else:
-            patient_identifiers = str(raw_pi) if raw_pi else "{}"
+        patient_identifiers = json.dumps(raw_pi) if isinstance(raw_pi, dict) else str(raw_pi) if raw_pi else "{}"
 
         row: dict = {
             "note_text": note_text,
@@ -126,7 +135,6 @@ def create_pipeline_parquet(
         }
 
         for optional_col in (
-            "patient_uid",
             "jitter",
             "recognizer_results_json",
         ):
@@ -138,7 +146,7 @@ def create_pipeline_parquet(
     df = pd.DataFrame(rows)
 
     ordered_cols = ["note_text", "text_hash", "patient_id", "patient_identifiers"]
-    for col in ("patient_uid", "jitter", "recognizer_results_json"):
+    for col in ("jitter", "recognizer_results_json"):
         if col in df.columns:
             ordered_cols.append(col)
     df = df[ordered_cols]
@@ -183,10 +191,7 @@ def read_pipeline_parquet(
         if columns is not None:
             missing = [c for c in columns if c.lower() not in lower_to_actual]
             if missing:
-                raise ValueError(
-                    f"Requested columns {missing} not found in {file_path}. "
-                    f"Available: {schema_names}"
-                )
+                raise ValueError(f"Requested columns {missing} not found in {file_path}. Available: {schema_names}")
             actual_cols = [lower_to_actual[c.lower()] for c in columns]
             table = pf.read(columns=actual_cols)
         else:
@@ -229,11 +234,7 @@ def cmd_read(args: argparse.Namespace) -> None:
     """Handle the ``read`` sub-command."""
     columns = args.columns.split(",") if args.columns else None
     df = read_pipeline_parquet(args.path, columns=columns)
-    output = {
-        "shape": df.shape,
-        "columns": list(df.columns),
-        "data": df.to_dict(orient="records")
-    }
+    output = {"shape": df.shape, "columns": list(df.columns), "data": df.to_dict(orient="records")}
     print(json.dumps(output, indent=2))
 
 
@@ -266,9 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
         "read",
         help="Read and print a pipeline parquet file.",
     )
-    p_read.add_argument(
-        "path", help="Path to parquet file, directory, or glob pattern."
-    )
+    p_read.add_argument("path", help="Path to parquet file, directory, or glob pattern.")
     p_read.add_argument(
         "--columns",
         default=None,

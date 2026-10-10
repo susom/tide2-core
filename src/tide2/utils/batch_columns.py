@@ -1,6 +1,39 @@
 """Case-insensitive column accessor for Ray Data batch dicts."""
 
+import warnings
 from typing import Any
+
+import pyarrow as pa
+
+
+def _check_deprecated_patient_uid(container: Any, location: str = "") -> None:
+    """Emit a DeprecationWarning and raise ValueError if deprecated patient_uid is present."""
+    if container is None:
+        return
+    has_uid = False
+    if hasattr(container, "columns"):
+        has_uid = any(isinstance(c, str) and c.lower() == "patient_uid" for c in container.columns)
+    elif isinstance(container, (str, bytes)):
+        has_uid = (
+            container.lower() == "patient_uid" if isinstance(container, str) else container.lower() == b"patient_uid"
+        )
+    else:
+        try:
+            if "patient_uid" in container:
+                has_uid = True
+            else:
+                for item in container:
+                    if isinstance(item, str) and item.lower() == "patient_uid":
+                        has_uid = True
+                        break
+        except Exception:
+            has_uid = False
+
+    if has_uid:
+        loc_str = f" in {location}" if location else ""
+        msg = f"`patient_uid`{loc_str} is deprecated and no longer supported. Please use `patient_id` instead."
+        warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        raise ValueError(msg)
 
 
 class BatchColumns:
@@ -40,3 +73,63 @@ class BatchColumns:
 
     def __contains__(self, name: str) -> bool:
         return name.lower() in self._lower_map
+
+
+PASSTHROUGH_COLS: tuple[str, ...] = ("patient_identifiers", "patient_id", "jitter", "row_id")
+
+
+def copy_passthrough(
+    batch: dict[str, Any] | BatchColumns,
+    res: dict[str, list[Any]],
+    *,
+    indices: list[int] | None = None,
+    empty: bool = False,
+) -> None:
+    """Copy the optional passthrough columns from *batch* into *res* in place.
+
+    Args:
+        batch: Incoming Ray Data batch or BatchColumns accessor.
+        res: Output batch being built; mutated in place.
+        indices: Optional list of row indices to slice from *batch*.
+        empty: When True, emit empty lists instead of copying values.
+    """
+    _check_deprecated_patient_uid(batch)
+    cols = batch if isinstance(batch, BatchColumns) else BatchColumns(batch)
+    for col in PASSTHROUGH_COLS:
+        if col in cols:
+            if empty:
+                res[col] = []
+            elif indices is not None:
+                src = cols[col]
+                res[col] = [src[i] for i in indices]
+            else:
+                res[col] = list(cols[col])
+
+
+_NULLABLE_COLUMN_TYPES: dict[str, pa.DataType] = {
+    "recognizer_results_json": pa.string(),
+    "predictions_raw_json": pa.string(),
+    "anonymized_note_text": pa.string(),
+    "anonymizer_results_json": pa.string(),
+    "entity_count": pa.int64(),
+    "patient_identifiers": pa.string(),
+    "patient_id": pa.string(),
+    "jitter": pa.int64(),
+    "row_id": pa.string(),
+}
+
+
+def type_all_null_columns(res: dict[str, Any]) -> dict[str, Any]:
+    """Give a result or passthrough column that is entirely null its Arrow type, in place.
+
+    A batch where every value is null would otherwise write an Arrow ``null`` column,
+    and a Parquet directory whose first file has that column cannot be read as one
+    dataset by pyarrow. Columns with any value are left to Ray's type inference.
+    ``patient_id`` is typed as string because its source type is not known here; a
+    numeric ``patient_id`` then reads back as string only when an all-null file sorts first.
+    """
+    for name, arrow_type in _NULLABLE_COLUMN_TYPES.items():
+        values = res.get(name)
+        if isinstance(values, list) and values and all(value is None for value in values):
+            res[name] = pa.array(values, type=arrow_type)
+    return res

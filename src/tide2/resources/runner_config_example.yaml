@@ -3,7 +3,7 @@
 # All keys match CLI arg names (with underscores).
 # CLI flags always override config values.
 #
-# Job types: recognizer, anonymizer, transformer, reassembly, pipeline, llm-recognizer
+# Job types: recognizer, anonymizer, transformer, pipeline, llm-recognizer
 
 # =========================================================================
 # Job settings (all job types)
@@ -11,6 +11,21 @@
 mode: vm
 input: /mnt/gcs/standalone_anonymizer/input
 output: /mnt/gcs/standalone_anonymizer/output
+# Size unset knobs from the detected hardware profile (default: true). Values set
+# anywhere in this file always win. Set to false to run the pre-autotune defaults —
+# benchmarks should, so their settings do not change with the host.
+hardware_autotune: true
+
+# Pipeline execution mode (pipeline jobs only). Default and production value is
+# "discrete": every stage is its own Ray Data execution with a Parquet boundary
+# between them. That boundary is what lets the GPU stage run on one machine and
+# the CPU stages elsewhere as independent jobs, and it is what row-level resume
+# (enable_checkpoint) is keyed to — so multi-machine, unattended, and ≲4-CPU runs
+# must stay here. "streamed" chains the stages into one single-node execution:
+# faster for development, benchmarks and single-box batches, but no resume, only
+# 06_anonymizer_output is written, and note_text stays in the object store (and
+# may spill to local disk) for the whole run.
+execution_mode: discrete
 
 # =========================================================================
 # Ray cluster tuning (all job types)
@@ -20,11 +35,14 @@ num_cpus: 224
 object_store_gb: 100
 
 # =========================================================================
-# Actor tuning (recognizer, anonymizer, reassembly, pipeline)
+# Actor tuning (recognizer, anonymizer, pipeline)
 # =========================================================================
-num_actors: 100
+# num_actors / worker_num_cpus are left unset on purpose: the hardware recommender
+# sizes them from the detected node shape. Uncomment only to override the
+# recommendation. worker_num_cpus is the CPU reservation per actor slot.
+# num_actors: 200
+# worker_num_cpus: 1
 batch_size: 200
-cpus_per_actor: 2
 
 # =========================================================================
 # Read tuning (recognizer, anonymizer)
@@ -34,11 +52,7 @@ read_cpus: 0.25
 read_op_min_num_blocks: 200
 target_max_block_size_mb: 128
 target_min_block_size_mb: 1
-
-# =========================================================================
-# Recognizer-specific
-# =========================================================================
-# batch_timeout: 120
+# no_progress_timeout_s: 600.0  # Ray Data execution-level hang guard (seconds; -1 disables)
 
 # =========================================================================
 # Anonymizer-specific
@@ -56,12 +70,9 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # model_path: /path/to/local/model
 # bucket_name: "your-gcs-bucket"
 # project_id: "your-gcp-project"
-# chunk_size: 512
-# chunk_overlap: 40
-# gpu_batch_size: auto-computed from model config and free GPU memory
-# short_seq_budget: auto-computed from total GPU VRAM (0.6 for L4, 0.7 for A6000, 0.8 for H100)
-# compile_model: false
-# compile_cache_path: /path/to/compiled_cache.bin
+# chunk_overlap: 40  # token overlap between windows (per-window budget = model's MODEL_MAX_LENGTH)
+# batch_size: whole notes per actor call (host-memory knob; GPU stays bounded by gpu_batch_size)
+# gpu_batch_size: token windows per GPU forward; size for the load (actor halves and retries on OOM)
 # num_agg_actors: auto-computed as ~30% of available CPUs
 
 # =========================================================================

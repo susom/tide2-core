@@ -89,7 +89,7 @@ class FormatPreservingEncryption:
         # Cache for FF3Cipher instances (key: (alphabet, tweak))
         self._cipher_cache: dict[tuple[str, str], FF3Cipher] = {}
 
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=128)  # noqa: B019 - bounded cache on a long-lived per-key instance
     def _get_tweak(self, format_type: str, content_length: int) -> str:
         """
         Generate deterministic tweak based on format and content length.
@@ -317,12 +317,8 @@ class FormatPreservingEncryption:
         # Determine format type based on content
         format_type = self._detect_content_type(content)
 
-        # Encrypt content
-        try:
-            encrypted_content = self._encrypt_content(content, format_type)
-        except Exception as e:
-            warnings.warn(f"Encryption failed for '{plaintext}': {e}", stacklevel=2)
-            return plaintext, self.FORMAT_PASSTHROUGH
+        # Encrypt content. Errors propagate: returning the plaintext would leak it.
+        encrypted_content = self._encrypt_content(content, format_type)
 
         # Reapply template
         result = self._apply_template(encrypted_content, template)

@@ -2,49 +2,87 @@
 Ray Actors for transformer NER inference.
 
 This module provides:
-- TransformerInferenceActor: GPU actor for raw token inference (no BIO aggregation)
-- BIOAggregationActor: CPU actor for BIO token aggregation and serialization
+- TransformerInferenceActor: GPU actor that tokenizes + token-windows whole notes
+  and forwards them, emitting raw BIO tokens (no aggregation)
+- BIOAggregationActor: CPU actor for per-note BIO aggregation → span dedup →
+  Presidio formatting (emits document-ready recognizer_results_json)
 
 The two actors form a streaming pipeline where GPU inference and CPU
-post-processing run concurrently via Ray Data's streaming executor:
+post-processing run concurrently via Ray Data's streaming executor. Whole notes
+flow to the GPU actor — there is no separate char-chunking stage and no separate
+reassembly stage:
 
-    ReadParquet → FlatMap(chunk) → MapBatches(GPU inference) → MapBatches(BIO aggregation) → Write
+    ReadParquet → MapBatches(GPU inference, per note) → MapBatches(aggregation, per note) → Write
 
 Thread/Process Safety:
     Each Actor maintains its own state. The GPU actor loads a transformer model
-    on a dedicated GPU. The CPU actor is stateless.
+    on a dedicated GPU. The CPU actor holds only the model name.
 
 Usage with Ray Data:
     ds.map_batches(
         TransformerInferenceActor,
-        batch_size=512,
+        batch_size=8,
         num_gpus=1,
         compute=ray.data.ActorPoolStrategy(size=num_gpus),
         fn_constructor_kwargs={"model_name": "StanfordAIMI/stanford-deidentifier-v2"},
     )
     ds.map_batches(
         BIOAggregationActor,
-        batch_size=512,
+        batch_size=8,
         compute=ray.data.ActorPoolStrategy(size=num_agg_actors),
+        fn_constructor_kwargs={"model_name": "StanfordAIMI/stanford-deidentifier-v2"},
     )
 """
 
 import json
 import logging
+import os
+from datetime import UTC
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
 from tide2.transformers import TransformerCore
+from tide2.transformers.config import format_transformer_recognizer_name
+from tide2.transformers.core import _dedupe_raw_predictions
+from tide2.transformers.core import _Window
+from tide2.transformers.core import plan_windows
+from tide2.utils.batch_columns import BatchColumns
+from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.batch_columns import copy_passthrough
+from tide2.utils.batch_columns import type_all_null_columns
+from tide2.utils.nulls import is_null
+from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import SUCCESS
+from tide2.utils.stage_status import append_status
+from tide2.utils.stage_status import failure_reason
+from tide2.utils.stage_status import is_failed
+from tide2.utils.stage_status import log_note_failure
 from tide2.utils.text_processing import aggregate_bio_tokens
+from tide2.utils.text_processing import deduplicate_overlapping_entities
 
 logger = logging.getLogger(__name__)
 
-# VRAM thresholds (GB) for short-sequence budget tiers.
-# Maps to NVIDIA product lines: L4/RTX (<=24), A6000/A100-40 (24-80), H100/A100-80 (>=80).
-_VRAM_TIER_HIGH_GB = 80
-_VRAM_TIER_MID_GB = 24
+# Nominal starting batch size — exists only so the actor runs out of the box. A
+# real run supplies ``--gpu-batch-size`` sized to the load; if a batch still OOMs,
+# the forward halves and retries (safety net, not a tuner). See
+# :meth:`TransformerInferenceActor._forward_windows`.
+_DEFAULT_GPU_BATCH_SIZE = 64
+
+# Default token overlap between adjacent windows when a single chunk exceeds the
+# model's per-window token budget. Matches the upstream char chunker's
+# ``CHUNK_OVERLAP_SIZE`` (40 tokens) so an entity straddling a window boundary is
+# still seen whole in at least one window; the existing downstream dedup
+# (BIO raw-token tuples + reassembly IoU) collapses the overlap-region duplicates.
+_DEFAULT_WINDOW_OVERLAP = 40
+
+
+# Span-level IoU above which two aggregated entities are considered the same
+# detection (window overlap produces near-identical spans).
+_SPAN_DEDUP_IOU = 0.5
 
 
 def _numpy_default(obj: Any) -> Any:
@@ -56,13 +94,91 @@ def _numpy_default(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+def format_note_entities(
+    raw_tokens: list[dict],
+    note_text: str,
+    recognizer_name: str,
+    model_to_presidio_mapping: dict[str, str] | None = None,
+    ignore_labels: list[str] | set[str] | None = None,
+) -> tuple[str, int]:
+    """Aggregate one note's raw BIO tokens into ``recognizer_results_json``.
+
+    aggregate BIO tokens → dedup overlapping spans (IoU 0.5) → Presidio shape.
+    Reproduces the span-level output the old chunk→reassembly path produced, and
+    is shared by the inference actor's fused path and the standalone
+    :class:`BIOAggregationActor` so the two emit an identical schema.
+
+    Args:
+        raw_tokens: Raw BIO token dicts for a single note, document-relative.
+        note_text: The note's full text, used to slice ``matched_pattern``.
+        recognizer_name: Canonical Presidio recognizer name to stamp on entities.
+        model_to_presidio_mapping: Optional dict mapping model labels to Presidio entity types.
+        ignore_labels: Optional labels to ignore during aggregation.
+
+    Returns:
+        A ``(recognizer_results_json, entity_count)`` pair.
+    """
+    if not raw_tokens or not note_text:
+        return "[]", 0
+
+    # Remove duplicate raw tokens (window overlap produces them). Uses the
+    # stable fixed-schema key (``_RAW_PRED_KEYS``) rather than dict-insertion
+    # order, so dedup is deterministic regardless of JSON key ordering. The key
+    # includes ``index`` so identical spans from different windows survive to
+    # here — the span-level IoU dedup below collapses them.
+    raw_tokens = _dedupe_raw_predictions(raw_tokens)
+
+    # BIO tokens → aggregated spans (document-relative offsets already).
+    aggregated = aggregate_bio_tokens(raw_tokens, note_text)
+
+    # Normalize to the {entity,...} shape deduplicate_overlapping_entities and
+    # the formatter expect (aggregate_bio_tokens emits ``entity_group``).
+    entities = [
+        {"entity": s["entity_group"], "score": s["score"], "start": s["start"], "end": s["end"]} for s in aggregated
+    ]
+    entities = deduplicate_overlapping_entities(entities, iou_threshold=_SPAN_DEDUP_IOU)
+
+    ignore_set = set(ignore_labels) if ignore_labels is not None else None
+    mapping = model_to_presidio_mapping or {}
+
+    ner_results = []
+    for e in entities:
+        raw_label = e["entity"]
+        if ignore_set is not None and raw_label in ignore_set:
+            continue
+        mapped_label = mapping.get(raw_label, raw_label)
+        if ignore_set is not None and mapped_label in ignore_set:
+            continue
+
+        start = e["start"]
+        end = e["end"]
+        matched_text = note_text[start:end] if start < len(note_text) else ""
+        ner_results.append(
+            {
+                "entity_type": mapped_label,
+                "start": start,
+                "end": end,
+                "score": e["score"],
+                "analysis_explanation": None,
+                "recognition_metadata": {
+                    "recognizer_name": recognizer_name,
+                    "matched_pattern": matched_text,
+                    "recognizer_identifier": f"{recognizer_name}_{start}_{end}",
+                },
+            }
+        )
+
+    return json.dumps(ner_results, ensure_ascii=False), len(ner_results)
+
+
 class TransformerInferenceActor:
     """
     Ray Actor for GPU-based transformer inference (raw tokens only).
 
     This actor is designed to be used with Ray Data's map_batches() with
     ActorPoolStrategy. Each actor loads a transformer model on a GPU and
-    performs token classification inference on text chunks.
+    performs token classification inference on **whole notes** — token-windowing
+    is the actor's single chunker, so there is no upstream char-chunking stage.
 
     The actor returns raw BIO tokens (not aggregated) so that the CPU-heavy
     BIO aggregation can run in a separate BIOAggregationActor, allowing GPU
@@ -70,12 +186,28 @@ class TransformerInferenceActor:
 
     The actor handles:
     - Model loading with GPU placement (via TransformerCore)
+    - Token-accurate windowing of over-budget notes (never truncation)
     - Batch inference with automatic OOM recovery
     - JSON serialization of raw token predictions
 
-    Batch size is controlled by Ray Data's map_batches(batch_size=N) — the actor
-    processes whatever batch it receives without internal sub-batching.
+    Inference flow (single tokenization, window-don't-truncate, OOM-safe retry):
+
+    1. Tokenize every note **once** (ragged, no truncation, char offsets).
+    2. Any note whose token length exceeds the per-window budget
+       (``token_budget`` = real context window minus special tokens) is sliced
+       into overlapping ≤-budget token windows — the earlier truncating path
+       silently dropped the tail of dense notes, so PHI there was never redacted.
+    3. Windows are length-sorted (within this one ``__call__``) and forwarded at a
+       fixed batch size, halving on OOM. Each forward releases every CUDA tensor on
+       any exit; on CUDA OOM the forward halves the batch and retries over the
+       **same** tokenized windows (never re-tokenizing).
+    4. Window predictions are merged back per note (offsets are already
+       document-relative) and emitted as ``predictions_raw_json``; overlap-region
+       duplicates are handled by the downstream aggregation dedup (BIO raw-token
+       tuples; span-level IoU).
     """
+
+    _aggregate_bio: bool = False
 
     def __init__(
         self,
@@ -83,11 +215,10 @@ class TransformerInferenceActor:
         model_path: str | None = None,
         bucket_name: str | None = None,
         project_id: str | None = None,
-        compile_model: bool | None = None,
-        compile_cache_path: str | None = None,
         gpu_batch_size: int | None = None,
-        short_seq_budget: float | None = None,
         allow_huggingface_download: bool = True,
+        window_overlap: int = _DEFAULT_WINDOW_OVERLAP,
+        aggregate_bio: bool = False,
     ) -> None:
         """
         Initialize the actor with a transformer model on GPU.
@@ -97,20 +228,32 @@ class TransformerInferenceActor:
             model_path: Optional explicit model path (overrides GCS resolution).
             bucket_name: Optional GCS bucket name for model loading.
             project_id: Optional GCP project ID for model loading.
-            compile_model: If True, apply torch.compile with mega-cache.
-            compile_cache_path: Path to compiled cache .bin file.
-            gpu_batch_size: Batch size for HuggingFace pipeline inference.
-                Controls how many texts are fed to the GPU at once, independent
-                of the Ray Data batch size. If None, auto-computed from model
-                config and available GPU memory.
-            short_seq_budget: Memory budget fraction for short sequences
-                (shorter than half the model sequence length). If None,
-                auto-computed from total GPU VRAM. Higher values use more
-                GPU memory for short-text batches.
+            gpu_batch_size: Number of token windows per GPU forward, independent
+                of the Ray Data batch size. Size it for the load; if a batch still
+                OOMs, the forward halves and retries. If None, defaults to
+                ``_DEFAULT_GPU_BATCH_SIZE`` (a nominal value that only needs to run
+                out of the box, not to be optimal).
             allow_huggingface_download: If True, fall back to HuggingFace Hub
                 when local cache and GCS both miss.
+            window_overlap: Token overlap between adjacent windows when a chunk
+                exceeds the per-window budget (default 40, matching the upstream
+                char chunker's overlap). Clamped to ``[0, budget - 1]``. Overlap
+                duplicates are removed downstream (BIO dedup + reassembly IoU).
+            aggregate_bio: If True, aggregate raw BIO tokens to document-level
+                Presidio entities directly inside this actor, emitting
+                ``recognizer_results_json``. If False (default), emit raw BIO
+                tokens in ``predictions_raw_json`` for downstream aggregation.
         """
         self.model_name = model_name
+        self._window_overlap = max(0, window_overlap)
+        self._aggregate_bio = aggregate_bio
+        if self._aggregate_bio:
+            self._recognizer_name = format_transformer_recognizer_name(model_name)
+
+        # Count of CUDA OOMs this actor caught and recovered from (by shrinking
+        # the forward batch). Read by the GPU OOM-recovery test to prove the
+        # handled-OOM path was actually exercised, not skipped.
+        self._handled_oom_count = 0
 
         # Determine device for explicit GPU placement
         if torch.cuda.is_available():
@@ -124,10 +267,13 @@ class TransformerInferenceActor:
         # actor so that actors x threads <= total CPUs (no oversubscription).
         # GPU branch keeps torch's default thread behavior untouched.
         if device == "cpu":
-            import ray
+            try:
+                import ray
 
-            assigned = ray.get_runtime_context().get_assigned_resources()
-            n = int(assigned.get("CPU", 1)) or 1
+                assigned = ray.get_runtime_context().get_assigned_resources()
+                n = int(assigned.get("CPU", 1)) or 1
+            except Exception:
+                n = 1
             torch.set_num_threads(n)
             logger.info("CPU inference: capping torch to %d thread(s) per Ray allocation", n)
 
@@ -139,9 +285,7 @@ class TransformerInferenceActor:
             project_id=project_id,
             device=device,
             load_immediately=True,  # Load model immediately on actor init
-            local_files_only=True,  # Use cached models only
-            compile_model=compile_model,
-            compile_cache_path=compile_cache_path,
+            local_files_only=not allow_huggingface_download,
             allow_huggingface_download=allow_huggingface_download,
         )
 
@@ -149,32 +293,27 @@ class TransformerInferenceActor:
         self.model_path = self._core.model_path
         self._seq_len = self._core.model_max_length
 
-        # Store total VRAM for adaptive short-sequence budget
-        model_device = next(self._core.pipeline.model.parameters()).device
-        if model_device.type == "cuda":
-            self._total_vram_bytes = torch.cuda.get_device_properties(model_device).total_memory
-        else:
-            self._total_vram_bytes = 0
+        self._model_to_presidio_mapping: dict[str, str] = self._core.config.get("MODEL_TO_PRESIDIO_MAPPING", {})
+        self._ignore_labels: set[str] = set(self._core.ignore_labels)
 
-        # Store user-provided short_seq_budget override (None = auto)
-        self._short_seq_budget_override = short_seq_budget
+        # Per-window content-token budget from the single length authority
+        # (:attr:`TransformerCore.token_budget` = real context window minus special
+        # tokens). Notes longer than this are windowed, not truncated. Clamp the
+        # window overlap below the budget so the window step stays >= 1 (guaranteed
+        # forward progress).
+        self._num_special_tokens = self._core.num_special_tokens
+        self._token_budget = self._core.token_budget
+        self._window_overlap = min(self._window_overlap, self._token_budget - 1)
 
-        # Compute GPU batch size (worst case: all texts at max seq_len)
-        estimated = self._estimate_gpu_batch_size()
-        if gpu_batch_size is not None:
-            self._gpu_batch_size = gpu_batch_size
-            if gpu_batch_size < estimated:
-                logger.warning(
-                    f"gpu_batch_size={gpu_batch_size} is below the estimated maximum of {estimated}. "
-                    f"GPU may be underutilized. Remove gpu_batch_size to auto-compute."
-                )
-        else:
-            self._gpu_batch_size = estimated
+        # Windows per GPU forward. Operator-supplied for real runs; the nominal
+        # default only needs to run out of the box (a sized run never OOMs; if one
+        # slips through, _forward_windows halves and retries).
+        self._gpu_batch_size = gpu_batch_size or _DEFAULT_GPU_BATCH_SIZE
 
         logger.info(
             f"TransformerInferenceActor initialized: model={model_name}, "
             f"device={self._core.get_device_info()}, gpu_batch_size={self._gpu_batch_size}, "
-            f"short_seq_budget={self._short_seq_budget():.2f}"
+            f"token_budget={self._token_budget}, window_overlap={self._window_overlap}"
         )
 
     @property
@@ -182,307 +321,426 @@ class TransformerInferenceActor:
         """Get the model pipeline (for backwards compatibility)."""
         return self._core.pipeline
 
-    def _short_seq_budget(self) -> float:
-        """Return the memory budget fraction for short sequences.
-
-        When texts are shorter than half the model sequence length, fixed
-        per-sample costs (logits, embeddings) that are not captured by
-        _per_sample_bytes become significant. The budget compensates for
-        this gap. On GPUs with more VRAM these fixed costs are a smaller
-        fraction of total memory, so the budget can be higher.
-
-        Returns a value between 0.6 and 0.8 based on total GPU VRAM,
-        or the user-provided override if set.
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
         """
-        if self._short_seq_budget_override is not None:
-            return self._short_seq_budget_override
-        total_gb = self._total_vram_bytes / (1024**3)
-        if total_gb >= _VRAM_TIER_HIGH_GB:
-            return 0.8
-        if total_gb > _VRAM_TIER_MID_GB:
-            return 0.7
-        return 0.6
-
-    @staticmethod
-    def _per_sample_bytes(
-        num_heads: int, seq_len: int, hidden_size: int, intermediate_size: int, dtype_bytes: int
-    ) -> int:
-        """Per-sample activation memory for a single transformer layer.
-
-        Based on EleutherAI's Transformer Math (inference, single layer peak):
-            attention scores + FFN intermediate + hidden I/O
-
-        Ref: https://blog.eleuther.ai/transformer-math/
-        """
-        attention = num_heads * seq_len * seq_len * dtype_bytes
-        ffn = intermediate_size * seq_len * dtype_bytes
-        hidden_io = 2 * hidden_size * seq_len * dtype_bytes
-        return attention + ffn + hidden_io
-
-    def _estimate_gpu_batch_size(self) -> int:
-        """Estimate max GPU batch size from model config and free GPU memory.
-
-        Uses 80% of free memory to leave room for CUDA allocator fragmentation;
-        OOM recovery handles the rest.
-
-        Falls back to 64 on CPU or if model config is unavailable.
-        """
-        model = self._core.pipeline.model
-        device = next(model.parameters()).device
-        if device.type != "cuda":
-            return 64
-
-        config = model.config
-        num_heads = getattr(config, "num_attention_heads", 12)
-        hidden_size = getattr(config, "hidden_size", 768)
-        intermediate_size = getattr(config, "intermediate_size", 4 * hidden_size)
-        dtype_bytes = 2 if self._core.dtype == torch.float16 else 4
-
-        per_sample = self._per_sample_bytes(num_heads, self._seq_len, hidden_size, intermediate_size, dtype_bytes)
-
-        total = torch.cuda.get_device_properties(device).total_memory
-        allocated = torch.cuda.memory_allocated(device)
-        free = total - allocated
-
-        max_batch = max(1, int(free * 0.9 / per_sample))
-
-        logger.info(
-            f"GPU batch size auto-computed: {max_batch} "
-            f"(free={free / 1024**3:.1f}GB, per_sample={per_sample / 1024**2:.1f}MB, "
-            f"seq_len={self._seq_len}, heads={num_heads}, hidden={hidden_size})"
-        )
-        return max_batch
-
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """
-        Process a batch of text chunks through transformer inference (raw tokens).
+        Process a batch of **whole notes** through transformer inference (raw tokens).
 
         This method is called by Ray Data's map_batches() with batches in
-        columnar format (dict of column name -> list of values).
+        columnar format (dict of column name -> list of values). Each note is
+        tokenized once and token-windowed against the model's real budget inside
+        this one call, so there is no separate char-chunking stage and the window
+        char offsets are already document-relative.
 
-        Returns raw BIO tokens (not aggregated). BIO aggregation is handled
-        by the downstream BIOAggregationActor for GPU/CPU overlap.
+        Returns raw BIO tokens (not aggregated). Per-note BIO aggregation +
+        span dedup + Presidio formatting is handled by the downstream
+        BIOAggregationActor for GPU/CPU overlap.
 
         Args:
             batch: Dictionary with columnar data:
-                - chunk_text: List of chunk text strings
+                - note_text: List of full document texts
                 - text_hash: List of document text hashes
-                - chunk_id: List of chunk identifiers within each document
-                - char_offset_start: List of character offsets in original document
                 - patient_id: List of patient identifiers (passed through)
 
         Returns:
-            Dictionary with inference results in columnar format:
+            Dictionary with inference results in columnar format (one row per note):
                 - text_hash: Document text hashes (passed through)
-                - chunk_id: Chunk identifiers (passed through)
-                - char_offset_start: Character offsets (passed through)
                 - patient_id: Patient identifiers (passed through)
-                - chunk_text: Chunk text (passed through for BIO aggregation)
-                - predictions_raw_json: JSON-serialized list of raw BIO token dicts
+                - note_text: Full document text (passed through for BIO aggregation)
+                - predictions_raw_json: JSON-serialized list of raw BIO token dicts,
+                  with document-relative char offsets
         """
-        chunk_texts = batch["chunk_text"]
-        text_hashes = batch["text_hash"]
-        chunk_ids = batch["chunk_id"]
-        char_offsets = batch["char_offset_start"]
-        patient_ids = batch.get("patient_id", [""] * len(chunk_texts))
-        chunk_uids = batch.get("chunk_uid", [""] * len(chunk_texts))
+        cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="TransformerInferenceWorker")
+        note_texts = cols["note_text"]
+        text_hashes = cols["text_hash"]
+        patient_ids = cols.get("patient_id", [None] * len(note_texts))
 
-        batch_size = len(chunk_texts)
+        batch_size = len(note_texts)
 
         # Handle empty batches
         if batch_size == 0:
-            return {
+            res: dict[str, list[Any]] = {
                 "text_hash": [],
-                "chunk_id": [],
-                "chunk_uid": [],
-                "char_offset_start": [],
                 "patient_id": [],
-                "chunk_text": [],
-                "predictions_raw_json": [],
+                "note_text": [],
+                "processing_status": [],
+                "stage_status_json": [],
             }
+            if self._aggregate_bio:
+                res["recognizer_results_json"] = []
+                res["entity_count"] = []
+                res["processing_timestamp"] = []
+            else:
+                res["predictions_raw_json"] = []
+            copy_passthrough(cols, res, empty=True)
+            return res
 
-        # Filter out None/empty texts
-        chunk_texts = list(chunk_texts)
-        valid_indices = [i for i, t in enumerate(chunk_texts) if t]
-        if not valid_indices:
-            return {
-                "text_hash": list(text_hashes),
-                "chunk_id": list(chunk_ids),
-                "chunk_uid": list(chunk_uids),
-                "char_offset_start": list(char_offsets),
-                "patient_id": list(patient_ids),
-                "chunk_text": chunk_texts,
-                "predictions_raw_json": ["[]"] * batch_size,
-            }
+        # Filter out None/empty texts, normalizing nullable scalars (e.g. pd.NA, float nan)
+        note_texts = ["" if is_null(t) else str(t) for t in note_texts]
+        valid_indices = [i for i, t in enumerate(note_texts) if t]
 
-        valid_texts = [chunk_texts[i] for i in valid_indices]
+        # One payload per note: recognizer_results_json (fused) or predictions_raw_json.
+        payloads: list[str | None] = ["[]"] * batch_size
+        entity_counts: list[int | None] = [0] * batch_size
+        ok_json, ok_status = append_status(None, "transformer", SUCCESS)
+        stage_jsons = [ok_json] * batch_size
+        statuses = [ok_status] * batch_size
 
-        # Run raw inference with OOM recovery (no BIO aggregation)
-        raw_results = self._run_inference_raw_with_oom_recovery(valid_texts)
+        def _fail(idx: int, exc: Exception) -> None:
+            fail_json, fail_status = append_status(None, "transformer", FAILED, failure_reason(exc))
+            payloads[idx], entity_counts[idx] = None, None
+            stage_jsons[idx], statuses[idx] = fail_json, fail_status
 
-        # Map predictions back to original indices and serialize to JSON
-        predictions_raw_json_list = ["[]"] * batch_size
-        for idx, preds in zip(valid_indices, raw_results, strict=False):
+        if valid_indices:
+            valid_texts = [note_texts[i] for i in valid_indices]
+
+            # Run raw inference with OOM recovery (no BIO aggregation). A failure that
+            # survives the recovery fails every note in the batch; the rows are kept.
+            self._log_gpu_mem(f"before __call__ (n={len(valid_texts)})")
             try:
-                predictions_raw_json_list[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
-            except Exception:
-                logger.exception(f"Error serializing raw predictions for chunk {chunk_ids[idx]}")
+                raw_results = self._run_inference_raw_with_oom_recovery(valid_texts)
+            except Exception as exc:
+                logger.error(  # noqa: TRY400 - the traceback can echo note text, so it is debug-only
+                    "transformer failed a batch of %d notes: %s", len(valid_texts), failure_reason(exc)
+                )
+                logger.debug("transformer failure detail", exc_info=True)
+                for idx in valid_indices:
+                    _fail(idx, exc)
+            else:
+                self._log_gpu_mem(f"after __call__ (n={len(valid_texts)})")
+                for idx, preds in zip(valid_indices, raw_results, strict=True):
+                    try:
+                        if self._aggregate_bio:
+                            payloads[idx], entity_counts[idx] = self._format_note(preds, note_texts[idx])
+                        else:
+                            payloads[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
+                    except Exception as exc:
+                        log_note_failure(logger, "transformer", text_hashes[idx], exc)
+                        _fail(idx, exc)
 
-        return {
+        res = {
             "text_hash": list(text_hashes),
-            "chunk_id": list(chunk_ids),
-            "chunk_uid": list(chunk_uids),
-            "char_offset_start": list(char_offsets),
             "patient_id": list(patient_ids),
-            "chunk_text": chunk_texts,
-            "predictions_raw_json": predictions_raw_json_list,
+            "note_text": note_texts,
         }
+        if self._aggregate_bio:
+            res["recognizer_results_json"] = payloads
+            res["entity_count"] = entity_counts
+            res["processing_timestamp"] = [datetime.now(tz=UTC).isoformat()] * batch_size
+        else:
+            res["predictions_raw_json"] = payloads
+        res["processing_status"] = statuses
+        res["stage_status_json"] = stage_jsons
 
-    def _effective_batch_size(self, texts: list[str]) -> int:
-        """Compute batch size adapted to actual text lengths.
+        copy_passthrough(cols, res)
 
-        HF pipeline pads all texts to the longest in the batch. When texts are
-        shorter than seq_len, per-sample memory drops and we can fit more.
+        return type_all_null_columns(res)
 
-        Uses chars/4 as a cheap token count estimate, then scales using
-        _per_sample_bytes ratio between worst-case and actual seq length.
-        """
-        max_chars = max(len(t) for t in texts)
-        effective_seq = min(max(max_chars // 4, 1), self._seq_len)
-
-        if effective_seq >= self._seq_len:
-            return min(len(texts), self._gpu_batch_size)
-
-        config = self._core.pipeline.model.config
-        num_heads = getattr(config, "num_attention_heads", 12)
-        hidden_size = getattr(config, "hidden_size", 768)
-        intermediate_size = getattr(config, "intermediate_size", 4 * hidden_size)
-        dtype_bytes = 2 if self._core.dtype == torch.float16 else 4
-
-        per_sample_worst = self._per_sample_bytes(num_heads, self._seq_len, hidden_size, intermediate_size, dtype_bytes)
-        per_sample_actual = self._per_sample_bytes(
-            num_heads, effective_seq, hidden_size, intermediate_size, dtype_bytes
+    def _format_note(self, raw_tokens: list[dict], note_text: str) -> tuple[str, int]:
+        """Aggregate one note's raw BIO tokens into ``recognizer_results_json``."""
+        return format_note_entities(
+            raw_tokens,
+            note_text,
+            self._recognizer_name,
+            model_to_presidio_mapping=getattr(self, "_model_to_presidio_mapping", None),
+            ignore_labels=getattr(self, "_ignore_labels", None),
         )
 
-        scale = per_sample_worst / max(per_sample_actual, 1)
-        # At long sequences the formula overestimates (attention dominates), so
-        # we can use more memory. At short sequences, fixed per-sample costs
-        # (logits, embeddings) dominate, so use a tighter budget.
-        budget = 0.9 if effective_seq > self._seq_len // 2 else self._short_seq_budget()
-        adjusted = int(self._gpu_batch_size * scale * budget / 0.9)
-        return max(1, min(len(texts), adjusted))
+    def _log_gpu_mem(self, stage: str) -> None:
+        """Log per-``__call__`` GPU memory when ``TIDE2_LOG_GPU_MEM`` is set.
+
+        Diagnostics-only hook for the GPU OOM verification harness
+        (``tests/oom_verification.py``): the driver cannot see an actor's VRAM, so
+        the actor logs its own ``memory_allocated``/``memory_reserved``. A no-op
+        unless the env var is truthy, so it adds no overhead in production.
+        """
+        if not os.environ.get("TIDE2_LOG_GPU_MEM"):
+            return
+        if not torch.cuda.is_available():
+            return
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        peak = torch.cuda.max_memory_allocated() / 1024**2
+        logger.info(
+            "GPU mem [%s]: allocated=%.1fMB reserved=%.1fMB peak=%.1fMB",
+            stage,
+            allocated,
+            reserved,
+            peak,
+        )
+
+    def _record_handled_oom(self) -> None:
+        """Record a handled CUDA OOM to a file when ``TIDE2_OOM_COUNT_FILE`` is set.
+
+        Diagnostics-only hook for the Ray-driven GPU OOM-recovery test: the
+        driver cannot read a Ray actor's in-process ``_handled_oom_count`` (the
+        actor runs in a separate worker process), so the actor appends a marker
+        line to a shared file. With a single GPU actor there is exactly one
+        writer, so no locking is needed. A no-op unless the env var is set, so it
+        adds no overhead in production.
+        """
+        path = os.environ.get("TIDE2_OOM_COUNT_FILE")
+        if not path:
+            return
+        try:
+            with Path(path).open("a") as f:
+                f.write("1\n")
+        except OSError:
+            logger.warning("could not record handled OOM to %s", path, exc_info=True)
 
     def _run_inference_raw_with_oom_recovery(self, texts: list[str]) -> list[list[dict]]:
-        """
-        Run raw inference with OOM recovery.
+        """Tokenize once, window long notes, length-sort, forward, merge results.
 
-        Passes all texts to TransformerCore.infer_raw(). If CUDA OOM
-        occurs, splits the batch in half and retries each half separately.
-
-        Returns raw BIO tokens (not aggregated).
+        This is the actor's whole inference path. It tokenizes every note exactly
+        once (no truncation), windows any note over the per-window token budget
+        instead of dropping its tail, sorts the windows by token length within this
+        one ``__call__`` (so multi-slice batches don't pad short windows to the
+        batch max), forwards them at a fixed batch size that halves on OOM (never
+        re-tokenizing), and merges each note's window predictions back into one
+        list. Overlap-region duplicates are removed downstream (BIO dedup +
+        span-level IoU in the aggregation actor).
 
         Args:
-            texts: List of text strings to process.
+            texts: List of note text strings to process (assumed non-empty; the
+                caller filters empties).
 
         Returns:
-            List of raw token lists (one per input text).
+            List of raw token lists (one per input note), aligned to ``texts``.
+            A note that tokenizes to zero tokens yields an empty list.
 
         Raises:
-            RuntimeError: If OOM persists even with single-item batches.
+            RuntimeError: If OOM persists at a single window, or for any non-OOM
+                error (re-raised unchanged).
         """
-        try:
-            return self._core.infer_raw_direct(texts, batch_size=self._effective_batch_size(texts))
-        except RuntimeError as e:
-            if "out of memory" not in str(e).lower():
-                raise
+        n = len(texts)
+        results: list[list[dict]] = [[] for _ in range(n)]
+        if n == 0:
+            return results
 
-            if torch.cuda.is_available():
+        # 1. Tokenize once (ragged, no truncation, char offsets).
+        encoded = self._core.tokenize_ragged(texts)
+        input_ids = encoded["input_ids"]
+        offset_mapping = encoded["offset_mapping"]
+
+        # 2. Window (don't truncate) any note over budget.
+        windows = self._plan_windows(texts, input_ids, offset_mapping)
+        if not windows:
+            return results
+
+        # 3. Sort by token length within THIS __call__ so multi-slice batches
+        #    (batch_size > gpu_batch_size) don't pad short windows to the batch max.
+        sorted_indices = sorted(range(len(windows)), key=lambda i: len(windows[i].content_ids))
+        sorted_windows = [windows[i] for i in sorted_indices]
+
+        # 4. Forward through GPU in batches with OOM-halving recovery
+        sorted_preds = self._forward_windows(sorted_windows)
+
+        # 5. Restore original document window order before merging
+        preds_by_idx = dict(zip(sorted_indices, sorted_preds, strict=True))
+        for orig_idx, window in enumerate(windows):
+            results[window.owner].extend(preds_by_idx[orig_idx])
+
+        return results
+
+    def _forward_windows(self, windows: list[_Window]) -> list[list[dict]]:
+        """Forward all windows in fixed-size slices; halve the batch on CUDA OOM.
+
+        On CUDA OOM the batch is halved and the whole set re-forwarded over the
+        **same** pre-tokenized windows (never re-tokenizing). Halve-and-redo is the
+        simplest correct recovery; a sized production run never OOMs, so the wasted
+        recompute on the rare recovery is fine. The discarded partial ``out`` holds
+        only detached CPU arrays.
+
+        Args:
+            windows: The windows to forward, aligned to the returned predictions.
+
+        Returns:
+            Raw token lists aligned to ``windows``.
+
+        Raises:
+            RuntimeError: If OOM persists at a single window, or for any non-OOM
+                error (re-raised unchanged).
+        """
+        batch_size = max(1, min(self._gpu_batch_size, len(windows)))
+        while True:
+            oom_caught = False
+            try:
+                out: list[list[dict]] = []
+                for start in range(0, len(windows), batch_size):
+                    chunk = windows[start : start + batch_size]
+                    out.extend(self._core.forward_windows([(w.content_ids, w.offsets, w.text) for w in chunk]))
+            except RuntimeError as e:
+                if "out of memory" not in str(e).lower():
+                    raise  # non-OOM: propagate unchanged
+                if batch_size <= 1:
+                    raise RuntimeError("CUDA OOM on a single token window") from e
+                # Count the handled OOM so tests can prove the recovery path ran.
+                # Defensive getattr: actors built via __new__ in unit tests skip
+                # __init__ and so never set _handled_oom_count.
+                self._handled_oom_count = getattr(self, "_handled_oom_count", 0) + 1
+                self._record_handled_oom()
+                batch_size = max(1, batch_size // 2)  # power-of-two reduction; terminates at 1
+                logger.warning("CUDA OOM; halving GPU batch to %d and re-forwarding", batch_size)
+                oom_caught = True
+            else:
+                return out
+
+            # Empty cache outside the except block so CPython clears the exception
+            # reference `e` and its traceback, freeing failed forward tensors before cache reclamation.
+            if oom_caught and torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            if len(texts) <= 1:
-                raise RuntimeError("CUDA OOM on a single text chunk") from e
+    def _plan_windows(
+        self,
+        texts: list[str],
+        input_ids: list[list[int]],
+        offset_mapping: list[list[Any]],
+    ) -> list[_Window]:
+        """Slice each note's tokens into ≤-budget windows (never truncating).
 
-            mid = len(texts) // 2
-            logger.warning(f"CUDA OOM on {len(texts)} texts, splitting into {mid} + {len(texts) - mid}")
-            left = self._run_inference_raw_with_oom_recovery(texts[:mid])
-            right = self._run_inference_raw_with_oom_recovery(texts[mid:])
-            return left + right
+        Thin adapter onto the shared :func:`tide2.transformers.core.plan_windows`
+        primitive, applying this actor's resolved ``_token_budget`` and
+        ``_window_overlap``. Kept so the actor's inference path (and its tests)
+        window through one shared implementation.
+        """
+        return plan_windows(texts, input_ids, offset_mapping, self._token_budget, self._window_overlap)
 
 
 class BIOAggregationActor:
     """
-    Stateless CPU actor for BIO token aggregation and serialization.
+    CPU actor for per-note BIO aggregation → dedup → Presidio formatting.
 
-    Takes raw BIO tokens from TransformerInferenceActor and aggregates them
-    into entity spans using aggregate_bio_tokens(). This separates CPU-heavy
-    post-processing from GPU inference so they can run concurrently via
-    Ray Data streaming.
+    Takes raw BIO tokens from TransformerInferenceActor (one row per whole note,
+    with document-relative char offsets) and produces document-ready
+    ``recognizer_results_json`` directly — folding in what the old separate
+    reassembly stage did. Because notes are processed whole in the GPU actor,
+    there is no cross-document grouping or offset re-basing left to do; this stage
+    only aggregates BIO tokens, dedups the overlap-region duplicates window
+    overlap produces, and formats to Presidio's RecognizerResult shape. Running it
+    as its own CPU actor lets it overlap GPU inference via Ray Data streaming.
 
-    Input columns:
-        - text_hash, chunk_id, char_offset_start, patient_id: passed through
-        - chunk_text: original text (needed for BIO aggregation)
+    Input columns (one row per note):
+        - text_hash, patient_id: passed through
+        - note_text: full document text (needed for aggregation + matched text)
         - predictions_raw_json: JSON-serialized raw BIO token dicts
 
-    Output columns:
-        - text_hash, chunk_id, char_offset_start, patient_id: passed through
-        - predictions_json: JSON-serialized aggregated entity spans
+    Output columns (one row per note):
+        - text_hash, patient_id, note_text: passed through
+        - recognizer_results_json: JSON-serialized Presidio RecognizerResult list
+        - entity_count: number of entities in recognizer_results_json
+        - processing_timestamp: ISO timestamp of this batch
     """
 
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """Aggregate raw BIO tokens into entity spans."""
-        chunk_texts = batch["chunk_text"]
-        raw_json_list = batch["predictions_raw_json"]
-        text_hashes = batch["text_hash"]
-        chunk_ids = batch["chunk_id"]
-        char_offsets = batch["char_offset_start"]
-        patient_ids = batch.get("patient_id", [""] * len(chunk_texts))
-        chunk_uids = batch.get("chunk_uid", [""] * len(chunk_texts))
+    def __init__(
+        self,
+        model_name: str,
+        model_to_presidio_mapping: dict[str, str] | None = None,
+        ignore_labels: list[str] | set[str] | None = None,
+    ) -> None:
+        """Initialize the aggregation actor.
 
-        batch_size = len(chunk_texts)
+        Args:
+            model_name: Transformer model name, used to stamp the canonical
+                Presidio ``recognizer_name`` on every emitted entity.
+            model_to_presidio_mapping: Optional dict mapping model labels to Presidio entities.
+            ignore_labels: Optional set/list of labels to ignore.
+        """
+        self._model_name = model_name
+        self._recognizer_name = format_transformer_recognizer_name(model_name)
+        if model_to_presidio_mapping is not None:
+            self._model_to_presidio_mapping = model_to_presidio_mapping
+        else:
+            try:
+                from tide2.transformers.config import load_model_config
+
+                cfg = load_model_config(model_name)
+                self._model_to_presidio_mapping = cfg.get("MODEL_TO_PRESIDIO_MAPPING", {})
+            except Exception:
+                self._model_to_presidio_mapping = {}
+
+        if ignore_labels is not None:
+            self._ignore_labels = set(ignore_labels)
+        else:
+            try:
+                from tide2.transformers.config import load_model_config
+
+                cfg = load_model_config(model_name)
+                self._ignore_labels = set(cfg.get("LABELS_TO_IGNORE", ["O"]))
+            except Exception:
+                self._ignore_labels = {"O"}
+
+    def _format_note(self, raw_json: str, note_text: str) -> tuple[str, int]:
+        """Decode one note's serialized raw BIO tokens and aggregate them."""
+        raw_tokens = json.loads(raw_json) if raw_json else []
+        return format_note_entities(
+            raw_tokens,
+            note_text,
+            self._recognizer_name,
+            model_to_presidio_mapping=self._model_to_presidio_mapping,
+            ignore_labels=self._ignore_labels,
+        )
+
+    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
+        """Aggregate raw BIO tokens into document-level recognizer results."""
+        cols = BatchColumns(batch)
+        _check_deprecated_patient_uid(cols, location="BIOAggregationActor")
+        note_texts = ["" if is_null(t) else str(t) for t in cols["note_text"]]
+        raw_json_list = cols["predictions_raw_json"]
+        text_hashes = cols["text_hash"]
+        patient_ids = cols.get("patient_id", [None] * len(note_texts))
+
+        batch_size = len(note_texts)
+        upstream_status_col = cols.get("processing_status", [None] * batch_size)
+        upstream_stage_col = cols.get("stage_status_json", [None] * batch_size)
 
         if batch_size == 0:
-            return {
+            res: dict[str, list[Any]] = {
                 "text_hash": [],
-                "chunk_id": [],
-                "chunk_uid": [],
-                "char_offset_start": [],
                 "patient_id": [],
-                "predictions_json": [],
-                "chunk_status": [],
+                "note_text": [],
+                "recognizer_results_json": [],
+                "entity_count": [],
+                "processing_timestamp": [],
+                "processing_status": [],
+                "stage_status_json": [],
             }
+            copy_passthrough(cols, res, empty=True)
+            return res
 
-        predictions_json_list = []
-        chunk_statuses = []
+        timestamp = datetime.now(tz=UTC).isoformat()
+        results_json_list: list[str | None] = []
+        entity_counts: list[int | None] = []
+        statuses: list[str] = []
+        stage_jsons: list[str | None] = []
         for i in range(batch_size):
-            try:
-                raw_tokens = json.loads(raw_json_list[i])
-                text = chunk_texts[i] if chunk_texts[i] else ""
+            upstream_stage = upstream_stage_col[i]
+            results_json, count = None, None
+            if is_failed(upstream_status_col[i]):
+                stage_json, status = upstream_stage, FAILED
+            else:
+                try:
+                    results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
+                    stage_json, status = append_status(upstream_stage, "bio_aggregation", SUCCESS)
+                except Exception as exc:
+                    log_note_failure(logger, "bio_aggregation", text_hashes[i], exc)
+                    stage_json, status = append_status(upstream_stage, "bio_aggregation", FAILED, failure_reason(exc))
+            results_json_list.append(results_json)
+            entity_counts.append(count)
+            statuses.append(status)
+            stage_jsons.append(stage_json)
 
-                if not raw_tokens or not text:
-                    predictions_json_list.append("[]")
-                    chunk_statuses.append("success")
-                    continue
-
-                # Remove duplicates (can occur from chunking)
-                raw_tokens = [dict(t) for t in {tuple(d.items()) for d in raw_tokens}]
-
-                aggregated = aggregate_bio_tokens(raw_tokens, text)
-                predictions_json_list.append(json.dumps(aggregated, ensure_ascii=False))
-                chunk_statuses.append("success")
-            except Exception:
-                logger.exception(f"Error aggregating predictions for chunk {chunk_ids[i]}")
-                predictions_json_list.append("[]")
-                chunk_statuses.append("failed")
-
-        return {
+        res = {
             "text_hash": list(text_hashes),
-            "chunk_id": list(chunk_ids),
-            "chunk_uid": list(chunk_uids),
-            "char_offset_start": list(char_offsets),
             "patient_id": list(patient_ids),
-            "predictions_json": predictions_json_list,
-            "chunk_status": chunk_statuses,
+            "note_text": list(note_texts),
+            "recognizer_results_json": results_json_list,
+            "entity_count": entity_counts,
+            "processing_timestamp": [timestamp] * batch_size,
+            "processing_status": statuses,
+            "stage_status_json": stage_jsons,
         }
+        copy_passthrough(cols, res)
+        return type_all_null_columns(res)
 
 
 def create_transformer_actor(
@@ -490,11 +748,10 @@ def create_transformer_actor(
     model_path: str | None = None,
     bucket_name: str | None = None,
     project_id: str | None = None,
-    compile_model: bool | None = None,
-    compile_cache_path: str | None = None,
     gpu_batch_size: int | None = None,
-    short_seq_budget: float | None = None,
     allow_huggingface_download: bool = True,
+    window_overlap: int = _DEFAULT_WINDOW_OVERLAP,
+    aggregate_bio: bool = False,
 ) -> type[TransformerInferenceActor]:
     """
     Factory function to create a TransformerInferenceActor class with specific config.
@@ -508,12 +765,13 @@ def create_transformer_actor(
         model_path: Optional explicit model path (overrides GCS resolution).
         bucket_name: Optional GCS bucket name for model loading.
         project_id: Optional GCP project ID for model loading.
-        compile_model: If True, apply torch.compile with mega-cache.
-        compile_cache_path: Path to compiled cache .bin file.
-        gpu_batch_size: Batch size for HF pipeline inference (None = auto-compute).
-        short_seq_budget: Memory budget fraction for short sequences (None = auto).
+        gpu_batch_size: Windows per GPU forward (None = nominal default).
         allow_huggingface_download: If True, fall back to HuggingFace Hub
             when local cache and GCS both miss.
+        window_overlap: Token overlap between adjacent windows for over-budget
+            chunks (default 40).
+        aggregate_bio: If True, configure the actor to aggregate raw BIO tokens
+            to document-level Presidio entities directly inside the actor.
 
     Returns:
         A class that can be used with Ray Data's map_batches().
@@ -535,11 +793,10 @@ def create_transformer_actor(
                 model_path=model_path,
                 bucket_name=bucket_name,
                 project_id=project_id,
-                compile_model=compile_model,
-                compile_cache_path=compile_cache_path,
                 gpu_batch_size=gpu_batch_size,
-                short_seq_budget=short_seq_budget,
                 allow_huggingface_download=allow_huggingface_download,
+                window_overlap=window_overlap,
+                aggregate_bio=aggregate_bio,
             )
 
     return ConfiguredTransformerActor

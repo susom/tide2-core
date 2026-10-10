@@ -61,12 +61,17 @@ for txt_file in sorted(text_files_dir.glob("*.txt")):
 df = pd.DataFrame(records)
 print(f"Loaded {len(df)} notes from {text_files_dir}")
 
+output_path = Path(OUTPUT_DIR)
+output_path.mkdir(parents=True, exist_ok=True)
+input_parquet = output_path / "input_notes.parquet"
+df.to_parquet(input_parquet, index=False)
+
 from tide2.runner import LocalJobRunner
 
 runner = LocalJobRunner(num_cpus=4, object_store_gb=2)
 try:
     result = runner.run_pipeline(
-        input_data=df,
+        input_path=str(input_parquet),
         output_dir=OUTPUT_DIR,
         model_name="unused-in-llm-only-mode",
         run_transformer=False,
@@ -126,8 +131,8 @@ if not rec_files:
     print("No recognizer output found. Part 1 may have failed.")
     sys.exit(1)
 
-input_parquet = output_path / "01_transformer_input.parquet"
-df_input = pd.read_parquet(input_parquet)[["text_hash", "note_text"]]
+input_parquet = output_path / "input_notes.parquet"
+df_input = pd.read_parquet(input_parquet)
 
 # Create output directory for anonymizer visualizer JSONs
 anon_json_dir = output_path / "cli_anonymizer_json"
@@ -135,7 +140,7 @@ anon_json_dir.mkdir(parents=True, exist_ok=True)
 
 for pf in rec_files:
     df_rec = pq.read_table(pf).to_pandas()
-    df_merged = df_rec.merge(df_input, on="text_hash", how="left")
+    df_merged = df_rec if "note_text" in df_rec.columns else df_rec.merge(df_input, on="text_hash", how="left")
 
     for _, row in df_merged.iterrows():
         text_hash = row["text_hash"]

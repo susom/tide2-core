@@ -29,6 +29,8 @@ from presidio_analyzer import EntityRecognizer
 from presidio_analyzer import RecognizerResult
 from presidio_analyzer.nlp_engine import NlpArtifacts
 
+from tide2.utils.stage_status import NoteError
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,16 +109,22 @@ class CachedResultsTransformerRecognizer(EntityRecognizer):
 
         Returns:
             List of result dictionaries.
+
+        Raises:
+            NoteError: If the results are not a JSON list of objects; returning
+                no detections would silently drop the model's findings.
         """
         if results is None or results == "":
             return []
 
         if isinstance(results, str):
             try:
-                return json.loads(results)
+                results = json.loads(results)
             except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse cached results JSON: {e}")
-                return []
+                raise NoteError("cached_results") from e
+
+        if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
+            raise NoteError("cached_results")
 
         return list(results)  # Make a copy to ensure immutability
 

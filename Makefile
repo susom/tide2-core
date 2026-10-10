@@ -1,4 +1,4 @@
-.PHONY: docs docs-serve docker docker-cpu docker-gpu test-docker deploy setup-hooks clean-kubernetes work-pool
+.PHONY: docs docs-serve docker docker-push setup-hooks
 
 -include .env
 export
@@ -24,23 +24,13 @@ docs-serve:
 		open_browser('http://localhost:8080'); \
 		server.serve_forever()"
 
-REGISTRY := $(DOCKER_REGISTRY)
-IMAGE_GPU := $(DOCKER_IMAGE_GPU)
+# DOCKER_REGISTRY and DOCKER_IMAGE come from .env (DOCKER_IMAGE_GPU is still read as a fallback).
+IMAGE := $(or $(DOCKER_IMAGE),$(DOCKER_IMAGE_GPU),tide2)
+TAG ?= dev
+IMAGE_REF := $(if $(DOCKER_REGISTRY),$(DOCKER_REGISTRY)/,)$(IMAGE):$(TAG)
 
-test-docker:
-	mkdir -p .buildx-cache-gpu
-	docker buildx build -f Dockerfile --target test \
-		--cache-from type=local,src=.buildx-cache-gpu \
-		--cache-to type=local,dest=.buildx-cache-gpu,mode=max \
-		.
+docker:
+	docker build --platform linux/amd64 -t $(IMAGE_REF) .
 
-docker-gpu:
-	mkdir -p .buildx-cache-gpu
-	docker buildx build --platform linux/amd64 -f Dockerfile --target production-gpu \
-		--cache-from type=local,src=.buildx-cache-gpu \
-		--cache-to type=local,dest=.buildx-cache-gpu,mode=max \
-		--push \
-		-t $(REGISTRY)/$(IMAGE_GPU):dev .
-
-docker: docker-gpu
-	uv lock
+docker-push: docker
+	docker push $(IMAGE_REF)

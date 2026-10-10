@@ -1,13 +1,21 @@
 """
 Unified Ray actors for batch processing.
 
-This module provides Ray actors for recognition, anonymization, and transformer
-inference that work across all execution modes: local, VM, and cluster.
+This module provides Ray actors and worker classes for recognition,
+anonymization, and transformer inference that work across all execution modes:
+local, VM, and cluster.
 
-Actors:
-    RecognizerActor: PII/PHI recognition using Presidio AnalyzerEngine
-    AnonymizerActor: Anonymization using Presidio AnonymizerEngine with HIPS
+Ray Data UDFs:
+    RecognizerActor: Plain RecognizerWorker class passed to map_batches()
+    AnonymizerActor: Plain AnonymizerWorker class passed to map_batches()
+    LlmRecognizerActor: Plain LlmRecognizerWorker class passed to map_batches()
     TransformerInferenceActor: GPU-based transformer NER inference
+
+Note on .remote():
+    RecognizerActor, AnonymizerActor, and LlmRecognizerActor are plain callable
+    classes driven directly by Ray Data map_batches(). Calling .remote() on them
+    is not supported; use RecognizerWorkerActor, AnonymizerWorkerActor, or
+    LlmRecognizerWorkerActor if direct Ray remote actor spawning is required.
 
 Factory Functions:
     create_anonymizer_actor: Create AnonymizerActor with keys (bytes or file paths)
@@ -24,12 +32,40 @@ Example:
     ds.map_batches(AnonymizerActorClass, batch_size=100, ...)
 """
 
+import warnings
+from typing import Any
+
 from tide2.actors.anonymizer import AnonymizerActor
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.actors.anonymizer import create_anonymizer_actor_class  # Backwards compatibility
-from tide2.actors.reassembly import ReassemblyActor
 from tide2.actors.recognizer import NoOpContextEnhancer
 from tide2.actors.recognizer import RecognizerActor
+
+DEPRECATED_ACTOR_KWARGS: frozenset[str] = frozenset({"batch_timeout", "timeout", "worker_num_cpus"})
+
+
+def check_deprecated_actor_kwargs(kwargs: dict[str, Any], class_or_func_name: str) -> None:
+    """Validate keyword arguments against deprecated actor parameters.
+
+    Args:
+        kwargs: Keyword arguments passed to the actor/worker or factory.
+        class_or_func_name: Name of the class or function for error messages.
+
+    Raises:
+        ValueError: If any deprecated actor argument is present.
+        TypeError: If any unrecognized keyword argument is present.
+    """
+    for arg in ("batch_timeout", "timeout", "worker_num_cpus"):
+        if arg in kwargs:
+            msg = (
+                f"'{arg}' is deprecated and no longer supported. "
+                "Ray Data now drives direct workers with execution-level timeouts."
+            )
+            warnings.warn(msg, DeprecationWarning, stacklevel=3)
+            raise ValueError(f"Unsupported deprecated argument: '{arg}'.")
+    if kwargs:
+        unexpected = next(iter(kwargs))
+        raise TypeError(f"{class_or_func_name}() got an unexpected keyword argument '{unexpected}'")
 
 
 def __getattr__(name: str):
@@ -68,7 +104,6 @@ __all__ = [
     "BIOAggregationActor",
     "LlmRecognizerActor",
     "NoOpContextEnhancer",
-    "ReassemblyActor",
     "RecognizerActor",
     "TransformerInferenceActor",
     "create_anonymizer_actor",

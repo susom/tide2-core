@@ -6,6 +6,9 @@ Replaces detected PII entities with [<entity_type>], e.g. "John Smith" -> "[PERS
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.anonymizers.guarded import mask
+from tide2.anonymizers.guarded import record_fallback
+
 
 class MaskingAnonymizer(Operator):
     """Anonymizer that replaces entities with [<entity_type>] labels."""
@@ -20,12 +23,16 @@ class MaskingAnonymizer(Operator):
         Args:
             text: The original text containing the entity.
             params: Operator parameters. Uses 'entity_type' to determine the label.
+                When 'fallback' is true the mask stands in for an operator that has
+                no path for this entity, and is recorded as a fallback.
 
         Returns:
             String in the format [<entity_type>], e.g. [PERSON].
         """
         entity_type = params.get("entity_type", "UNKNOWN")
-        return f"[{entity_type}]"
+        if params.get("fallback"):
+            record_fallback(entity_type)
+        return mask(entity_type)
 
     def validate(self, params: dict) -> None:
         """Validate operator parameters. Accepts all entity types."""

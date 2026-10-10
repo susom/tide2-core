@@ -18,6 +18,8 @@ from re import Pattern
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.anonymizers.guarded import record_fallback
+
 # --- Date-parsing constants (named to avoid magic values in comparisons) ---
 # Ordinal suffix: 11th-13th (and the 10-20 band) always take "th".
 _ORDINAL_TEEN_LOW = 10
@@ -400,8 +402,12 @@ class DateJitterAnonymizer(Operator):
             # match here and drop the rest of the string, so keep scanning.
             if self._matched_day_of_week(match) and not self._is_standalone_weekday(match, text):
                 continue
-            return self._replace_match(match, replacement, jitter)
+            result = self._replace_match(match, replacement, jitter)
+            if result == self.default_replacement:
+                record_fallback(entity_type)
+            return result
 
+        record_fallback(entity_type)
         return self.default_replacement
 
     @staticmethod
