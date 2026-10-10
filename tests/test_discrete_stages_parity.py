@@ -392,7 +392,9 @@ def test_anonymizer_worker_patient_id_normalization():
 def test_resolve_transformer_resources_fractional_gpu(monkeypatch):
     """LocalJobRunner._resolve_transformer_resources handles fractional GPUs properly."""
     runner = lr.LocalJobRunner()
-    monkeypatch.setattr(ray, "cluster_resources", lambda: {"CPU": 16, "GPU": 1})
+    # No autotune recommendations, so the legacy fractional-GPU heuristic is what is under test on any host.
+    monkeypatch.setattr(lr, "detect_hardware", lambda: SimpleNamespace(cluster_cpu=16.0, cluster_gpu=1.0))
+    monkeypatch.setattr(lr, "recommend_settings", lambda _hw: SimpleNamespace(transformer={}))
 
     # Requesting 0.33 GPU: should multiplex 3 actors and set num_agg_actors to 0 (in-actor aggregation)
     num_gpus, cpu_only, num_actors, num_agg = runner._resolve_transformer_resources(
