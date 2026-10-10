@@ -298,6 +298,25 @@ class TestPlanShape:
         assert result["execution_mode"] == "streamed"
         assert result["input_rows"] == 2
 
+    @pytest.mark.parametrize("written_rows", [1, 3, 0])
+    def test_any_row_count_mismatch_raises(self, streamed_env, df, written_rows):
+        streamed_env["input_rows"] = written_rows
+        with pytest.raises(RuntimeError, match=rf"wrote {written_rows} rows from 2 input rows"):
+            run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
+
+    def test_files_left_by_an_earlier_run_are_not_counted(self, streamed_env, df):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        sink = streamed_env["output_dir"] / "06_anonymizer_output"
+        sink.mkdir(parents=True)
+        pq.write_table(pa.table({"row_id": ["old-1", "old-2"]}), str(sink / "earlier-run.parquet"))
+
+        result = run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
+
+        assert result["output_rows"] == 2
+        assert result["dropped_rows"] == 0
+
     def test_sink_projection_drops_note_text(self, streamed_env, df):
         runner = lr.LocalJobRunner()
         run_streamed(runner, df, streamed_env["output_dir"])

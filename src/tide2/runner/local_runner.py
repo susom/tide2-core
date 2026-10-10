@@ -636,8 +636,16 @@ FINAL_OUTPUT_COLUMNS = frozenset(
 #: A node with at most this many CPUs cannot hold three concurrent actor pools.
 MIN_STREAMED_NODE_CPUS = 4
 
-#: Fraction of input rows that may be dropped before the streamed path warns.
-STREAMED_DROP_WARN_FRACTION = 0.01
+
+def _check_streamed_row_parity(input_rows: int, output_rows: int) -> None:
+    """Raise if the streamed sink did not receive exactly one row per input row."""
+    if output_rows == input_rows:
+        return
+    hint = " All batches failed; check worker logs for the underlying error." if output_rows == 0 else ""
+    raise RuntimeError(
+        f"Streamed pipeline wrote {output_rows} rows from {input_rows} input rows "
+        f"(dropped={input_rows - output_rows}).{hint}"
+    )
 
 
 def _streamed_source_columns(contracts: list[tuple[str, "StageColumns"]]) -> frozenset[str]:
@@ -2894,27 +2902,17 @@ class LocalJobRunner:
                 sink_columns = None
 
             sink_dir.mkdir(parents=True, exist_ok=True)
+            preexisting_files = set(sink_dir.glob("**/*.parquet"))
             if sink_columns:
                 ds = ds.select_columns(sink_columns)
             ds.write_parquet(str(sink_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
             # Row reconciliation. Count with pyarrow, never ds.count() — that
             # re-executes the whole chained plan.
-            output_files = list(sink_dir.glob("**/*.parquet"))
+            output_files = [f for f in sink_dir.glob("**/*.parquet") if f not in preexisting_files]
             output_rows = pads.dataset(output_files).count_rows() if output_files else 0
-            if output_rows == 0 and input_rows > 0:
-                raise RuntimeError(
-                    f"Streamed pipeline wrote 0 rows from {input_rows} input rows — all batches failed. "
-                    "Check worker logs for the underlying error."
-                )
             dropped = input_rows - output_rows
-            if dropped > 0 and dropped / input_rows > STREAMED_DROP_WARN_FRACTION:
-                logger.warning(
-                    "Streamed pipeline dropped %d of %d rows (%.2f%%)",
-                    dropped,
-                    input_rows,
-                    100.0 * dropped / input_rows,
-                )
+            _check_streamed_row_parity(input_rows, output_rows)
 
             try:
                 operator_stats: dict[str, Any] = {"summary": ds.stats()}
