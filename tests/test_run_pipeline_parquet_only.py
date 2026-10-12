@@ -469,7 +469,7 @@ def test_pipeline_does_not_materialize_normalized_input(tmp_path, monkeypatch):
         )
         assert not (out / "01_normalized_input").exists()
         assert stages_called["transformer"]["input_path"] == [str(f)]
-        assert stages_called["transformer"]["_normalize"] is True
+        assert "_normalize" not in stages_called["transformer"]
         assert stages_called["transformer"]["_id_column"] == "row_id"
 
 
@@ -514,6 +514,25 @@ def test_standalone_run_anonymization_row_id(tmp_path):
         )
         assert ("row_id" in res["columns_detected"]) is expect_row_id
         assert not (out / "00_normalized_anonymizer_input").exists()
+
+
+def test_stage_jobs_accept_a_raw_file_without_text_hash(tmp_path):
+    """Every stage job derives text_hash in the read, so only note_text (and the recognizer results) are required."""
+    runner = LocalJobRunner()
+    salt_file = tmp_path / "salt.bin"
+    key_file = tmp_path / "key.bin"
+    salt_file.write_text("00" * 32)
+    key_file.write_text("11" * 32)
+    raw = tmp_path / "raw.parquet"
+    pq.write_table(pa.table({"NOTE_TEXT": ["text"], "recognizer_results_json": ["[]"]}), raw)
+
+    recognition = runner.run_recognition(str(raw), str(tmp_path / "r"), dry_run=True)
+    anonymization = runner.run_anonymization(
+        str(raw), str(tmp_path / "a"), salt_path=str(salt_file), key_path=str(key_file), dry_run=True
+    )
+
+    assert "text_hash" not in recognition["columns_detected"]
+    assert "text_hash" not in anonymization["columns_detected"]
 
 
 def test_merge_mode_ray_join_no_fanout(tmp_path):

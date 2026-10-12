@@ -360,47 +360,35 @@ def _read_stage_source(
     files: str | list[str],
     columns: list[str] | None = None,
     *,
-    normalize: bool = False,
-    derive_ids_in_read: bool = False,
     num_blocks: int | None = None,
     read_cpus: float | None = None,
 ) -> Dataset:
-    """Read a Parquet source, optionally deriving ``text_hash`` and ``row_id`` from the note.
+    """Read a Parquet source and add ``text_hash`` and ``row_id`` when they are absent.
 
-    With ``derive_ids_in_read`` the derivation runs inside the read tasks, so the
-    ID column exists before Ray's checkpoint filter, which runs right after the
-    read. A later ``map_batches`` would run too late, and no normalized copy of
-    the input is written. Otherwise normalization, if requested, is fused as a
-    ``map_batches`` after the read.
+    The derivation runs inside the read tasks, so the ID column exists before Ray's
+    checkpoint filter, which runs right after the read. A later ``map_batches`` would
+    run too late, and no normalized copy of the input is written. Column names are
+    lowercased. A ``text_hash`` or ``row_id`` in the input is kept.
 
     Args:
         files: Parquet file or files.
         columns: Columns to read. None reads all.
-        normalize: Lowercase column names and add ``text_hash`` and ``row_id`` if
-            absent. When False, only ``row_id`` is derived (with ``derive_ids_in_read``).
-        derive_ids_in_read: Derive the IDs inside the read. Use this when
-            checkpointing is on and ``row_id`` may be absent.
         num_blocks: Explicit number of read blocks.
         read_cpus: CPUs reserved per read task.
     """
     kwargs: dict[str, Any] = {}
     if columns is not None:
         kwargs["columns"] = columns
+        if "row_id" not in {c.lower() for c in columns}:
+            logger.warning(_DERIVED_ROW_ID_WARNING)
     if num_blocks is not None:
         kwargs["override_num_blocks"] = num_blocks
     if read_cpus is not None:
         kwargs["ray_remote_args"] = {"num_cpus": read_cpus}
 
-    if derive_ids_in_read:
-        if columns is not None and "row_id" not in {c.lower() for c in columns}:
-            logger.warning(_DERIVED_ROW_ID_WARNING)
-        # Private Ray argument; tests guard it. A hook runs before the checkpoint filter, map_batches does not.
-        kwargs["_block_udf"] = normalize_source_batch if normalize else add_row_id
-
-    ds: Dataset = ray.data.read_parquet(files, **kwargs)
-    if normalize and not derive_ids_in_read:
-        ds = ds.map_batches(normalize_source_batch, batch_format="pyarrow")
-    return ds
+    # Private Ray argument; tests guard it. A hook runs before the checkpoint filter, map_batches does not.
+    kwargs["_block_udf"] = normalize_source_batch
+    return ray.data.read_parquet(files, **kwargs)
 
 
 def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
@@ -1117,7 +1105,6 @@ class LocalJobRunner:
         override_num_blocks: int | None = None,
         dry_run: bool = False,
         _id_column: str = "text_hash",
-        _normalize: bool = False,
     ) -> dict[str, Any]:
         """
         Run recognition job with Ray Data checkpointing for resume.
@@ -1213,29 +1200,17 @@ class LocalJobRunner:
             num_actors = self._auto_num_actors()
 
         # Detect columns
-        if _normalize:
-            required_cols = ["note_text"]
-            optional_cols = [
-                "text_hash",
-                "patient_identifiers",
-                "recognizer_results_json",
-                "patient_id",
-                "jitter",
-                "row_id",
-                "processing_status",
-                "stage_status_json",
-            ]
-        else:
-            required_cols = ["text_hash", "note_text"]
-            optional_cols = [
-                "patient_identifiers",
-                "recognizer_results_json",
-                "patient_id",
-                "jitter",
-                "row_id",
-                "processing_status",
-                "stage_status_json",
-            ]
+        required_cols = ["note_text"]
+        optional_cols = [
+            "text_hash",
+            "patient_identifiers",
+            "recognizer_results_json",
+            "patient_id",
+            "jitter",
+            "row_id",
+            "processing_status",
+            "stage_status_json",
+        ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
@@ -1280,8 +1255,6 @@ class LocalJobRunner:
             ds = _read_stage_source(
                 input_files,
                 columns=columns,
-                normalize=_normalize,
-                derive_ids_in_read=enable_checkpoint and _normalize,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
@@ -1316,7 +1289,7 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_llm_recognition(  # noqa: PLR0915
+    def run_llm_recognition(
         self,
         input_path: str | list[str],
         output_path: str,
@@ -1344,7 +1317,6 @@ class LocalJobRunner:
         enable_checkpoint: bool = True,
         dry_run: bool = False,
         _id_column: str = "text_hash",
-        _normalize: bool = False,
     ) -> dict[str, Any]:
         """
         Run LLM-based recognition job with Ray Data checkpointing for resume.
@@ -1444,28 +1416,17 @@ class LocalJobRunner:
         if num_actors is None:
             num_actors = self._auto_num_actors()
 
-        # Detect columns — LLM recognizer needs text_hash, note_text, and forwards patient metadata
-        if _normalize:
-            required_cols = ["note_text"]
-            optional_cols = [
-                "text_hash",
-                "patient_id",
-                "row_id",
-                "jitter",
-                "patient_identifiers",
-                "processing_status",
-                "stage_status_json",
-            ]
-        else:
-            required_cols = ["text_hash", "note_text"]
-            optional_cols = [
-                "patient_id",
-                "row_id",
-                "jitter",
-                "patient_identifiers",
-                "processing_status",
-                "stage_status_json",
-            ]
+        # Detect columns — LLM recognizer needs note_text and forwards patient metadata
+        required_cols = ["note_text"]
+        optional_cols = [
+            "text_hash",
+            "patient_id",
+            "row_id",
+            "jitter",
+            "patient_identifiers",
+            "processing_status",
+            "stage_status_json",
+        ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
 
         ctx = ray.data.DataContext.get_current()
@@ -1511,8 +1472,6 @@ class LocalJobRunner:
             ds = _read_stage_source(
                 input_files,
                 columns=columns,
-                normalize=_normalize,
-                derive_ids_in_read=enable_checkpoint and _normalize,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
@@ -1585,7 +1544,6 @@ class LocalJobRunner:
         override_num_blocks: int | None = None,
         dry_run: bool = False,
         _id_column: str = "row_id",
-        _normalize: bool = False,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1684,15 +1642,9 @@ class LocalJobRunner:
             num_actors = self._auto_num_actors()
 
         # Detect columns
-        required_cols = ["text_hash", "note_text", "recognizer_results_json"]
-        optional_cols = ["patient_id", "jitter", "row_id", "processing_status", "stage_status_json"]
+        required_cols = ["note_text", "recognizer_results_json"]
+        optional_cols = ["text_hash", "patient_id", "jitter", "row_id", "processing_status", "stage_status_json"]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
-
-        # Without row_id and with checkpointing, it is derived inside the read (see
-        # _read_stage_source); without checkpointing it is fused after the read.
-        has_row_id = "row_id" in [c.lower() for c in columns]
-        derive_ids_in_read = enable_checkpoint and (_normalize or not has_row_id)
-        fuse_add_row_id = not has_row_id and not enable_checkpoint
 
         ctx = ray.data.DataContext.get_current()
         logger.info("Anonymization job starting")
@@ -1746,13 +1698,9 @@ class LocalJobRunner:
             ds = _read_stage_source(
                 input_files,
                 columns=columns,
-                normalize=_normalize,
-                derive_ids_in_read=derive_ids_in_read,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
-            if fuse_add_row_id and not _normalize:
-                ds = ds.map_batches(add_row_id, batch_format="pyarrow")
             processed = self.build_anonymizer_stage(
                 ds,
                 actor_cls=AnonymizerActor,
@@ -1825,7 +1773,6 @@ class LocalJobRunner:
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
         _id_column: str = "text_hash",
-        _normalize: bool = False,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """
@@ -2000,27 +1947,16 @@ class LocalJobRunner:
         )
 
         input_files = resolve_input_files(input_path)
-        if _normalize:
-            required_cols = ["note_text"]
-            optional_cols = [
-                "text_hash",
-                "patient_id",
-                "patient_identifiers",
-                "jitter",
-                "row_id",
-                "processing_status",
-                "stage_status_json",
-            ]
-        else:
-            required_cols = ["text_hash", "note_text"]
-            optional_cols = [
-                "patient_id",
-                "patient_identifiers",
-                "jitter",
-                "row_id",
-                "processing_status",
-                "stage_status_json",
-            ]
+        required_cols = ["note_text"]
+        optional_cols = [
+            "text_hash",
+            "patient_id",
+            "patient_identifiers",
+            "jitter",
+            "row_id",
+            "processing_status",
+            "stage_status_json",
+        ]
         if input_files:
             columns = detect_columns(input_files[0], required_cols, optional_cols)
             read_target = input_files
@@ -2040,8 +1976,6 @@ class LocalJobRunner:
         ds: Dataset = _read_stage_source(
             read_target,
             columns=columns,
-            normalize=_normalize,
-            derive_ids_in_read=enable_checkpoint and _normalize,
             num_blocks=override_num_blocks,
             read_cpus=read_cpus,
         )
@@ -2346,10 +2280,9 @@ class LocalJobRunner:
         # Resolve settings via hardware recommender
         self._apply_pipeline_recommendations(model_name, t_kw, r_kw, a_kw, hardware_autotune)
 
-        # Each stage derives text_hash and row_id from the note when they are absent. With
-        # checkpointing on this happens inside the first stage's read; no normalized copy is written.
+        # Each stage derives text_hash and row_id from the note when they are absent, inside
+        # its read; no normalized copy is written.
         first_stage_input_path: str | list[str] = resolved_files
-        first_stage_normalize = True
 
         # ------------------------------------------------------------------
         # Phase 1: Transformer NER
@@ -2368,7 +2301,6 @@ class LocalJobRunner:
                 output_path=str(transformer_output_path),
                 model_name=model_name,
                 _id_column="row_id",
-                _normalize=first_stage_normalize,
                 **t_kwargs,
             )
             results["transformer"] = transformer_manifest
@@ -2380,7 +2312,6 @@ class LocalJobRunner:
         # ------------------------------------------------------------------
         r_kwargs: dict[str, Any] = dict(r_kw)
         rec_input_path = str(transformer_output_path) if run_transformer else first_stage_input_path
-        rec_normalize = False if run_transformer else first_stage_normalize
 
         if llm_recognizer_mode == "only":
             # LLM replaces both transformer and regex recognizer
@@ -2389,7 +2320,6 @@ class LocalJobRunner:
                 input_path=first_stage_input_path,
                 output_path=str(recognizer_output_path),
                 _id_column="row_id",
-                _normalize=first_stage_normalize,
                 **llm_kw,
             )
             results["llm_recognizer"] = llm_manifest
@@ -2405,7 +2335,6 @@ class LocalJobRunner:
                     input_path=rec_input_path,
                     output_path=str(regex_output_path),
                     _id_column="row_id",
-                    _normalize=rec_normalize,
                     **r_kwargs,
                 )
                 results["recognizer"] = recognizer_manifest
@@ -2414,13 +2343,11 @@ class LocalJobRunner:
 
             # --- LLM recognizer ---
             llm_input_path = str(transformer_output_path) if run_transformer else first_stage_input_path
-            llm_normalize = False if run_transformer else first_stage_normalize
 
             llm_manifest = self.run_llm_recognition(
                 input_path=llm_input_path,
                 output_path=str(llm_recognizer_output_path),
                 _id_column="row_id",
-                _normalize=llm_normalize,
                 **llm_kw,
             )
             results["llm_recognizer"] = llm_manifest
@@ -2505,7 +2432,6 @@ class LocalJobRunner:
                 input_path=rec_input_path,
                 output_path=str(recognizer_output_path),
                 _id_column="row_id",
-                _normalize=rec_normalize,
                 **r_kwargs,
             )
             results["recognizer"] = recognizer_manifest
@@ -2528,13 +2454,10 @@ class LocalJobRunner:
 
             if run_recognizer or llm_recognizer_mode != "off":
                 anon_input_path = str(recognizer_output_path)
-                anon_normalize = False
             elif run_transformer:
                 anon_input_path = str(transformer_output_path)
-                anon_normalize = False
             else:
                 anon_input_path = first_stage_input_path
-                anon_normalize = first_stage_normalize
 
             anonymizer_manifest = self.run_anonymization(
                 input_path=anon_input_path,
@@ -2542,7 +2465,6 @@ class LocalJobRunner:
                 salt_path=str(salt_file),
                 key_path=str(key_file),
                 _id_column="row_id",
-                _normalize=anon_normalize,
                 **a_kwargs,
             )
             results["anonymizer"] = anonymizer_manifest
@@ -2864,8 +2786,6 @@ class LocalJobRunner:
             ds: Dataset = _read_stage_source(
                 input_files,
                 columns=actual_source_cols,
-                normalize=True,
-                derive_ids_in_read=enable_checkpoint,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )

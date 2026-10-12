@@ -92,11 +92,8 @@ def streamed_env(monkeypatch, tmp_path):
     """Patch out Ray, the model, and the output counting for a plan-only run."""
     state = {}
 
-    def fake_read_stage_source(
-        files, columns=None, *, normalize=False, derive_ids_in_read=False, num_blocks=None, read_cpus=None
-    ):
+    def fake_read_stage_source(files, columns=None, *, num_blocks=None, read_cpus=None):
         state["source_columns"] = list(columns or [])
-        state["derive_ids_in_read"] = derive_ids_in_read
         state["rows"] = state.get("input_rows", 2)
         state["num_blocks"] = num_blocks
         ds = PlanDataset()
@@ -355,7 +352,6 @@ class TestPlanShape:
         run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
         assert ctx.checkpoint_config.id_column == "row_id"
         assert ctx.checkpoint_config.checkpoint_path.endswith("06_anonymizer_output_ray_checkpoint")
-        assert streamed_env["derive_ids_in_read"] is True
 
     def test_checkpointing_can_be_turned_off(self, streamed_env, df, monkeypatch):
         ctx = MagicMock(checkpoint_config="leftover")
@@ -364,7 +360,6 @@ class TestPlanShape:
             lr.LocalJobRunner(), df, streamed_env["output_dir"], recognizer_kwargs={"enable_checkpoint": False}
         )
         assert ctx.checkpoint_config is None
-        assert streamed_env["derive_ids_in_read"] is False
 
     def test_skipping_the_recognizer_chains_transformer_to_anonymizer(self, streamed_env, df):
         run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"], run_recognizer=False)

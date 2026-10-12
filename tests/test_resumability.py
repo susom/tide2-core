@@ -261,30 +261,26 @@ def test_read_stage_derives_ids_in_read_hook(monkeypatch):
     fake_ds = MagicMock()
     monkeypatch.setattr(ray.data, "read_parquet", lambda _files, **kw: (seen.update(kw), fake_ds)[1])
 
-    _read_stage_source(["f.parquet"], columns=["note_text"], normalize=True, derive_ids_in_read=True)
+    assert _read_stage_source(["f.parquet"], columns=["note_text"]) is fake_ds
     assert seen["_block_udf"] is normalize_source_batch
     fake_ds.map_batches.assert_not_called()
 
     seen.clear()
-    _read_stage_source(["f.parquet"], columns=["text_hash"], normalize=False, derive_ids_in_read=True)
-    assert seen["_block_udf"] is add_row_id
-
-    seen.clear()
-    _read_stage_source(["f.parquet"], columns=["note_text"], normalize=True)
-    assert "_block_udf" not in seen
-    fake_ds.map_batches.assert_called_once()
+    _read_stage_source(["f.parquet"])
+    assert seen["_block_udf"] is normalize_source_batch
+    fake_ds.map_batches.assert_not_called()
 
 
 def test_derived_row_id_warning(monkeypatch, caplog):
     monkeypatch.setattr(ray.data, "read_parquet", lambda *_a, **_k: MagicMock())
     with caplog.at_level(logging.WARNING, logger="tide2.runner.local_runner"):
-        _read_stage_source(["f"], columns=["note_text"], normalize=True, derive_ids_in_read=True)
+        _read_stage_source(["f"], columns=["note_text"])
     assert "row_id was not supplied" in caplog.text
     assert "does not deduplicate" in caplog.text
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="tide2.runner.local_runner"):
-        _read_stage_source(["f"], columns=["note_text", "ROW_ID"], normalize=True, derive_ids_in_read=True)
+        _read_stage_source(["f"], columns=["note_text", "ROW_ID"])
     assert "row_id was not supplied" not in caplog.text
 
 
@@ -314,9 +310,7 @@ def test_in_read_ids_match_public_helper(tmp_path, datasource_v2):
     src = tmp_path / "in.parquet"
     _write_source(src)
 
-    ds = _read_stage_source(
-        [str(src)], columns=["note_text", "patient_id"], normalize=True, derive_ids_in_read=True, num_blocks=2
-    )
+    ds = _read_stage_source([str(src)], columns=["note_text", "patient_id"], num_blocks=2)
     rows = ds.take_all()
 
     expected = normalize_source_batch(pq.read_table(src))
@@ -329,7 +323,7 @@ def test_select_columns_after_hook_read_is_a_known_hazard(tmp_path, datasource_v
     """Projection pushdown hides derived columns from the hook; no checkpointed stage selects right after the read."""
     src = tmp_path / "in.parquet"
     _write_source(src)
-    ds = _read_stage_source([str(src)], columns=["note_text", "patient_id"], normalize=True, derive_ids_in_read=True)
+    ds = _read_stage_source([str(src)], columns=["note_text", "patient_id"])
     with pytest.raises(Exception, match=r"row_id|does not exist in schema"):
         ds.select_columns(["row_id"]).take_all()
 
@@ -362,9 +356,7 @@ _DRIVER = textwrap.dedent(
         return batch
 
 
-    ds = _read_stage_source(
-        [src], columns=["note_text", "patient_id"], normalize=True, derive_ids_in_read=True, num_blocks=40
-    )
+    ds = _read_stage_source([src], columns=["note_text", "patient_id"], num_blocks=40)
     ds = ds.map_batches(work, batch_format="pyarrow", batch_size=100, num_cpus=1)
     ds.write_parquet(str(out), compression="zstd")
     """
