@@ -511,6 +511,16 @@ def test_all_null_result_columns_keep_their_arrow_type():
     assert res["patient_id"].type == pa.string()
 
 
+def test_all_null_stage_status_json_keeps_its_arrow_type(recognizer):
+    """A fully failed batch with no upstream stage JSON must not write a null-typed column."""
+    from ray.data.block import BlockAccessor
+
+    out = recognizer.process_batch(
+        _recognizer_batch(processing_status=["failed", "failed"], recognizer_results_json=[None, None])
+    )
+    assert BlockAccessor.batch_to_block(out).schema.field("stage_status_json").type == pa.string()
+
+
 def test_all_null_passthrough_columns_keep_their_arrow_type():
     from tide2.utils.batch_columns import type_all_null_columns
 

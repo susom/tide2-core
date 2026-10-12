@@ -213,3 +213,58 @@ class TestRowReconciliation:
         monkeypatch.setattr(tide2.actors, "create_anonymizer_actor_class", lambda **_k: ExplodingAnonymizer)
         with pytest.raises(Exception, match=r"0 rows|deliberate failure|failed"):
             run_mode(tmp_path, notes, "streamed")
+
+
+class TestUpstreamFailuresSurviveStreamedSource:
+    """A row marked failed upstream must stay failed when the first stage reads it from the source."""
+
+    @pytest.mark.parametrize("first_stage", ["recognizer", "anonymizer"])
+    def test_failed_rows_match_discrete(self, tmp_path, first_stage):
+        failed_stage = json.dumps({"transformer": {"status": "failed", "reason": "forced"}})
+        rows = []
+        for i in range(6):
+            failed = i % 2 == 0
+            row = {
+                "text_hash": f"h{i}",
+                "note_text": f"Patient {STUB_ENTITY} seen {i}.",
+                "patient_id": f"p{i}",
+                "row_id": f"r{i}",
+                "processing_status": "failed" if failed else "success",
+                "stage_status_json": failed_stage if failed else json.dumps({"transformer": {"status": "success"}}),
+            }
+            if first_stage == "anonymizer":
+                row["recognizer_results_json"] = json.dumps(
+                    [{"entity_type": "PERSON", "start": 8, "end": 16, "score": 1}]
+                )
+                row["entity_count"] = 1
+            rows.append(row)
+        in_file = tmp_path / "in.parquet"
+        pd.DataFrame(rows).to_parquet(in_file, index=False)
+
+        statuses = {}
+        for mode in ("discrete", "streamed"):
+            runner = LocalJobRunner()
+            try:
+                runner.run_pipeline(
+                    input_path=str(in_file),
+                    output_dir=str(tmp_path / mode),
+                    model_name="stub-model",
+                    run_transformer=False,
+                    run_recognizer=first_stage == "recognizer",
+                    run_anonymizer=first_stage == "anonymizer",
+                    salt_hex=SALT_HEX,
+                    key_hex=KEY_HEX,
+                    hardware_autotune=False,
+                    execution_mode=mode,
+                    recognizer_kwargs={"num_actors": 2, "enable_checkpoint": False},
+                    anonymizer_kwargs={"num_actors": 2, "enable_checkpoint": False},
+                )
+            finally:
+                runner.shutdown()
+            sub = "04_recognizer_output" if first_stage == "recognizer" else "06_anonymizer_output"
+            files = list((tmp_path / mode / sub).glob("**/*.parquet"))
+            table = pads.dataset(files).to_table().to_pandas().set_index("row_id").sort_index()
+            statuses[mode] = table["processing_status"].to_dict()
+
+        assert statuses["streamed"] == statuses["discrete"]
+        assert statuses["streamed"]["r0"] == "failed"

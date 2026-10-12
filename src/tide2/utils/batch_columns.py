@@ -112,6 +112,7 @@ _NULLABLE_COLUMN_TYPES: dict[str, pa.DataType] = {
     "anonymized_note_text": pa.string(),
     "anonymizer_results_json": pa.string(),
     "entity_count": pa.int64(),
+    "stage_status_json": pa.string(),
     "patient_identifiers": pa.string(),
     "patient_id": pa.string(),
     "jitter": pa.int64(),

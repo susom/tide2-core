@@ -218,6 +218,20 @@ class TestColumnContracts:
         assert "note_text" not in lr.FINAL_OUTPUT_COLUMNS
         assert ANONYMIZER_STAGE_COLUMNS.produces | {"row_id"} >= lr.FINAL_OUTPUT_COLUMNS
 
+    @pytest.mark.parametrize(
+        "contract",
+        [
+            TRANSFORMER_STAGE_COLUMNS,
+            RECOGNIZER_STAGE_COLUMNS,
+            LLM_RECOGNIZER_STAGE_COLUMNS,
+            ANONYMIZER_STAGE_COLUMNS,
+        ],
+    )
+    def test_first_stage_source_keeps_upstream_failure_columns(self, contract):
+        """Every actor consumes these, so the source projection must not drop them."""
+        source = lr._streamed_source_columns([("stage", contract)])
+        assert {"processing_status", "stage_status_json"} <= source
+
 
 # ---------------------------------------------------------------------------
 # Admission check

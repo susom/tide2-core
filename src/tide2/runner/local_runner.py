@@ -569,7 +569,7 @@ class StageColumns:
 #: Column contracts, mirroring the actor implementations in ``tide2.actors``.
 TRANSFORMER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
-    optional=frozenset({"patient_id", "patient_identifiers", "jitter"}),
+    optional=frozenset({"patient_id", "patient_identifiers", "jitter", "processing_status", "stage_status_json"}),
     produces=frozenset(
         {
             "text_hash",
@@ -584,7 +584,16 @@ TRANSFORMER_STAGE_COLUMNS = StageColumns(
 )
 RECOGNIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
-    optional=frozenset({"patient_identifiers", "recognizer_results_json", "patient_id", "jitter"}),
+    optional=frozenset(
+        {
+            "patient_identifiers",
+            "recognizer_results_json",
+            "patient_id",
+            "jitter",
+            "processing_status",
+            "stage_status_json",
+        }
+    ),
     produces=frozenset(
         {
             "text_hash",
@@ -601,7 +610,7 @@ RECOGNIZER_STAGE_COLUMNS = StageColumns(
 )
 LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
-    optional=frozenset({"patient_identifiers", "patient_id", "jitter"}),
+    optional=frozenset({"patient_identifiers", "patient_id", "jitter", "processing_status", "stage_status_json"}),
     produces=frozenset(
         {
             "text_hash",
@@ -618,7 +627,7 @@ LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
 )
 ANONYMIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "recognizer_results_json", "row_id"}),
-    optional=frozenset({"patient_id", "jitter"}),
+    optional=frozenset({"patient_id", "jitter", "processing_status", "stage_status_json"}),
     produces=frozenset(
         {
             "text_hash",
@@ -2001,10 +2010,25 @@ class LocalJobRunner:
         input_files = resolve_input_files(input_path)
         if _normalize:
             required_cols = ["note_text"]
-            optional_cols = ["text_hash", "patient_id", "patient_identifiers", "jitter", "row_id"]
+            optional_cols = [
+                "text_hash",
+                "patient_id",
+                "patient_identifiers",
+                "jitter",
+                "row_id",
+                "processing_status",
+                "stage_status_json",
+            ]
         else:
             required_cols = ["text_hash", "note_text"]
-            optional_cols = ["patient_id", "patient_identifiers", "jitter", "row_id"]
+            optional_cols = [
+                "patient_id",
+                "patient_identifiers",
+                "jitter",
+                "row_id",
+                "processing_status",
+                "stage_status_json",
+            ]
         if input_files:
             columns = detect_columns(input_files[0], required_cols, optional_cols)
             read_target = input_files
