@@ -329,6 +329,34 @@ def test_resolve_merged_batch_unit():
     assert resolved["entity_count"].to_pylist()[0] == 1
 
 
+@pytest.mark.parametrize(
+    ("regex_pid", "llm_pid", "expected_type", "expected"),
+    [
+        (pa.array([None, None], type=pa.string()), pa.array([7, 8], type=pa.int64()), pa.int64(), [7, 8]),
+        (pa.array([7, 8], type=pa.int64()), pa.array([None, None], type=pa.string()), pa.int64(), [7, 8]),
+        (pa.array(["a", None], type=pa.string()), pa.array([None, 8], type=pa.int64()), pa.string(), ["a", "8"]),
+    ],
+)
+def test_resolve_merged_batch_mixed_patient_id_types(regex_pid, llm_pid, expected_type, expected):
+    """Regex and LLM copies of patient_id with different Arrow types still merge."""
+    tbl = pa.table(
+        {
+            "row_id": ["r1", "r2"],
+            "text_hash_regex": ["h1", "h2"],
+            "text_hash_llm": ["h1", "h2"],
+            "results_regex": ["[]", "[]"],
+            "results_llm": ["[]", "[]"],
+            "patient_id_regex": regex_pid,
+            "patient_id_llm": llm_pid,
+        }
+    )
+
+    resolved = _resolve_merged_batch(tbl)
+
+    assert resolved["patient_id"].type == expected_type
+    assert resolved["patient_id"].to_pylist() == expected
+
+
 # ---------------------------------------------------------------------------
 # 7. Visualizer JSON helpers with pyarrow
 # ---------------------------------------------------------------------------

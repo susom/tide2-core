@@ -407,6 +407,23 @@ def _read_stage_source(
     return ds
 
 
+def _coalesce_branches(regex_col: pa.ChunkedArray, llm_col: pa.ChunkedArray) -> pa.ChunkedArray:
+    """Coalesce the regex and LLM copies of a column whose Arrow types may differ.
+
+    An all-null column is typed ``string`` by ``type_all_null_columns``, so it can meet a numeric
+    copy of the same column from the other branch. The all-null side takes the other side's type;
+    any other disagreement falls back to ``string``.
+    """
+    if regex_col.type != llm_col.type:
+        if regex_col.null_count == len(regex_col):
+            regex_col = regex_col.cast(llm_col.type)
+        elif llm_col.null_count == len(llm_col):
+            llm_col = llm_col.cast(regex_col.type)
+        else:
+            regex_col, llm_col = regex_col.cast(pa.string()), llm_col.cast(pa.string())
+    return pc.coalesce(regex_col, llm_col)
+
+
 def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
     """Resolve regex and LLM recognizer results per row with longest_wins strategy."""
     from presidio_anonymizer.entities import RecognizerResult
@@ -521,7 +538,7 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
         col_reg = f"{col}_regex"
         col_llm = f"{col}_llm"
         if col_reg in col_names and col_llm in col_names:
-            res_cols[col] = pc.coalesce(batch[col_reg], batch[col_llm])
+            res_cols[col] = _coalesce_branches(batch[col_reg], batch[col_llm])
         elif col_reg in col_names:
             res_cols[col] = batch[col_reg]
         elif col_llm in col_names:
