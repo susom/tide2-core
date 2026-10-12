@@ -92,8 +92,11 @@ def streamed_env(monkeypatch, tmp_path):
     """Patch out Ray, the model, and the output counting for a plan-only run."""
     state = {}
 
-    def fake_read_stage_source(files, columns=None, *, normalize=False, num_blocks=None, read_cpus=None):
+    def fake_read_stage_source(
+        files, columns=None, *, normalize=False, derive_ids_in_read=False, num_blocks=None, read_cpus=None
+    ):
         state["source_columns"] = list(columns or [])
+        state["derive_ids_in_read"] = derive_ids_in_read
         state["rows"] = state.get("input_rows", 2)
         state["num_blocks"] = num_blocks
         ds = PlanDataset()
@@ -312,19 +315,25 @@ class TestPlanShape:
         assert result["execution_mode"] == "streamed"
         assert result["input_rows"] == 2
 
-    @pytest.mark.parametrize("written_rows", [1, 3, 0])
-    def test_any_row_count_mismatch_raises(self, streamed_env, df, written_rows):
+    @pytest.mark.parametrize("written_rows", [1, 0])
+    def test_a_short_write_raises(self, streamed_env, df, written_rows):
         streamed_env["input_rows"] = written_rows
         with pytest.raises(RuntimeError, match=rf"wrote {written_rows} rows from 2 input rows"):
             run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
 
-    def test_files_left_by_an_earlier_run_are_not_counted(self, streamed_env, df):
+    def test_extra_rows_in_the_sink_raise_and_name_the_fix(self, streamed_env, df):
+        streamed_env["input_rows"] = 3
+        with pytest.raises(RuntimeError, match="fresh output_dir"):
+            run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
+
+    def test_rows_committed_by_an_earlier_run_count_toward_the_total(self, streamed_env, df):
         import pyarrow as pa
         import pyarrow.parquet as pq
 
         sink = streamed_env["output_dir"] / "06_anonymizer_output"
         sink.mkdir(parents=True)
-        pq.write_table(pa.table({"row_id": ["old-1", "old-2"]}), str(sink / "earlier-run.parquet"))
+        pq.write_table(pa.table({"row_id": ["old-1"]}), str(sink / "earlier-run.parquet"))
+        streamed_env["input_rows"] = 1  # this attempt writes the one remaining row
 
         result = run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
 
@@ -340,11 +349,22 @@ class TestPlanShape:
         # still survive to the sink so downstream joins keep working.
         assert "row_id" in streamed_env["ds"].state["select"]
 
-    def test_checkpointing_is_cleared_for_the_whole_plan(self, streamed_env, df, monkeypatch):
-        ctx = MagicMock(checkpoint_config="leftover")
+    def test_the_sink_is_checkpointed_on_row_id_by_default(self, streamed_env, df, monkeypatch):
+        ctx = MagicMock(checkpoint_config=None)
         monkeypatch.setattr(ray.data.DataContext, "get_current", staticmethod(lambda: ctx))
         run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
+        assert ctx.checkpoint_config.id_column == "row_id"
+        assert ctx.checkpoint_config.checkpoint_path.endswith("06_anonymizer_output_ray_checkpoint")
+        assert streamed_env["derive_ids_in_read"] is True
+
+    def test_checkpointing_can_be_turned_off(self, streamed_env, df, monkeypatch):
+        ctx = MagicMock(checkpoint_config="leftover")
+        monkeypatch.setattr(ray.data.DataContext, "get_current", staticmethod(lambda: ctx))
+        run_streamed(
+            lr.LocalJobRunner(), df, streamed_env["output_dir"], recognizer_kwargs={"enable_checkpoint": False}
+        )
         assert ctx.checkpoint_config is None
+        assert streamed_env["derive_ids_in_read"] is False
 
     def test_skipping_the_recognizer_chains_transformer_to_anonymizer(self, streamed_env, df):
         run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"], run_recognizer=False)
@@ -474,7 +494,6 @@ class TestFallbacks:
     @pytest.mark.parametrize(
         ("overrides", "expected_in_warning"),
         [
-            ({"anonymizer_kwargs": {"enable_checkpoint": True}}, "enable_checkpoint=True"),
             ({"llm_recognizer_mode": "merge", "llm_recognizer_kwargs": {"project_id": "p"}}, "merge"),
             ({"produce_visualizer_json": True}, "produce_visualizer_json=True"),
         ],
@@ -505,13 +524,13 @@ class TestFallbacks:
         assert "streamed" in discrete_spy
         assert result["execution_mode"] == "streamed"
 
-    def test_explicit_enable_checkpoint_false_does_not_fall_back(self, discrete_spy, in_file, tmp_path):
+    def test_explicit_enable_checkpoint_does_not_fall_back(self, discrete_spy, in_file, tmp_path):
         lr.LocalJobRunner().run_pipeline(
             input_path=in_file,
             output_dir=str(tmp_path),
             model_name="m",
             execution_mode="streamed",
-            recognizer_kwargs={"enable_checkpoint": False},
+            recognizer_kwargs={"enable_checkpoint": True},
         )
         assert "streamed" in discrete_spy
 

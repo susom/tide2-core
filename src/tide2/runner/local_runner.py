@@ -654,6 +654,11 @@ def _check_streamed_row_parity(input_rows: int, output_rows: int) -> None:
     """Raise if the streamed sink did not receive exactly one row per input row."""
     if output_rows == input_rows:
         return
+    if output_rows > input_rows:
+        raise RuntimeError(
+            f"The streamed sink holds {output_rows} rows for {input_rows} input rows. The output_dir already "
+            "had output, and a run without a checkpoint appends to it. Use a fresh output_dir."
+        )
     hint = " All batches failed; check worker logs for the underlying error." if output_rows == 0 else ""
     raise RuntimeError(
         f"Streamed pipeline wrote {output_rows} rows from {input_rows} input rows "
@@ -2123,11 +2128,12 @@ class LocalJobRunner:
         stage overlaps the CPU stages. It is a **single-cluster optimization**
         for development, benchmarks, and single-box batches. Trade-offs:
 
-        - **No row-level resume.** Row-level checkpointing is keyed to one
-          ``id_column`` and one sink, which a chained plan does not have, and
-          its sort+repartition re-triggers the small-box deadlock. A mid-run
-          failure re-runs GPU inference. Long-running or unattended jobs should
-          stay on discrete.
+        - **Resume only at the sink.** With ``enable_checkpoint`` on (the default),
+          the final sink is checkpointed on ``row_id``: a rerun of the same input
+          into the same ``output_dir`` skips rows already written and processes
+          the rest through all stages. Stages are not checkpointed, so a failed
+          run re-runs GPU inference for every unfinished row. Long-running or
+          unattended jobs should stay on discrete.
         - Only ``06_anonymizer_output`` is written; the ``01_``/``02_``/``04_``
           intermediates are not.
         - ``note_text`` stays resident in the object store across all three
@@ -2138,8 +2144,8 @@ class LocalJobRunner:
           ``execution_mode`` key, which both modes now set.
 
         Streamed **falls back to discrete, with a warning and a corrected
-        ``execution_mode`` in the returned manifest**, when ``enable_checkpoint``
-        is explicitly requested, when ``llm_recognizer_mode="merge"``, when
+        ``execution_mode`` in the returned manifest**, when
+        ``llm_recognizer_mode="merge"``, when
         ``produce_visualizer_json=True``, or when there is nothing to chain. It
         **raises** on multi-node clusters and on nodes with ≤4 CPUs, where a
         chained plan cannot be scheduled (see ``check_streamed_admission``).
@@ -2293,7 +2299,6 @@ class LocalJobRunner:
             reason = self._streamed_fallback_reason(
                 llm_recognizer_mode=llm_recognizer_mode,
                 produce_visualizer_json=produce_visualizer_json,
-                stage_kwargs=(t_kw, r_kw, a_kw, dict(llm_kw)),
                 run_anonymizer=run_anonymizer,
                 run_transformer=run_transformer,
                 run_recognizer=run_recognizer,
@@ -2303,8 +2308,7 @@ class LocalJobRunner:
                     "%s Falling back to discrete execution: running the three stages sequentially, each "
                     "serialized to Parquet before the next begins. This is slower than streamed mode "
                     "(expect roughly the discrete baseline) because stage output is written to and re-read "
-                    "from disk instead of staying in memory. Pass enable_checkpoint=False (and drop the "
-                    "other listed options) for streamed execution.",
+                    "from disk instead of staying in memory. Drop the other listed options for streamed execution.",
                     reason,
                 )
                 execution_mode = "discrete"
@@ -2571,7 +2575,6 @@ class LocalJobRunner:
         *,
         llm_recognizer_mode: str,
         produce_visualizer_json: bool,
-        stage_kwargs: tuple[dict[str, Any], ...],
         run_transformer: bool,
         run_recognizer: bool,
         run_anonymizer: bool,
@@ -2595,8 +2598,6 @@ class LocalJobRunner:
                 "needs the pre-anonymization recognizer_results_json, which the anonymizer does not carry "
                 "into the final output and which streamed mode writes no intermediate for."
             )
-        if any(kw.get("enable_checkpoint") is True for kw in stage_kwargs):
-            return "enable_checkpoint=True requires discrete execution: a chained plan has no per-stage sink to key row-level resume on."
         if not (run_transformer or run_recognizer or run_anonymizer) and llm_recognizer_mode == "off":
             return "No stages are enabled, so there is nothing to chain."
         return None
@@ -2725,13 +2726,16 @@ class LocalJobRunner:
         from tide2.actors import create_anonymizer_actor_class
 
         logger.info(
-            "streamed mode: no row-level resume; a mid-run failure re-runs GPU inference. "
-            "Use execution_mode='discrete' for long-running or unattended jobs."
+            "streamed mode: only the final sink is checkpointed, so a rerun of the same input into the same "
+            "output_dir redoes every unfinished row through all stages."
         )
 
         self._init_ray()
         self._apply_pipeline_recommendations(
             model_name, transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, hardware_autotune
+        )
+        enable_checkpoint = not any(
+            kw.get("enable_checkpoint") is False for kw in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs)
         )
 
         anonymizer_output_path = output_path / "06_anonymizer_output"
@@ -2823,7 +2827,9 @@ class LocalJobRunner:
             )
         )
         ctx = ray.data.DataContext.get_current()
-        ctx.checkpoint_config = None
+        sink_dir = anonymizer_output_path if run_anonymizer else recognizer_output_path
+        sink_dir.mkdir(parents=True, exist_ok=True)
+        _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=sink_dir, id_column="row_id")
 
         input_rows = input_info.num_rows
         num_blocks = next(
@@ -2842,7 +2848,7 @@ class LocalJobRunner:
         logger.info(f"  Source blocks: {num_blocks}, target_max_block_size={target_max_block_size_mb}MB")
         logger.info(
             f"  no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}, "
-            f"object_store_gb={self.object_store_gb}, checkpointing=disabled"
+            f"object_store_gb={self.object_store_gb}, checkpointing={'on' if enable_checkpoint else 'off'}"
         )
 
         shutdown = GracefulShutdown()
@@ -2859,6 +2865,7 @@ class LocalJobRunner:
                 input_files,
                 columns=actual_source_cols,
                 normalize=True,
+                derive_ids_in_read=enable_checkpoint,
                 num_blocks=num_blocks,
                 read_cpus=read_cpus,
             )
@@ -2926,18 +2933,16 @@ class LocalJobRunner:
                 # ``row_id`` that no stage lists under ``produces``.
                 sink_columns = sorted(FINAL_OUTPUT_COLUMNS & final_columns)
             else:
-                sink_dir = recognizer_output_path
                 sink_columns = None
 
-            sink_dir.mkdir(parents=True, exist_ok=True)
-            preexisting_files = set(sink_dir.glob("**/*.parquet"))
             if sink_columns:
                 ds = ds.select_columns(sink_columns)
             ds.write_parquet(str(sink_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
             # Row reconciliation. Count with pyarrow, never ds.count() — that
-            # re-executes the whole chained plan.
-            output_files = [f for f in sink_dir.glob("**/*.parquet") if f not in preexisting_files]
+            # re-executes the whole chained plan. With a checkpoint, a rerun adds only
+            # the rows it processed, so the committed rows are all rows of the sink.
+            output_files = list(sink_dir.glob("**/*.parquet"))
             output_rows = pads.dataset(output_files).count_rows() if output_files else 0
             dropped = input_rows - output_rows
             _check_streamed_row_parity(input_rows, output_rows)

@@ -212,7 +212,7 @@ it changed.**
 | Stage boundary | Parquet on disk | blocks in the object store |
 | GPU/CPU overlap | none (stages are sequential) | yes — the GPU stage overlaps the CPU stages |
 | Files written | `02_`, `04_`, `06_` | `06_anonymizer_output` only |
-| Row-level resume (`--no-checkpoint` off) | yes | **no** — a mid-run failure re-runs GPU inference |
+| Row-level resume (`--no-checkpoint` off) | yes, every stage | final output only: a rerun into the same folder skips written rows but redoes every unfinished row through all stages |
 | Multi-machine (stage 1 on a GPU box, 2/3 elsewhere) | yes — this is the point of the mode | no, refused |
 | Nodes with ≤ 4 CPUs | supported (see below) | refused |
 | `--llm-recognizer-mode merge` | yes | falls back to discrete |

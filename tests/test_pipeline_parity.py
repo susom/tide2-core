@@ -127,27 +127,28 @@ def read_output(output_dir):
     return pads.dataset(files).to_table().to_pandas()
 
 
-def run_mode(tmp_path, notes, mode):
-    in_file = tmp_path / "notes.parquet"
+def run_mode(tmp_path, notes, mode, *, checkpoint=False, name=None):
+    in_file = tmp_path / f"notes_{len(notes)}.parquet"
     if not in_file.exists():
         notes.to_parquet(in_file, index=False)
+    out = tmp_path / (name or mode)
     runner = LocalJobRunner()
     try:
         manifest = runner.run_pipeline(
             input_path=str(in_file),
-            output_dir=str(tmp_path / mode),
+            output_dir=str(out),
             model_name="stub-model",
             salt_hex=SALT_HEX,
             key_hex=KEY_HEX,
             hardware_autotune=False,
             execution_mode=mode,
             transformer_kwargs={"num_gpus": 0, "num_transformer_actors": 1, "num_agg_actors": 0},
-            recognizer_kwargs={"num_actors": 2, "enable_checkpoint": False},
-            anonymizer_kwargs={"num_actors": 2, "enable_checkpoint": False},
+            recognizer_kwargs={"num_actors": 2, "enable_checkpoint": checkpoint},
+            anonymizer_kwargs={"num_actors": 2, "enable_checkpoint": checkpoint},
         )
     finally:
         runner.shutdown()
-    return manifest, read_output(tmp_path / mode)
+    return manifest, read_output(out)
 
 
 def canonical_items(raw):
@@ -200,6 +201,42 @@ class TestDiscreteStreamedEquivalence:
         _, streamed = run_mode(tmp_path, notes, "streamed")
         assert "note_text" not in streamed.columns
         assert "anonymized_note_text" in streamed.columns
+
+
+class TestStreamedCheckpoint:
+    def test_checkpointed_streamed_run_matches_discrete(self, tmp_path, notes, stub_transformer):
+        _, discrete = run_mode(tmp_path, notes, "discrete")
+        manifest, streamed = run_mode(tmp_path, notes, "streamed", checkpoint=True)
+
+        assert manifest["dropped_rows"] == 0
+        assert set(discrete["row_id"]) == set(streamed["row_id"])
+        assert (tmp_path / "streamed" / "06_anonymizer_output_ray_checkpoint").exists()
+
+    def test_rerun_into_the_same_folder_adds_no_rows(self, tmp_path, notes, stub_transformer):
+        _, first = run_mode(tmp_path, notes, "streamed", checkpoint=True)
+        manifest, second = run_mode(tmp_path, notes, "streamed", checkpoint=True)
+
+        assert manifest["output_rows"] == len(notes)
+        assert second["row_id"].is_unique
+        assert set(first["row_id"]) == set(second["row_id"])
+
+    def test_rerun_with_more_rows_processes_only_the_new_ones(self, tmp_path, notes, stub_transformer):
+        """A larger input stands in for a run that stopped after the first rows."""
+        run_mode(tmp_path, notes.iloc[:8], "streamed", checkpoint=True, name="resume")
+        before = {f.name for f in (tmp_path / "resume" / "06_anonymizer_output").glob("**/*.parquet")}
+
+        manifest, resumed = run_mode(tmp_path, notes, "streamed", checkpoint=True, name="resume")
+
+        after = {f.name for f in (tmp_path / "resume" / "06_anonymizer_output").glob("**/*.parquet")}
+        assert before <= after and before != after
+        assert manifest["output_rows"] == len(notes)
+        assert resumed["row_id"].is_unique
+        assert len(resumed) == len(notes)
+
+    def test_rerun_without_a_checkpoint_is_refused_after_it_appends(self, tmp_path, notes, stub_transformer):
+        run_mode(tmp_path, notes, "streamed", checkpoint=False)
+        with pytest.raises(RuntimeError, match="fresh output_dir"):
+            run_mode(tmp_path, notes, "streamed", checkpoint=False)
 
 
 class TestRowReconciliation:
