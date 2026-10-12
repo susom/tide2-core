@@ -3,7 +3,10 @@
 import warnings
 from typing import Any
 
+import numpy as np
 import pyarrow as pa
+
+from tide2.utils.nulls import is_null
 
 
 def _check_deprecated_patient_uid(container: Any, location: str = "") -> None:
@@ -106,31 +109,54 @@ def copy_passthrough(
                 res[col] = list(cols[col])
 
 
-_NULLABLE_COLUMN_TYPES: dict[str, pa.DataType] = {
-    "recognizer_results_json": pa.string(),
-    "predictions_raw_json": pa.string(),
-    "anonymized_note_text": pa.string(),
-    "anonymizer_results_json": pa.string(),
-    "entity_count": pa.int64(),
-    "stage_status_json": pa.string(),
-    "patient_identifiers": pa.string(),
-    "patient_id": pa.string(),
-    "jitter": pa.int64(),
-    "row_id": pa.string(),
-}
+_INT_COLUMNS = ("entity_count", "jitter")
+_STRING_COLUMNS = (
+    "recognizer_results_json",
+    "predictions_raw_json",
+    "anonymized_note_text",
+    "anonymizer_results_json",
+    "stage_status_json",
+    "patient_identifiers",
+    "patient_id",
+    "row_id",
+)
 
 
-def type_all_null_columns(res: dict[str, Any]) -> dict[str, Any]:
-    """Give a result or passthrough column that is entirely null its Arrow type, in place.
+def _string_value(value: Any) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    if is_null(value):
+        return None
+    # Ray turns a nullable integer column into float + NaN; 5.0 must read back as "5"
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
+    return str(value)
 
-    A batch where every value is null would otherwise write an Arrow ``null`` column,
-    and a Parquet directory whose first file has that column cannot be read as one
-    dataset by pyarrow. Columns with any value are left to Ray's type inference.
-    ``patient_id`` is typed as string because its source type is not known here; a
-    numeric ``patient_id`` then reads back as string only when an all-null file sorts first.
+
+def _int_value(value: Any) -> int | None:
+    return None if is_null(value) else int(value)
+
+
+def type_columns(res: dict[str, Any]) -> dict[str, Any]:
+    """Give the fixed result and passthrough columns of *res* one Arrow type each, in place.
+
+    ``jitter`` and ``entity_count`` become int64 and every other listed column becomes
+    string, including ``patient_id`` whatever its input type. Values are normalized
+    first (NaN to null, ``5.0`` to ``5`` or ``"5"``), so a batch of numbers read as float
+    with NaN, a batch of strings and a batch of nulls write the same Parquet type, and a
+    directory reads as one dataset. A column with any value stays a list, which Ray infers
+    from the normalized values; an all-null column becomes a typed Arrow array, because
+    Ray would write it as an Arrow ``null`` column.
     """
-    for name, arrow_type in _NULLABLE_COLUMN_TYPES.items():
-        values = res.get(name)
-        if isinstance(values, list) and values and all(value is None for value in values):
-            res[name] = pa.array(values, type=arrow_type)
+    for names, convert, arrow_type in (
+        (_INT_COLUMNS, _int_value, pa.int64()),
+        (_STRING_COLUMNS, _string_value, pa.string()),
+    ):
+        for name in names:
+            values = res.get(name)
+            if not isinstance(values, list):
+                continue
+            converted = [convert(value) for value in values]
+            all_null = bool(converted) and all(value is None for value in converted)
+            res[name] = pa.array(converted, type=arrow_type) if all_null else converted
     return res

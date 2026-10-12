@@ -3,6 +3,7 @@
 import json
 import logging
 
+import numpy as np
 import pyarrow as pa
 import pytest
 
@@ -18,6 +19,7 @@ from tide2.runner.local_runner import _resolve_merged_batch
 from tide2.utils.stage_status import NoteError
 from tide2.utils.stage_status import append_status
 from tide2.utils.stage_status import failure_reason
+from tide2.utils.stage_status import handle_row
 from tide2.utils.stage_status import load_stage_status
 from tide2.utils.stage_status import merge_stage_status
 
@@ -77,6 +79,59 @@ def test_merge_stage_status_unions_branches():
     assert set(_stages(merged_json)) == {"recognizer", "llm_recognizer"}
     assert status == "failed"
     assert merge_stage_status(None, None) == ("{}", "success")
+
+
+def test_merge_stage_status_never_upgrades_an_explicit_failed_flag():
+    ok_json, _ = append_status(None, "recognizer", "success")
+    merged_json, status = merge_stage_status(ok_json, None, "success", "failed")
+    assert status == "failed"
+    assert _stages(merged_json) == {"recognizer": {"status": "success"}}
+    assert merge_stage_status(None, None, "degraded", "success")[1] == "degraded"
+    assert merge_stage_status(None, None, "not a status", None)[1] == "success"
+
+
+def test_merge_stage_status_keeps_the_worse_entry_of_a_shared_stage():
+    failed_json, _ = append_status(None, "transformer", "failed", "RuntimeError")
+    ok_json, _ = append_status(None, "transformer", "success")
+    for first, second in ((failed_json, ok_json), (ok_json, failed_json)):
+        merged_json, status = merge_stage_status(first, second)
+        assert status == "failed"
+        assert _stages(merged_json)["transformer"] == {"status": "failed", "reason": "RuntimeError"}
+
+
+def test_handle_row_skips_work_for_a_failed_upstream_row():
+    calls = []
+    upstream, _ = append_status(None, "transformer", "failed", "RuntimeError")
+    result, stage_json, status = handle_row(
+        logging.getLogger(__name__), "recognizer", "h", "failed", upstream, lambda: calls.append(1)
+    )
+    assert (result, stage_json, status) == (None, upstream, "failed")
+    assert calls == []
+
+
+def test_handle_row_records_an_exception_without_its_message(caplog):
+    def boom():
+        raise ValueError("John Smith")
+
+    result, stage_json, status = handle_row(logging.getLogger(__name__), "recognizer", "h", None, None, boom)
+    assert result is None
+    assert status == "failed"
+    assert _stages(stage_json) == {"recognizer": {"status": "failed", "reason": "ValueError"}}
+    assert "John Smith" not in caplog.text
+
+
+def test_handle_row_records_success_and_the_status_of_a_degraded_result():
+    log = logging.getLogger(__name__)
+    result, stage_json, status = handle_row(log, "recognizer", "h", None, None, lambda: 7)
+    assert (result, status) == (7, "success")
+    assert _stages(stage_json) == {"recognizer": {"status": "success"}}
+
+    result, stage_json, status = handle_row(
+        log, "anonymizer", "h", None, stage_json, lambda: 8, status_of=lambda _r: ("degraded", "AGE")
+    )
+    assert (result, status) == (8, "degraded")
+    assert _stages(stage_json)["anonymizer"] == {"status": "degraded", "reason": "AGE"}
+    assert _stages(stage_json)["recognizer"] == {"status": "success"}
 
 
 def test_failure_reason_never_contains_the_exception_message():
@@ -206,6 +261,36 @@ def test_raw_transformer_path_reports_status_too():
     assert out["predictions_raw_json"] == ["[]"]
 
 
+@pytest.mark.parametrize("aggregate_bio", [True, False])
+def test_transformer_does_not_run_a_row_that_failed_upstream(aggregate_bio):
+    seen_texts = []
+
+    def forward(texts):
+        seen_texts.extend(texts)
+        return [[] for _ in texts]
+
+    failed_json, _ = append_status(None, "upstream", "failed", "RuntimeError")
+    actor = _fused_actor(
+        _aggregate_bio=aggregate_bio, _run_inference_raw_with_oom_recovery=forward, _format_note=lambda *_a: ("[]", 0)
+    )
+    out = actor(
+        {
+            "text_hash": ["a", "b"],
+            "note_text": ["failed note", "good note"],
+            "patient_id": ["p", "q"],
+            "processing_status": ["failed", "success"],
+            "stage_status_json": [failed_json, None],
+        }
+    )
+
+    assert seen_texts == ["good note"]
+    assert out["processing_status"] == ["failed", "success"]
+    payload = out["recognizer_results_json" if aggregate_bio else "predictions_raw_json"]
+    assert payload == [None, "[]"]
+    assert _stages(out["stage_status_json"][0]) == _stages(failed_json)
+    assert _stages(out["stage_status_json"][1]) == {"transformer": {"status": "success"}}
+
+
 def test_bio_aggregation_fails_a_note_and_passes_upstream_failures_through(monkeypatch):
     def boom(*_args, **_kwargs):
         raise RuntimeError("malformed prediction")
@@ -328,6 +413,32 @@ def test_a_missing_required_jitter_masks_the_dates_and_fails_the_note():
     assert out["stage_reason"] == "DATE:jitter_required"
     assert "[DATE]" in out["anonymized_note_text"]
     assert "John Smith" not in out["anonymized_note_text"]
+
+
+def test_the_applied_jitter_is_written_for_every_row(anonymizer):
+    from tide2.cryptographic.date_jitter import derive_date_jitter
+
+    out = anonymizer.process_batch(
+        {
+            "text_hash": ["a", "b", "c"],
+            "note_text": [TEXT, TEXT, TEXT],
+            "recognizer_results_json": ["[]", "[]", "not json"],
+            "patient_id": ["p1", "p2", "p3"],
+            "jitter": [7, float("nan"), 9],
+            "row_id": ["r1", "r2", "r3"],
+        }
+    )
+    derived = derive_date_jitter(patient_id="p2", salt=SALT, key=KEY, max_jitter_days=180, min_jitter_days=3)
+    assert out["jitter"] == [7, derived, None]
+
+
+def test_the_jitter_is_null_when_the_dates_are_masked():
+    worker = AnonymizerWorker(salt=SALT, key=KEY, jitter_required=True)
+    out = worker.process_batch(
+        {"text_hash": ["a"], "note_text": [TEXT], "recognizer_results_json": ["[]"], "patient_id": ["p1"]}
+    )
+    assert _py(out["jitter"]) == [None]
+    assert out["jitter"].type == pa.int64()
 
 
 @pytest.mark.parametrize("age", ["ninety-five", "one hundred and two", "95+", "95", "aged 9x", "elderly"])
@@ -489,15 +600,35 @@ def test_merge_takes_the_worst_branch_status_and_nulls_failed_rows():
     assert not any(name.endswith(("_regex", "_llm")) and name.startswith(("processing", "stage")) for name in out)
 
 
+def test_merge_keeps_a_failed_flag_when_the_stage_entries_look_fine():
+    ok, _ = append_status(None, "recognizer", "success")
+    batch = pa.table(
+        {
+            "row_id": ["r1", "r2", "r3"],
+            "text_hash_regex": ["h1", "h2", "h3"],
+            "results_regex": ["[]", "[]", "[]"],
+            "results_llm": ["[]", "[]", "[]"],
+            "processing_status_regex": ["failed", "success", "success"],
+            "processing_status_llm": ["success", "failed", "success"],
+            "stage_status_json_regex": [ok, ok, None],
+            "stage_status_json_llm": [ok, None, None],
+        }
+    )
+    out = _resolve_merged_batch(batch).to_pydict()
+
+    assert out["processing_status"] == ["failed", "failed", "success"]
+    assert out["recognizer_results_json"] == [None, None, "[]"]
+
+
 # ---------------------------------------------------------------------------
 # Column types stay stable when a whole batch fails
 # ---------------------------------------------------------------------------
 
 
 def test_all_null_result_columns_keep_their_arrow_type():
-    from tide2.utils.batch_columns import type_all_null_columns
+    from tide2.utils.batch_columns import type_columns
 
-    res = type_all_null_columns(
+    res = type_columns(
         {
             "recognizer_results_json": [None, None],
             "entity_count": [None, None],
@@ -522,9 +653,9 @@ def test_all_null_stage_status_json_keeps_its_arrow_type(recognizer):
 
 
 def test_all_null_passthrough_columns_keep_their_arrow_type():
-    from tide2.utils.batch_columns import type_all_null_columns
+    from tide2.utils.batch_columns import type_columns
 
-    res = type_all_null_columns(
+    res = type_columns(
         {
             "patient_identifiers": [None, None],
             "patient_id": [None, None],
@@ -537,8 +668,73 @@ def test_all_null_passthrough_columns_keep_their_arrow_type():
     assert res["jitter"].type == pa.int64()
     assert res["row_id"].type == pa.string()
 
-    partial = type_all_null_columns({"jitter": [None, 3], "patient_id": ["p1", None]})
+    partial = type_columns({"jitter": [None, 3], "patient_id": ["p1", None]})
     assert partial == {"jitter": [None, 3], "patient_id": ["p1", None]}
+
+
+def test_columns_with_values_are_normalized_to_one_type():
+    from tide2.utils.batch_columns import type_columns
+
+    res = type_columns(
+        {
+            "patient_id": [np.float64(5.0), np.float64("nan"), np.int64(7), "p1", 1.5],
+            "jitter": [np.float64(3.0), np.float64("nan"), np.int64(4), None, 5],
+            "entity_count": [np.int64(2), None],
+        }
+    )
+    assert res["patient_id"] == ["5", None, "7", "p1", "1.5"]
+    assert res["jitter"] == [3, None, 4, None, 5]
+    assert res["entity_count"] == [2, None]
+    assert pa.array(res["jitter"]).type == pa.int64()
+    assert pa.array(res["patient_id"]).type == pa.string()
+
+
+def _numpy_passthrough(table: pa.Table) -> dict:
+    """Run a block through Ray's numpy batch conversion and the actors' passthrough and typing."""
+    from ray.data.block import BlockAccessor
+
+    from tide2.utils.batch_columns import copy_passthrough
+    from tide2.utils.batch_columns import type_columns
+
+    res: dict = {}
+    copy_passthrough(BlockAccessor.for_block(table).to_batch_format("numpy"), res)
+    return type_columns(res)
+
+
+@pytest.mark.parametrize("nulls_first", [True, False])
+@pytest.mark.parametrize("patient_id_type", [pa.int64(), pa.float64(), pa.string()])
+def test_blocks_with_and_without_nulls_write_one_type_for_numeric_columns(tmp_path, nulls_first, patient_id_type):
+    """Ray reads a nullable integer column as float with NaN; both blocks must still read as one dataset."""
+    import pyarrow.dataset as pads
+    import pyarrow.parquet as pq
+    from ray.data.block import BlockAccessor
+
+    def block(patient_ids, jitters):
+        table = pa.table(
+            {
+                "row_id": ["r1", "r2"],
+                "patient_id": pa.array(patient_ids, type=patient_id_type),
+                "jitter": pa.array(jitters, type=pa.int64()),
+            }
+        )
+        return BlockAccessor.batch_to_block(_numpy_passthrough(table))
+
+    ids = ["1", "2"] if patient_id_type == pa.string() else [1, 2]
+    blocks = [block([ids[0], None], [3, None]), block(ids, [3, 4])]
+    if not nulls_first:
+        blocks.reverse()
+    out = tmp_path / "out"
+    out.mkdir()
+    for i, tbl in enumerate(blocks):
+        pq.write_table(tbl, out / f"{i}.parquet")
+
+    for read in (lambda: pq.read_table(out), lambda: pads.dataset(out).to_table()):
+        table = read()
+        assert table.schema.field("patient_id").type == pa.string()
+        assert table.schema.field("jitter").type == pa.int64()
+        assert table.num_rows == 4
+        assert table["patient_id"].null_count == 1
+        assert table["jitter"].null_count == 1
 
 
 @pytest.mark.parametrize("null_block_first", [True, False])
@@ -548,10 +744,10 @@ def test_directory_with_an_all_null_passthrough_block_reads_back(tmp_path, null_
     import pyarrow.parquet as pq
     from ray.data.block import BlockAccessor
 
-    from tide2.utils.batch_columns import type_all_null_columns
+    from tide2.utils.batch_columns import type_columns
 
     def block(patient_id, jitter, patient_identifiers):
-        batch = type_all_null_columns(
+        batch = type_columns(
             {
                 "row_id": ["r1", "r2"],
                 "patient_id": patient_id,

@@ -485,6 +485,12 @@ text must be processed again: select `processing_status = 'failed'`, write those
 rows as a new input, and run with a new `<run_id>`. Failed rows are committed to
 the checkpoint like any other row, so resuming a run does not retry them.
 
+**Jitter column.** The anonymizer output has a `jitter` column: the date shift in
+days that was applied, taken from the input or derived. It is null when dates were
+masked or the row failed. With `anonymized_note_text` it undoes the date shift, so
+give it the same access control as `salt.bin` and `key.bin` and drop it before
+release. `patient_id` is written as a string, whatever its input type.
+
 **Known limitations**
 
 - All input files must have the same columns. The column list is read from the

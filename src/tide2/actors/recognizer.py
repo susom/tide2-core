@@ -26,6 +26,7 @@ import logging
 import time as _time
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 import orjson
@@ -55,17 +56,12 @@ from tide2.recognizers import create_cached_recognizer
 from tide2.recognizers import create_recognizers_for_patient
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
-from tide2.utils.batch_columns import type_all_null_columns
+from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.span_metrics import resolve_recognizer_results
-from tide2.utils.stage_status import FAILED
-from tide2.utils.stage_status import SUCCESS
 from tide2.utils.stage_status import NoteError
-from tide2.utils.stage_status import append_status
-from tide2.utils.stage_status import failure_reason
-from tide2.utils.stage_status import is_failed
-from tide2.utils.stage_status import log_note_failure
+from tide2.utils.stage_status import handle_row
 
 
 class _BlankSpacyNlpEngine(SpacyNlpEngine):
@@ -497,7 +493,7 @@ class RecognizerWorker:
 
         return all_results
 
-    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
+    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
         Process a batch of notes in a single call. No IPC per note.
 
@@ -546,23 +542,20 @@ class RecognizerWorker:
             else:
                 r_id = hashlib.sha256(f"{text_hash}:{row_id_patient_part(p_id)}".encode()).hexdigest()
 
-            upstream_stage = upstream_stage_col[i]
-            result = None
-            if is_failed(upstream_status_col[i]):
-                stage_json, status = upstream_stage, FAILED
-            else:
-                try:
-                    result = self.process_note(
-                        note_text=note_text,
-                        text_hash=text_hash,
-                        cached_results=cached_results_col[i],
-                        patient_identifiers=patient_identifiers_col[i],
-                    )
-                    stage_json, status = append_status(upstream_stage, "recognizer", SUCCESS)
-                except Exception as exc:
-                    result = None
-                    log_note_failure(logger, "recognizer", text_hash, exc)
-                    stage_json, status = append_status(upstream_stage, "recognizer", FAILED, failure_reason(exc))
+            result, stage_json, status = handle_row(
+                logger,
+                "recognizer",
+                text_hash,
+                upstream_status_col[i],
+                upstream_stage_col[i],
+                partial(
+                    self.process_note,
+                    note_text=note_text,
+                    text_hash=text_hash,
+                    cached_results=cached_results_col[i],
+                    patient_identifiers=patient_identifiers_col[i],
+                ),
+            )
 
             out_text_hashes.append(text_hash)
             out_note_texts.append(note_text)
@@ -589,7 +582,7 @@ class RecognizerWorker:
         }
         if has_jitter:
             res["jitter"] = out_jitters
-        return type_all_null_columns(res)
+        return type_columns(res)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""

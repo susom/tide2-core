@@ -101,7 +101,6 @@ def test_inspect_pipeline_input_metadata_only(tmp_path, monkeypatch):
     assert info.has_row_id is True
     assert info.has_patient_id is True
     assert info.has_text_hash is False
-    assert info.is_patient_id_numeric is False
     assert "note_text" in info.columns
 
 
@@ -130,20 +129,18 @@ def test_inspect_pipeline_input_missing_note_text(tmp_path):
 
 
 def test_inspect_pipeline_input_patient_id_types(tmp_path):
-    """Integer and float patient_id are accepted (is_patient_id_numeric=True), while other types raise TypeError."""
+    """Integer and float patient_id are accepted, while other types raise TypeError."""
     # Integer patient_id
     f_int = tmp_path / "int_pat.parquet"
     pq.write_table(pa.table({"note_text": ["n1"], "patient_id": [12345]}), f_int)
     info_int = _inspect_pipeline_input([str(f_int)])
     assert info_int.has_patient_id is True
-    assert info_int.is_patient_id_numeric is True
 
     # Float patient_id
     f_flt = tmp_path / "flt_pat.parquet"
     pq.write_table(pa.table({"note_text": ["n1"], "patient_id": [123.45]}), f_flt)
     info_flt = _inspect_pipeline_input([str(f_flt)])
     assert info_flt.has_patient_id is True
-    assert info_flt.is_patient_id_numeric is True
 
     # Unsupported type (date or binary)
     f_bad = tmp_path / "bad_pat.parquet"
@@ -330,15 +327,15 @@ def test_resolve_merged_batch_unit():
 
 
 @pytest.mark.parametrize(
-    ("regex_pid", "llm_pid", "expected_type", "expected"),
+    ("regex_pid", "llm_pid", "expected"),
     [
-        (pa.array([None, None], type=pa.string()), pa.array([7, 8], type=pa.int64()), pa.int64(), [7, 8]),
-        (pa.array([7, 8], type=pa.int64()), pa.array([None, None], type=pa.string()), pa.int64(), [7, 8]),
-        (pa.array(["a", None], type=pa.string()), pa.array([None, 8], type=pa.int64()), pa.string(), ["a", "8"]),
+        ([None, None], ["7", "8"], ["7", "8"]),
+        (["7", "8"], [None, None], ["7", "8"]),
+        (["a", None], [None, "8"], ["a", "8"]),
     ],
 )
-def test_resolve_merged_batch_mixed_patient_id_types(regex_pid, llm_pid, expected_type, expected):
-    """Regex and LLM copies of patient_id with different Arrow types still merge."""
+def test_resolve_merged_batch_coalesces_patient_id(regex_pid, llm_pid, expected):
+    """The regex and LLM copies of patient_id (both string) merge into one string column."""
     tbl = pa.table(
         {
             "row_id": ["r1", "r2"],
@@ -346,14 +343,14 @@ def test_resolve_merged_batch_mixed_patient_id_types(regex_pid, llm_pid, expecte
             "text_hash_llm": ["h1", "h2"],
             "results_regex": ["[]", "[]"],
             "results_llm": ["[]", "[]"],
-            "patient_id_regex": regex_pid,
-            "patient_id_llm": llm_pid,
+            "patient_id_regex": pa.array(regex_pid, type=pa.string()),
+            "patient_id_llm": pa.array(llm_pid, type=pa.string()),
         }
     )
 
     resolved = _resolve_merged_batch(tbl)
 
-    assert resolved["patient_id"].type == expected_type
+    assert resolved["patient_id"].type == pa.string()
     assert resolved["patient_id"].to_pylist() == expected
 
 

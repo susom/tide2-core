@@ -247,7 +247,6 @@ class PipelineInputInfo:
     has_row_id: bool
     has_text_hash: bool
     has_patient_id: bool
-    is_patient_id_numeric: bool = False
 
 
 def add_row_id(table: pa.Table) -> pa.Table:
@@ -329,14 +328,12 @@ def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
     if not (pa.types.is_string(note_type) or pa.types.is_large_string(note_type) or pa.types.is_null(note_type)):
         raise TypeError(f"Column 'note_text' has unsupported type {note_type}; expected string")
 
-    is_patient_id_numeric = False
     if "patient_id" in lower_to_actual:
         pid_type = schema.field(lower_to_actual["patient_id"]).type
         is_string = pa.types.is_string(pid_type) or pa.types.is_large_string(pid_type)
         is_numeric = pa.types.is_integer(pid_type) or pa.types.is_floating(pid_type)
         if not (is_string or is_numeric):
             raise TypeError(f"Column 'patient_id' has unsupported type {pid_type}; expected string or numeric")
-        is_patient_id_numeric = is_numeric
 
     num_rows = ds.count_rows()
 
@@ -348,7 +345,6 @@ def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
         has_row_id="row_id" in lower_to_actual,
         has_text_hash="text_hash" in lower_to_actual,
         has_patient_id="patient_id" in lower_to_actual,
-        is_patient_id_numeric=is_patient_id_numeric,
     )
 
 
@@ -405,23 +401,6 @@ def _read_stage_source(
     if normalize and not derive_ids_in_read:
         ds = ds.map_batches(normalize_source_batch, batch_format="pyarrow")
     return ds
-
-
-def _coalesce_branches(regex_col: pa.ChunkedArray, llm_col: pa.ChunkedArray) -> pa.ChunkedArray:
-    """Coalesce the regex and LLM copies of a column whose Arrow types may differ.
-
-    An all-null column is typed ``string`` by ``type_all_null_columns``, so it can meet a numeric
-    copy of the same column from the other branch. The all-null side takes the other side's type;
-    any other disagreement falls back to ``string``.
-    """
-    if regex_col.type != llm_col.type:
-        if regex_col.null_count == len(regex_col):
-            regex_col = regex_col.cast(llm_col.type)
-        elif llm_col.null_count == len(llm_col):
-            llm_col = llm_col.cast(regex_col.type)
-        else:
-            regex_col, llm_col = regex_col.cast(pa.string()), llm_col.cast(pa.string())
-    return pc.coalesce(regex_col, llm_col)
 
 
 def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
@@ -497,7 +476,13 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
             batch["stage_status_json_regex"].to_pylist() if "stage_status_json_regex" in col_names else [None] * n
         )
         llm_stage = batch["stage_status_json_llm"].to_pylist() if "stage_status_json_llm" in col_names else [None] * n
-        merged_status = [merge_stage_status(a, b) for a, b in zip(reg_stage, llm_stage, strict=True)]
+        reg_flag = (
+            batch["processing_status_regex"].to_pylist() if "processing_status_regex" in col_names else [None] * n
+        )
+        llm_flag = batch["processing_status_llm"].to_pylist() if "processing_status_llm" in col_names else [None] * n
+        merged_status = [
+            merge_stage_status(a, b, c, d) for a, b, c, d in zip(reg_stage, llm_stage, reg_flag, llm_flag, strict=True)
+        ]
         stage_json_out = [m[0] for m in merged_status]
         status_out = [m[1] for m in merged_status]
     elif "processing_status" in col_names:
@@ -538,7 +523,7 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
         col_reg = f"{col}_regex"
         col_llm = f"{col}_llm"
         if col_reg in col_names and col_llm in col_names:
-            res_cols[col] = _coalesce_branches(batch[col_reg], batch[col_llm])
+            res_cols[col] = pc.coalesce(batch[col_reg], batch[col_llm])
         elif col_reg in col_names:
             res_cols[col] = batch[col_reg]
         elif col_llm in col_names:
@@ -636,6 +621,7 @@ ANONYMIZER_STAGE_COLUMNS = StageColumns(
             "anonymized_note_text",
             "anonymizer_results_json",
             "entity_count",
+            "jitter",
             "processing_timestamp",
             "processing_status",
             "stage_status_json",
@@ -653,6 +639,7 @@ FINAL_OUTPUT_COLUMNS = frozenset(
         "anonymized_note_text",
         "anonymizer_results_json",
         "entity_count",
+        "jitter",
         "processing_timestamp",
         "processing_status",
         "stage_status_json",

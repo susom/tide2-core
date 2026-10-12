@@ -166,6 +166,7 @@ def test_null_note_text_passes_through_recognizer_to_anonymizer():
             "anonymized_note_text": note_text,
             "anonymizer_results_json": "[]",
             "entity_count": 0,
+            "jitter": jitter,
             "stage_status": "success",
             "stage_reason": None,
         }
@@ -189,6 +190,7 @@ def test_anonymizer_worker_preserves_uppercase_row_id():
             "anonymized_note_text": note_text,
             "anonymizer_results_json": "[]",
             "entity_count": 0,
+            "jitter": jitter,
             "stage_status": "success",
             "stage_reason": None,
         }

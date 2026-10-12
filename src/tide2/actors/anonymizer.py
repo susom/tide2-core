@@ -17,6 +17,7 @@ Output columns:
     - anonymized_note_text: The anonymized text
     - anonymizer_results_json: JSON with anonymization details
     - entity_count: Number of entities anonymized
+    - jitter: Date shift in days that was applied (input or derived); null when dates were masked or the row failed
     - processing_timestamp: ISO timestamp of processing
     - processing_status: ``success``, ``degraded`` or ``failed`` (worst across stages)
     - stage_status_json: per-stage status and reason (see ``tide2.utils.stage_status``)
@@ -31,6 +32,7 @@ import os
 import secrets
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -58,15 +60,12 @@ from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
-from tide2.utils.batch_columns import type_all_null_columns
+from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import NoteError
-from tide2.utils.stage_status import append_status
-from tide2.utils.stage_status import failure_reason
-from tide2.utils.stage_status import is_failed
-from tide2.utils.stage_status import log_note_failure
+from tide2.utils.stage_status import handle_row
 
 logger = logging.getLogger(__name__)
 
@@ -583,11 +582,12 @@ class AnonymizerWorker:
             "anonymized_note_text": anonymized_text,
             "anonymizer_results_json": anonymizer_json,
             "entity_count": entity_count,
+            "jitter": None if mask_dates else jitter,
             "stage_status": stage_status,
             "stage_reason": stage_reason,
         }
 
-    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:  # noqa: PLR0915
+    def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
         Process a batch of notes in a single call. No IPC per note.
 
@@ -612,6 +612,7 @@ class AnonymizerWorker:
         anonymized_texts = []
         anonymizer_results_json_list = []
         entity_counts = []
+        applied_jitters = []
         processing_statuses = []
         stage_statuses = []
         row_ids = []
@@ -637,39 +638,33 @@ class AnonymizerWorker:
             original_text_hash = self.compute_text_hash(note_text)
 
             row_id = input_row_ids[i] if i < len(input_row_ids) else None
-            upstream_stage = upstream_stage_col[i]
-
-            result = None
-            if is_failed(upstream_status_col[i]):
-                stage_json, status = upstream_stage, FAILED
-            else:
-                try:
-                    result = self.process_note(
-                        note_text=note_text,
-                        original_text_hash=original_text_hash,
-                        recognizer_results_json=recognizer_results_json,
-                        patient_id=patient_id,
-                        jitter=jitter,
-                    )
-                    stage_json, status = append_status(
-                        upstream_stage, "anonymizer", result["stage_status"], result["stage_reason"]
-                    )
-                    if result["stage_status"] == FAILED:
-                        logger.error(
-                            "anonymizer masked an entity of note %s: %s",
-                            original_text_hash[:16],
-                            result["stage_reason"],
-                        )
-                except Exception as exc:
-                    result = None
-                    log_note_failure(logger, "anonymizer", original_text_hash, exc)
-                    stage_json, status = append_status(upstream_stage, "anonymizer", FAILED, failure_reason(exc))
+            result, stage_json, status = handle_row(
+                logger,
+                "anonymizer",
+                original_text_hash,
+                upstream_status_col[i],
+                upstream_stage_col[i],
+                partial(
+                    self.process_note,
+                    note_text=note_text,
+                    original_text_hash=original_text_hash,
+                    recognizer_results_json=recognizer_results_json,
+                    patient_id=patient_id,
+                    jitter=jitter,
+                ),
+                status_of=lambda r: (r["stage_status"], r["stage_reason"]),
+            )
+            if result is not None and result["stage_status"] == FAILED:
+                logger.error(
+                    "anonymizer masked an entity of note %s: %s", original_text_hash[:16], result["stage_reason"]
+                )
 
             original_text_hashes.append(original_text_hash)
             patient_ids.append(patient_id)
             anonymized_texts.append(None if result is None else result["anonymized_note_text"])
             anonymizer_results_json_list.append(None if result is None else result["anonymizer_results_json"])
             entity_counts.append(None if result is None else result["entity_count"])
+            applied_jitters.append(None if result is None else result["jitter"])
             processing_statuses.append(status)
             stage_statuses.append(stage_json)
             row_ids.append(row_id)
@@ -681,6 +676,7 @@ class AnonymizerWorker:
             "anonymized_note_text": anonymized_texts,
             "anonymizer_results_json": anonymizer_results_json_list,
             "entity_count": entity_counts,
+            "jitter": applied_jitters,
             "processing_timestamp": [batch_timestamp] * len(original_text_hashes),
             "processing_status": processing_statuses,
             "stage_status_json": stage_statuses,
@@ -688,7 +684,7 @@ class AnonymizerWorker:
         # Preserve row_id for checkpointing when input batch has the column
         if "row_id" in cols:
             out["row_id"] = row_ids
-        return type_all_null_columns(out)
+        return type_columns(out)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""

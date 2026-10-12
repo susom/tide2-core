@@ -9,6 +9,7 @@ which can echo note text.
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from tide2.utils.nulls import is_null
@@ -69,10 +70,25 @@ def append_status(previous: Any, stage: str, status: str, reason: str | None = N
     return json.dumps(stages), rollup_status(stages)
 
 
-def merge_stage_status(first: Any, second: Any) -> tuple[str, str]:
-    """Union two rows' stage entries (merge mode) and return ``(stage_status_json, processing_status)``."""
-    stages = {**load_stage_status(first), **load_stage_status(second)}
-    return json.dumps(stages), rollup_status(stages)
+def _entry_rank(entry: Any) -> int:
+    return _RANK.get(entry.get("status"), 0) if isinstance(entry, dict) else 0
+
+
+def merge_stage_status(first: Any, second: Any, first_status: Any = None, second_status: Any = None) -> tuple[str, str]:
+    """Merge two branches' status into ``(stage_status_json, processing_status)``.
+
+    The result is never better than the worst of the two ``*_status`` flags and the
+    stage entries. A stage present in both branches keeps its worse entry.
+    """
+    stages = load_stage_status(first)
+    for key, entry in load_stage_status(second).items():
+        if key not in stages or _entry_rank(entry) > _entry_rank(stages[key]):
+            stages[key] = entry
+    status = rollup_status(stages)
+    for flag in (first_status, second_status):
+        if _RANK.get(flag, 0) > _RANK[status]:
+            status = flag
+    return json.dumps(stages), status
 
 
 def is_failed(processing_status: Any) -> bool:
@@ -91,3 +107,32 @@ def log_note_failure(logger: logging.Logger, stage: str, text_hash: Any, exc: Ba
     """Log a failed note without its text; the traceback, which can echo input, is debug-only."""
     logger.error("%s failed note %s: %s", stage, str(text_hash)[:16], failure_reason(exc))
     logger.debug("%s failure detail", stage, exc_info=True)
+
+
+def handle_row(
+    logger: logging.Logger,
+    stage: str,
+    text_hash: Any,
+    upstream_status: Any,
+    upstream_stage: Any,
+    fn: Callable[[], Any],
+    status_of: Callable[[Any], tuple[str, str | None]] | None = None,
+) -> tuple[Any, Any, str]:
+    """Run one row's work under the failure contract.
+
+    A row that failed upstream is not processed and keeps its stage JSON. An exception
+    from ``fn`` fails the row. Otherwise the stage is recorded as ``success``, or as the
+    ``(status, reason)`` that ``status_of(result)`` returns.
+
+    Returns:
+        ``(result, stage_status_json, processing_status)``; ``result`` is None for a failed row.
+    """
+    if is_failed(upstream_status):
+        return None, upstream_stage, FAILED
+    try:
+        result = fn()
+    except Exception as exc:
+        log_note_failure(logger, stage, text_hash, exc)
+        return (None, *append_status(upstream_stage, stage, FAILED, failure_reason(exc)))
+    status, reason = status_of(result) if status_of else (SUCCESS, None)
+    return (result, *append_status(upstream_stage, stage, status, reason))

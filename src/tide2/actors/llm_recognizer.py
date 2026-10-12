@@ -25,6 +25,7 @@ import logging
 import time as _time
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from typing import Any
 
 import ray
@@ -34,15 +35,10 @@ from tide2.recognizers.llm_json_recognizer import LlmJsonRecognizer
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import copy_passthrough
-from tide2.utils.batch_columns import type_all_null_columns
+from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
-from tide2.utils.stage_status import FAILED
-from tide2.utils.stage_status import SUCCESS
-from tide2.utils.stage_status import append_status
-from tide2.utils.stage_status import failure_reason
-from tide2.utils.stage_status import is_failed
-from tide2.utils.stage_status import log_note_failure
+from tide2.utils.stage_status import handle_row
 
 # Chunking parameters for long notes
 CHARS_PER_TOKEN = 4  # Approximation: 1 token ≈ 4 characters for English text
@@ -175,6 +171,28 @@ class LlmRecognizerWorker:
         )
         return all_results
 
+    def _recognize_note(self, note_text: Any, text_hash: str) -> tuple[str, int]:
+        """Return ``(recognizer_results_json, entity_count)`` for one note."""
+        if is_null(note_text) or not note_text:
+            return "[]", 0
+        start_time = _time.time()
+        results = self._process_note(note_text)
+        elapsed = _time.time() - start_time
+
+        # RecognizerResult.to_dict() includes AnalysisExplanation objects that are not
+        # JSON-serializable, so only the fields the anonymizer needs are written.
+        results_json = json.dumps(
+            [{"entity_type": r.entity_type, "start": r.start, "end": r.end, "score": r.score} for r in results]
+        )
+        logger.info(
+            "Processed note %s (%d chars) in %.2fs, found %d entities",
+            text_hash[:16],
+            len(note_text),
+            elapsed,
+            len(results),
+        )
+        return results_json, len(results)
+
     def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
         Process a batch of notes via the LLM recognizer.
@@ -220,49 +238,15 @@ class LlmRecognizerWorker:
         for i in range(batch_size):
             note_text = note_texts[i]
             text_hash = input_text_hashes[i]
-            upstream_stage = upstream_stage_col[i]
-            results_json: str | None = None
-            entity_count: int | None = None
-
-            if is_failed(upstream_status_col[i]):
-                stage_json, status = upstream_stage, FAILED
-            else:
-                try:
-                    if is_null(note_text) or not note_text:
-                        results_json, entity_count = "[]", 0
-                    else:
-                        start_time = _time.time()
-                        results = self._process_note(note_text)
-                        elapsed = _time.time() - start_time
-
-                        # Serialize only the fields the downstream anonymizer needs.
-                        # RecognizerResult.to_dict() includes AnalysisExplanation objects
-                        # that are not JSON-serializable; we skip them here.
-                        results_json = json.dumps(
-                            [
-                                {
-                                    "entity_type": r.entity_type,
-                                    "start": r.start,
-                                    "end": r.end,
-                                    "score": r.score,
-                                }
-                                for r in results
-                            ]
-                        )
-                        entity_count = len(results)
-
-                        logger.info(
-                            "Processed note %s (%d chars) in %.2fs, found %d entities",
-                            text_hash[:16],
-                            len(note_text),
-                            elapsed,
-                            len(results),
-                        )
-                    stage_json, status = append_status(upstream_stage, "llm_recognizer", SUCCESS)
-                except Exception as exc:
-                    results_json, entity_count = None, None
-                    log_note_failure(logger, "llm_recognizer", text_hash, exc)
-                    stage_json, status = append_status(upstream_stage, "llm_recognizer", FAILED, failure_reason(exc))
+            result, stage_json, status = handle_row(
+                logger,
+                "llm_recognizer",
+                text_hash,
+                upstream_status_col[i],
+                upstream_stage_col[i],
+                partial(self._recognize_note, note_text, text_hash),
+            )
+            results_json, entity_count = result if result is not None else (None, None)
 
             out_text_hashes.append(text_hash)
             out_note_texts.append("" if is_null(note_text) else str(note_text))
@@ -282,7 +266,7 @@ class LlmRecognizerWorker:
             "stage_status_json": stage_statuses,
         }
         copy_passthrough(batch, res)
-        return type_all_null_columns(res)
+        return type_columns(res)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""

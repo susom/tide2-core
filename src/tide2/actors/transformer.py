@@ -39,6 +39,7 @@ import logging
 import os
 from datetime import UTC
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -53,14 +54,14 @@ from tide2.transformers.core import plan_windows
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import copy_passthrough
-from tide2.utils.batch_columns import type_all_null_columns
+from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import SUCCESS
 from tide2.utils.stage_status import append_status
 from tide2.utils.stage_status import failure_reason
+from tide2.utils.stage_status import handle_row
 from tide2.utils.stage_status import is_failed
-from tide2.utils.stage_status import log_note_failure
 from tide2.utils.text_processing import aggregate_bio_tokens
 from tide2.utils.text_processing import deduplicate_overlapping_entities
 
@@ -356,6 +357,8 @@ class TransformerInferenceActor:
         patient_ids = cols.get("patient_id", [None] * len(note_texts))
 
         batch_size = len(note_texts)
+        upstream_status_col = cols.get("processing_status", [None] * batch_size)
+        upstream_stage_col = cols.get("stage_status_json", [None] * batch_size)
 
         # Handle empty batches
         if batch_size == 0:
@@ -377,17 +380,22 @@ class TransformerInferenceActor:
 
         # Filter out None/empty texts, normalizing nullable scalars (e.g. pd.NA, float nan)
         note_texts = ["" if is_null(t) else str(t) for t in note_texts]
-        valid_indices = [i for i, t in enumerate(note_texts) if t]
+        valid_indices = [i for i, t in enumerate(note_texts) if t and not is_failed(upstream_status_col[i])]
 
         # One payload per note: recognizer_results_json (fused) or predictions_raw_json.
         payloads: list[str | None] = ["[]"] * batch_size
         entity_counts: list[int | None] = [0] * batch_size
-        ok_json, ok_status = append_status(None, "transformer", SUCCESS)
-        stage_jsons = [ok_json] * batch_size
-        statuses = [ok_status] * batch_size
+        stage_jsons: list[Any] = [None] * batch_size
+        statuses: list[str] = [SUCCESS] * batch_size
+        for i in range(batch_size):
+            if is_failed(upstream_status_col[i]):
+                payloads[i], entity_counts[i] = None, None
+                stage_jsons[i], statuses[i] = upstream_stage_col[i], FAILED
+            else:
+                stage_jsons[i], statuses[i] = append_status(upstream_stage_col[i], "transformer", SUCCESS)
 
         def _fail(idx: int, exc: Exception) -> None:
-            fail_json, fail_status = append_status(None, "transformer", FAILED, failure_reason(exc))
+            fail_json, fail_status = append_status(upstream_stage_col[idx], "transformer", FAILED, failure_reason(exc))
             payloads[idx], entity_counts[idx] = None, None
             stage_jsons[idx], statuses[idx] = fail_json, fail_status
 
@@ -409,14 +417,19 @@ class TransformerInferenceActor:
             else:
                 self._log_gpu_mem(f"after __call__ (n={len(valid_texts)})")
                 for idx, preds in zip(valid_indices, raw_results, strict=True):
-                    try:
-                        if self._aggregate_bio:
-                            payloads[idx], entity_counts[idx] = self._format_note(preds, note_texts[idx])
-                        else:
-                            payloads[idx] = json.dumps(preds, ensure_ascii=False, default=_numpy_default)
-                    except Exception as exc:
-                        log_note_failure(logger, "transformer", text_hashes[idx], exc)
-                        _fail(idx, exc)
+                    if self._aggregate_bio:
+                        note_fn = partial(self._format_note, preds, note_texts[idx])
+                    else:
+                        note_fn = partial(json.dumps, preds, ensure_ascii=False, default=_numpy_default)
+                    result, stage_jsons[idx], statuses[idx] = handle_row(
+                        logger, "transformer", text_hashes[idx], None, upstream_stage_col[idx], note_fn
+                    )
+                    if result is None:
+                        payloads[idx], entity_counts[idx] = None, None
+                    elif self._aggregate_bio:
+                        payloads[idx], entity_counts[idx] = result
+                    else:
+                        payloads[idx] = result
 
         res = {
             "text_hash": list(text_hashes),
@@ -434,7 +447,7 @@ class TransformerInferenceActor:
 
         copy_passthrough(cols, res)
 
-        return type_all_null_columns(res)
+        return type_columns(res)
 
     def _format_note(self, raw_tokens: list[dict], note_text: str) -> tuple[str, int]:
         """Aggregate one note's raw BIO tokens into ``recognizer_results_json``."""
@@ -713,17 +726,15 @@ class BIOAggregationActor:
         statuses: list[str] = []
         stage_jsons: list[str | None] = []
         for i in range(batch_size):
-            upstream_stage = upstream_stage_col[i]
-            results_json, count = None, None
-            if is_failed(upstream_status_col[i]):
-                stage_json, status = upstream_stage, FAILED
-            else:
-                try:
-                    results_json, count = self._format_note(raw_json_list[i], note_texts[i] or "")
-                    stage_json, status = append_status(upstream_stage, "bio_aggregation", SUCCESS)
-                except Exception as exc:
-                    log_note_failure(logger, "bio_aggregation", text_hashes[i], exc)
-                    stage_json, status = append_status(upstream_stage, "bio_aggregation", FAILED, failure_reason(exc))
+            result, stage_json, status = handle_row(
+                logger,
+                "bio_aggregation",
+                text_hashes[i],
+                upstream_status_col[i],
+                upstream_stage_col[i],
+                partial(self._format_note, raw_json_list[i], note_texts[i] or ""),
+            )
+            results_json, count = result if result is not None else (None, None)
             results_json_list.append(results_json)
             entity_counts.append(count)
             statuses.append(status)
@@ -740,7 +751,7 @@ class BIOAggregationActor:
             "stage_status_json": stage_jsons,
         }
         copy_passthrough(cols, res)
-        return type_all_null_columns(res)
+        return type_columns(res)
 
 
 def create_transformer_actor(
