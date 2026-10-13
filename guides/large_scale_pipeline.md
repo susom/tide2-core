@@ -107,7 +107,7 @@ runner.run_transformer(
 |---|---|---|
 | **Required Input** | `note_text` | Only required column in source data. |
 | **Optional Passthrough** | `row_id`, `text_hash`, `patient_id`, `patient_identifiers`, `jitter`, `processing_status`, `stage_status_json` | `row_id` and `text_hash` are derived if absent. `patient_id` (converted to string), `patient_identifiers`, and `jitter` pass through if present. `processing_status` and `stage_status_json` are updated for each note. |
-| **Output Columns** | `text_hash`, `note_text`, `patient_id`, `row_id`, `recognizer_results_json`, `processing_status`, `stage_status_json` | `recognizer_results_json` contains deep-learning entity spans in Presidio format. |
+| **Output Columns** | `text_hash`, `note_text`, `patient_id`, `row_id`, `recognizer_results_json`, `entity_count`, `processing_timestamp`, `processing_status`, `stage_status_json` | `recognizer_results_json` contains deep-learning entity spans in Presidio format. `entity_count` contains detected entity count. |
 
 ---
 
@@ -409,6 +409,9 @@ The `tide2.runner.hardware` module detects physical and container resources (CPU
 
 - `gpu` (CPUs $> 4$, GPUs $\ge 1$): Allocates up to 3 transformer worker actors per GPU based on available VRAM (requires ~7 GB per actor).
 - `cpu-stages` (CPUs $> 4$): Sets recognizer and anonymizer actors to approximately $87.5\%$ of host CPUs (for example, 14 actors on a 16-CPU host).
+- `many-cores` (CPUs $\ge 64$): Sets CPU actors to `cpus - 2` to maximize core utilization on high-capacity nodes.
+- `low-ram` (RAM $\le 24$ GB): Overrides actor counts to at most `ram_gb // 2` to prevent host memory exhaustion.
+- `cpu-only` (CPUs $> 4$, GPUs $= 0$): Sets transformer actors to approximately $25\%$ of CPUs and aggregation actors to $30\%$ of CPUs.
 - `tiny` (CPUs $\le 4$): Sets `enable_checkpoint: false` and allocates fractional CPUs to prevent Ray 2.55 reservation deadlocks on small VMs.
   - **Standalone Stage Requirement**: Automatic `tiny` sizing (fractional CPUs and disabled checkpoints) is applied by `run_pipeline`. Standalone stage jobs (`run_transformer`, `run_recognition`, `run_anonymization`) auto-size actors but retain default task reservations (`read_cpus`, `write_cpus`) and enable checkpointing. On machines with $\le 4$ CPUs, standalone CLI commands must explicitly pass fractional CPU flags and `--no-checkpoint` (for CPU stages: `--read-cpus 0.25 --write-cpus 0.25 --worker-num-cpus 0.5 --no-checkpoint`; for transformer: `--read-cpus 0.25 --write-cpus 0.25 --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint`). Unified knob forwarding across all standalone stages is tracked in issue #100.
 - **User Overrides Always Win**: Any parameter specified on the CLI, via YAML config, or passed as a Python argument overrides the hardware autotune recommendations unconditionally.
