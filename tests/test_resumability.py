@@ -68,6 +68,34 @@ def test_add_row_id_treats_nan_blank_and_null_patient_ids_as_missing():
     assert blank == [expected("None")]
 
 
+def test_normalize_source_batch_fills_null_ids_and_keeps_supplied_ones():
+    from tide2.utils.text_processing import compute_text_hash
+
+    batch = pa.table(
+        {
+            "NOTE_TEXT": ["first", "second", "third"],
+            "text_hash": ["given-hash", None, None],
+            "row_id": ["given-id", None, "other-id"],
+            "patient_id": ["p1", "p2", None],
+        }
+    )
+
+    out = normalize_source_batch(batch).to_pydict()
+
+    hashes = ["given-hash", compute_text_hash("second"), compute_text_hash("third")]
+    assert out["text_hash"] == hashes
+    derived = [
+        hashlib.sha256(f"{h}:{p}".encode()).hexdigest() for h, p in zip(hashes, ["p1", "p2", "None"], strict=True)
+    ]
+    assert out["row_id"] == ["given-id", derived[1], "other-id"]
+
+
+def test_add_row_id_without_null_ids_returns_the_table_unchanged():
+    table = pa.table({"text_hash": ["a"], "row_id": ["r1"]})
+
+    assert add_row_id(table) is table
+
+
 # ---------------------------------------------------------------------------
 # URI-aware path helpers
 # ---------------------------------------------------------------------------

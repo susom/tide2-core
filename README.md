@@ -339,7 +339,9 @@ streamed` needs a local directory.
 `sha256(text_hash:patient_id)` (`"None"` for a null, NaN or blank patient). It depends only on
 the note and the patient, so it is identical on every run and machine, and no
 extra copy of the input is written. Call `tide2.runner.local_runner.add_row_id`
-upstream to produce the same value.
+upstream to produce the same value. A row with a null `row_id` or a null `text_hash`
+in a column you supplied gets the derived value for that row; the other rows keep
+theirs.
 
 When the derived value is used, tide2 logs a WARNING: notes with the same text
 and `patient_id` share a `row_id`. On a first run each is processed. After an

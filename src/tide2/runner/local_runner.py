@@ -194,7 +194,7 @@ class PipelineInputInfo:
 
 
 def add_row_id(table: pa.Table) -> pa.Table:
-    """Compute and append a row_id column to an Arrow table if not present.
+    """Compute a row_id column for an Arrow table, or fill the null values of an existing one.
 
     Derives row_id from text_hash and patient_id using sha256(f"{text_hash}:{patient_id}").
     When patient_id is absent, null (including float NaN) or blank, uses
@@ -207,22 +207,28 @@ def add_row_id(table: pa.Table) -> pa.Table:
     a checkpointed run, the others are treated as already processed on resume.
     Supply a unique row_id column to give each source row its own identity.
     """
-    if "row_id" in table.column_names:
+    has_row_id = "row_id" in table.column_names
+    if has_row_id and table["row_id"].null_count == 0:
         return table
 
     n = len(table)
     patient_ids = table["patient_id"].to_pylist() if "patient_id" in table.column_names else [None] * n
 
     text_hashes = table["text_hash"].to_pylist()
-    row_ids = [
+    derived = [
         hashlib.sha256(f"{h}:{row_id_patient_part(p)}".encode()).hexdigest()
         for h, p in zip(text_hashes, patient_ids, strict=True)
     ]
-    return table.append_column("row_id", pa.array(row_ids, type=pa.string()))
+    if not has_row_id:
+        return table.append_column("row_id", pa.array(derived, type=pa.string()))
+    # A null in a supplied row_id would reach the checkpoint as one shared identity.
+    supplied = table["row_id"].cast(pa.string()).to_pylist()
+    filled = [d if v is None else v for v, d in zip(supplied, derived, strict=True)]
+    return table.set_column(table.column_names.index("row_id"), "row_id", pa.array(filled, type=pa.string()))
 
 
 def normalize_source_batch(batch: pa.Table) -> pa.Table:
-    """Normalize source batch: lowercase column names, add text_hash and row_id if absent.
+    """Normalize source batch: lowercase column names, add text_hash and row_id if absent, fill null values.
 
     Accepts an empty table, which Ray passes when it infers a schema. See
     ``add_row_id`` for how row_id is derived.
@@ -233,14 +239,19 @@ def normalize_source_batch(batch: pa.Table) -> pa.Table:
     if lower_names != batch.column_names:
         batch = batch.rename_columns(lower_names)
 
-    if "text_hash" not in batch.column_names:
-        text_hashes = [compute_text_hash(t if t is not None else "") for t in batch["note_text"].to_pylist()]
-        batch = batch.append_column("text_hash", pa.array(text_hashes, type=pa.string()))
+    has_text_hash = "text_hash" in batch.column_names
+    if not has_text_hash or batch["text_hash"].null_count > 0:
+        computed = [compute_text_hash(t if t is not None else "") for t in batch["note_text"].to_pylist()]
+        if has_text_hash:
+            supplied = batch["text_hash"].cast(pa.string()).to_pylist()
+            computed = [c if v is None else v for v, c in zip(supplied, computed, strict=True)]
+            batch = batch.set_column(
+                batch.column_names.index("text_hash"), "text_hash", pa.array(computed, type=pa.string())
+            )
+        else:
+            batch = batch.append_column("text_hash", pa.array(computed, type=pa.string()))
 
-    if "row_id" not in batch.column_names:
-        batch = add_row_id(batch)
-
-    return batch
+    return add_row_id(batch)
 
 
 def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
