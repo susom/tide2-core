@@ -748,14 +748,23 @@ This project is licensed under the MIT License - see the [LICENSE-MIT](LICENSE-M
 
 ## Citation
 
-If you use TIDE 2.0 in your research, please cite:
+If you use TIDE 2.0 or the SHIELD benchmark in your research, please cite:
 
 ```bibtex
-@software{tide2,
-  title={TIDE 2.0: Data De-identification and Anonymization Toolkit},
-  author={TIDE 2.0 Team},
-  year={2025},
-  url={https://github.com/susom/tide2}
+@article{posada2026tide2,
+  title={TIDE 2.0: an open, model-agnostic engine for keyed de-identification of clinical notes},
+  author={Posada, Jose D. and Datta, Somalee and Desai, Priya},
+  journal={arXiv preprint arXiv:2610.07224},
+  year={2026},
+  url={https://arxiv.org/abs/2610.07224}
+}
+
+@article{posada2026shield,
+  title={SHIELD: A Diverse Clinical Note Dataset and Distilled Small Language Models for Enterprise-Scale De-identification},
+  author={Posada, Jose D. and Love, David and Datta, Somalee and Desai, Priya},
+  journal={arXiv preprint arXiv:2605.03301},
+  year={2026},
+  url={https://arxiv.org/abs/2605.03301}
 }
 ```
 

@@ -396,3 +396,27 @@ The `tide2.runner.hardware` module detects physical and container resources (CPU
 - `tiny` (CPUs $\le 4$): Sets `enable_checkpoint: false` and allocates fractional CPUs to prevent Ray 2.55 reservation deadlocks on small VMs.
 - **User Overrides Always Win**: Any parameter specified on the CLI, via YAML config, or passed as a Python argument overrides the hardware autotune recommendations unconditionally.
 - **Opt-out**: Pass `--no-hardware-autotune` or set `hardware_autotune: false` to use safe static defaults.
+
+---
+
+## 7. Citation
+
+If you use TIDE 2.0 or the SHIELD benchmark in your research, please cite:
+
+```bibtex
+@article{posada2026tide2,
+  title={TIDE 2.0: an open, model-agnostic engine for keyed de-identification of clinical notes},
+  author={Posada, Jose D. and Datta, Somalee and Desai, Priya},
+  journal={arXiv preprint arXiv:2610.07224},
+  year={2026},
+  url={https://arxiv.org/abs/2610.07224}
+}
+
+@article{posada2026shield,
+  title={SHIELD: A Diverse Clinical Note Dataset and Distilled Small Language Models for Enterprise-Scale De-identification},
+  author={Posada, Jose D. and Love, David and Datta, Somalee and Desai, Priya},
+  journal={arXiv preprint arXiv:2605.03301},
+  year={2026},
+  url={https://arxiv.org/abs/2605.03301}
+}
+```
