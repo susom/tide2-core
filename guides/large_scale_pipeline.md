@@ -250,19 +250,26 @@ The anonymizer requires key material:
 7. This causes silent data loss on rerun for duplicate clinical notes.
 
 ### How to Pre-Generate `row_id`
-Generate a unique `row_id` for each input row in your upstream ETL pipeline before starting the run:
+When clinical notes can repeat (such as identical standard texts across encounters or patients), **you must assign a unique identifier per record (such as a UUID)** to guarantee each row has its own identity. Content-derived IDs cause duplicate texts to share an ID and collide on resume:
 
 ```python
-import pyarrow as pa
 import uuid
-from tide2.runner.local_runner import normalize_source_batch
+import pyarrow as pa
 
-# Option A: Use the tide2 normalization helper (computes text_hash if absent, then derives row_id)
-table_with_ids = normalize_source_batch(source_table)
-
-# Option B: Add a unique UUID string per row (RECOMMENDED for repeating notes)
+# RECOMMENDED: Assign a globally unique UUID string per source record
+# This guarantees no checkpoint collisions or skipped rows when notes repeat
 row_ids = [str(uuid.uuid4()) for _ in range(len(source_table))]
 table_with_ids = source_table.append_column("row_id", pa.array(row_ids, type=pa.string()))
+```
+
+If notes are already known to be unique per patient, you can derive deterministic content IDs using `normalize_source_batch`:
+
+```python
+from tide2.runner.local_runner import normalize_source_batch
+
+# Content-derived IDs: derives sha256(text_hash:patient_id).
+# Notes with identical text and patient will share this ID.
+table_with_ids = normalize_source_batch(source_table)
 ```
 
 ---

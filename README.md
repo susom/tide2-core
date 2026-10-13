@@ -262,17 +262,17 @@ reads the folder the previous stage wrote.
 > keep both recognizer folders until the run is finished. If one of them has no
 > files, the merge stops with an error and deletes nothing.
 >
-> **Example deduplication before merge mode:**
+> **Assigning unique row IDs before merge mode:**
+> To prevent Cartesian join expansion in merge mode without dropping legitimate repeating notes, assign a unique `row_id` (such as a UUID) per source record:
 > ```python
+> import uuid
 > import pyarrow as pa
-> from tide2.runner.local_runner import normalize_source_batch
 >
-> # Deduplicate on row_id to prevent Cartesian join expansion in merge mode
 > table = pa.parquet.read_table("notes.parquet")
-> table = normalize_source_batch(table)  # computes text_hash if absent, then derives row_id
-> unique_df = table.to_pandas().drop_duplicates(subset=["row_id"])
-> deduplicated_table = pa.Table.from_pandas(unique_df)
-> pa.parquet.write_table(deduplicated_table, "deduplicated_notes.parquet")
+> # Assign a unique UUID per record so every row has a distinct join key:
+> row_ids = [str(uuid.uuid4()) for _ in range(len(table))]
+> table = table.append_column("row_id", pa.array(row_ids, type=pa.string()))
+> pa.parquet.write_table(table, "prepared_notes.parquet")
 > ```
 
 Use `streamed` for development, benchmarks, and single-box batches, where one
