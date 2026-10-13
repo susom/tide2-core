@@ -8,6 +8,7 @@ import pandas as pd
 
 SHA256_HEX_LENGTH = 64
 HASH1_ROW_COUNT = 2
+NULL_BLANK_ROW_COUNT = 2
 
 
 def _run_checks(df: pd.DataFrame) -> list[str]:
@@ -59,13 +60,20 @@ def _run_checks(df: pd.DataFrame) -> list[str]:
         print("[PASS] row_id format is lowercase hex")
 
     # 7. Null and blank patient_id hash consistency (uses DEFAULT_ROW_ID_PATIENT_ID = "None")
-    null_row = df[df["patient_id"].isna()]
-    if len(null_row) > 0:
-        expected_null_hash = hashlib.sha256(b"hash3:None").hexdigest()
-        if null_row["row_id"].iloc[0] != expected_null_hash:
-            errors.append("ERROR: Null patient_id should use 'None' sentinel in row_id hash")
+    null_rows = df[df["patient_id"].isna() | (df["patient_id"] == "")]
+    if len(null_rows) >= NULL_BLANK_ROW_COUNT:
+        expected_none_hash_null = hashlib.sha256(b"hash3:None").hexdigest()
+        expected_none_hash_blank = hashlib.sha256(b"hash4:None").hexdigest()
+        row_null = df[df["patient_id"].isna()]
+        row_blank = df[df["patient_id"] == ""]
+        if row_null["row_id"].iloc[0] != expected_none_hash_null:
+            errors.append("ERROR: Null patient_id did not resolve to 'None' sentinel in row_id hash")
+        elif row_blank["row_id"].iloc[0] != expected_none_hash_blank:
+            errors.append("ERROR: Blank patient_id did not resolve to 'None' sentinel in row_id hash")
         else:
-            print("[PASS] Null patient_id correctly resolves to 'None' sentinel in row_id hash")
+            print("[PASS] Null and blank patient_ids correctly resolve to 'None' sentinel in row_id hash")
+    else:
+        errors.append("ERROR: Fixture must contain both null and blank patient_id test rows")
 
     return errors
 
@@ -76,12 +84,14 @@ def validate_row_id_generation() -> bool:
     print("Row ID Generation Validation")
     print("=" * 60)
 
-    # Create test data with various scenarios
+    from tide2.utils.nulls import row_id_patient_part
+
+    # Create test data with various scenarios including null and blank patient_id
     df = pd.DataFrame(
         {
-            "text_hash": ["hash1", "hash1", "hash2", "hash3"],
-            "patient_id": ["patient_a", "patient_b", "patient_a", None],
-            "note_text": ["text1", "text1", "text2", "text3"],
+            "text_hash": ["hash1", "hash1", "hash2", "hash3", "hash4"],
+            "patient_id": ["patient_a", "patient_b", "patient_a", None, ""],
+            "note_text": ["text1", "text1", "text2", "text3", "text4"],
         }
     )
 
@@ -89,9 +99,10 @@ def validate_row_id_generation() -> bool:
     print()
 
     # Generate row_ids (same logic as local_runner.py)
-    df["row_id"] = (df["text_hash"] + ":" + df["patient_id"].fillna("None").astype(str)).apply(
-        lambda x: hashlib.sha256(x.encode()).hexdigest()
-    )
+    df["row_id"] = [
+        hashlib.sha256(f"{h}:{row_id_patient_part(p)}".encode()).hexdigest()
+        for h, p in zip(df["text_hash"], df["patient_id"], strict=True)
+    ]
 
     print("Generated row_ids:")
     for _, row in df.iterrows():

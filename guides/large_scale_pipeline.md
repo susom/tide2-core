@@ -294,7 +294,7 @@ The system handles failures at three levels: worker crashes, GPU memory limits, 
 #### 3. Execution Hang Detection (`NoProgressGuard`)
 - Ray Data monitors pipeline execution with `no_progress_timeout_s` (default: 600 seconds).
 - If no operator moves a data block for 600 seconds (for example, on cluster deadlock), Ray Data raises `ExecutionTimeoutError` and aborts the job.
-- This prevents silent infinite hangs.
+- **Ray Limitation**: Ray automatically disables `NoProgressGuard` if the execution topology includes an `AllToAllOperator` or `HashShufflingOperatorBase` (such as distributed shuffles). External schedulers (Airflow, Kubernetes, Slurm) should maintain task-level execution timeouts as a backstop.
 
 #### 4. Zero Data Loss Contract (`max_errored_blocks = 0`)
 - Ray Data's `max_errored_blocks` is set to `0`.
@@ -313,12 +313,15 @@ Every stage supports independent row-level checkpointing for resume capability:
 
 - **Checkpoint Location**: Ray creates a checkpoint directory sibling to the output directory:
   $$\text{Checkpoint Path} = \langle\text{output\_dir}\rangle\text{\_ray\_checkpoint}$$
+- **Configured Checkpoint Key**: Ray keys the checkpoint directory on the stage's configured ID column:
+  - `run_pipeline` and `run_anonymization` checkpoint on `row_id`.
+  - Standalone `run_transformer` and `run_recognition` default to `text_hash` (pass `_id_column="row_id"` in Python to checkpoint on `row_id`).
 - **Two-Phase Commit Protocol**:
   1. The task writes a `.pending` checkpoint file.
   2. The task writes the Parquet output data file.
   3. The task renames the `.pending` file to committed status.
 - **Startup Cleanup**: On job launch, Ray inspects `<output_dir>_ray_checkpoint`. Any orphaned `.pending` files and uncommitted output files from prior crashed runs are deleted.
-- **Read-Time Filtering**: Ray loads committed `row_id` values once at startup. Read tasks skip all rows whose `row_id` is already committed.
+- **Read-Time Filtering**: Ray loads committed checkpoint IDs once at startup. Read tasks skip all rows whose configured ID has already been committed.
 - **Restarting Interrupted Jobs**: When a worker crashes, relaunch the identical command pointing to the same input and output paths. The job skips completed rows and processes only uncommitted rows.
 
 ---
@@ -383,7 +386,7 @@ When external schedulers (Airflow, Kubernetes, Slurm) manage distributed workers
 | **1** | **Disjoint Shards** | Ensure no input note exists in more than one shard. | tide2 does not deduplicate across shards. Duplicate notes in multiple shards will be processed multiple times. |
 | **2** | **Stable Output Paths** | Reuse the exact same output path when retrying a failed shard. | Checkpoints live at `<output_dir>_ray_checkpoint`. Changing the output path causes the job to restart from zero. |
 | **3** | **Single Live Attempt** | Run at most one live worker process per shard output path. Launch a retry only after the prior process has terminated. | Ray startup deletes `.pending` files. Two concurrent jobs using the same directory delete each other's checkpoints and cause race conditions. |
-| **4** | **Immutable Parameters** | Keep input data, model, keys, and settings identical across retries. | Ray keys checkpoints on `row_id` only. If settings change, you must specify a new output path. |
+| **4** | **Immutable Parameters** | Keep input data, model, keys, and settings identical across retries. | Ray keys checkpoints on the configured ID column only (`row_id` or `text_hash`). If settings change, you must specify a new output path. |
 
 ---
 

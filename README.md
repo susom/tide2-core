@@ -210,7 +210,7 @@ After running the pipeline, generate JSON files for `tide2-visualizer`:
 from tide2.runner.utils import write_visualizer_json
 
 counts = write_visualizer_json(output_dir="./data/output")
-print(f"Generated {counts.get('recognizer', 0):,} recognizer and {counts.get('anonymizer', 0):,} anonymizer JSON files")
+print(f"Generated {counts.get('recognizer_json', 0):,} recognizer and {counts.get('anonymizer_json', 0):,} anonymizer JSON files")
 ```
 
 #### Execution modes: `discrete` (default) vs `streamed`
@@ -467,16 +467,29 @@ runner.run_anonymization(
 )
 ```
 
-**Common Stage Job Parameters:**
+**Transformer Stage Parameters (`run_transformer`):**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `num_transformer_actors` | `int` | `None` | GPU actor count (auto-computed by hardware autotune). |
+| `gpu_batch_size` | `int` | `None` | Token windows per GPU forward (actor halves and retries on OOM). |
+| `batch_size` | `int` | `8` | Whole notes per actor call. |
+| `chunk_overlap` | `int` | `None` | Token overlap between windows (default: from model config, e.g. 40). |
+| `read_cpus` | `float` | `1.0` | CPUs reserved per `read_parquet` task. |
+| `write_cpus` | `float` | `1.0` | CPUs reserved per `write_parquet` task. |
+| `override_num_blocks` | `int` | `None` | Split input into explicit number of Ray Data blocks to prevent core starvation. |
+| `enable_checkpoint` | `bool` | `True` | Row-level resume checkpointing (`<output>_ray_checkpoint`). Disable on $\le 4$ CPUs. |
+
+**CPU Stage Parameters (`run_recognition` & `run_anonymization`):**
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `num_actors` | `int` | `None` | Worker actor pool size (auto-detected via hardware autotune if unset). |
-| `batch_size` | `int` | `150` / `200` | Batch size per worker actor. |
+| `worker_num_cpus` | `float` | `1.0` | CPUs reserved per worker actor (lower to fit smaller machines). |
+| `batch_size` | `int` | `150` / `200` | Batch size per worker actor (150 recognizer, 200 anonymizer). |
 | `read_cpus` | `float` | `0.25` | CPUs reserved per `read_parquet` task. |
 | `write_cpus` | `float` | `1.0` | CPUs reserved per `write_parquet` task. |
-| `worker_num_cpus` | `float` | `1.0` | CPUs reserved per worker actor (lower to fit smaller machines). |
-| `override_num_blocks` | `int` | `None` | Split input into explicit number of Ray Data blocks to prevent core starvation. |
+| `override_num_blocks` | `int` | `None` | Split input into explicit number of Ray Data blocks. |
 | `enable_checkpoint` | `bool` | `True` | Row-level resume checkpointing (`<output>_ray_checkpoint`). Disable on $\le 4$ CPUs. |
 | `dry_run` | `bool` | `False` | Validate schema and configuration without processing data. |
 

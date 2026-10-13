@@ -133,20 +133,12 @@ def create_pipeline_parquet(
         row: dict = {
             "note_text": note_text,
             "text_hash": text_hash,
+            "patient_id": str(patient_id) if patient_id is not None else None,
             "patient_identifiers": patient_identifiers,
+            "row_id": str(note["row_id"]) if "row_id" in note and note["row_id"] is not None else None,
+            "jitter": note.get("jitter"),
+            "recognizer_results_json": note.get("recognizer_results_json"),
         }
-        if patient_id is not None:
-            row["patient_id"] = str(patient_id)
-        if "row_id" in note and note["row_id"] is not None:
-            row["row_id"] = str(note["row_id"])
-
-        for optional_col in (
-            "jitter",
-            "recognizer_results_json",
-        ):
-            if optional_col in note and note[optional_col] is not None:
-                row[optional_col] = note[optional_col]
-
         rows.append(row)
 
     table = pa.Table.from_pylist(rows)
