@@ -142,7 +142,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 > stray `compiled_cache.bin` beside the model weights is ignored.
 
 ### Command Line Tools
-- **`tide2-runner`**: Ray-based single-node job runner with five job types: `recognizer`, `anonymizer`, `transformer`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run`).
+- **`tide2-runner`**: Ray-based single-node job runner with five job types: `recognizer`, `anonymizer`, `transformer`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run` for recognizer, anonymizer, and llm-recognizer).
 - **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
 
 
@@ -330,7 +330,7 @@ guarantees:
 | 1 | Shards are disjoint: no note is in two shards. | tide2 does not deduplicate across jobs. |
 | 2 | Each shard has its own stable output location, reused by every retry. | The checkpoint lives next to the output (`<output>_ray_checkpoint`). A new location means a new start. |
 | 3 | At most one live attempt per shard. Launch a replacement only after the previous attempt is dead. | Ray's startup cleanup deletes the pending checkpoints and output files of any job using the same location, and committed IDs are loaded once at start. |
-| 4 | Retries use the same input, model, settings and keys. Change any of them and use a new `<run_id>`. | The checkpoint is keyed on `row_id` only, so it cannot tell that a note was processed with different settings. |
+| 4 | Retries use the same input, model, settings and keys. Change any of them and use a new `<run_id>`. | The checkpoint is keyed on the configured ID column (`row_id` for full pipeline and anonymization; `text_hash` by default for standalone transformer/recognizer), so it cannot tell that a note was processed with different settings. |
 
 No manifest and no lock are required. A lock only guards against a duplicate
 attempt, which guarantee 3 already rules out.
@@ -369,8 +369,9 @@ streamed` needs a local directory.
 **`row_id`.** If the input has no `row_id`, tide2 derives it inside the read as
 `sha256(text_hash:patient_id)` (`"None"` for a null, NaN or blank patient). It depends only on
 the note and the patient, so it is identical on every run and machine, and no
-extra copy of the input is written. Call `tide2.runner.local_runner.add_row_id`
-upstream to produce the same value. A row with a null `row_id` or a null `text_hash`
+extra copy of the input is written. Call `tide2.runner.local_runner.normalize_source_batch`
+(or `add_row_id` if `text_hash` is already computed) upstream to produce the same value.
+A row with a null `row_id` or a null `text_hash`
 in a column you supplied gets the derived value for that row; the other rows keep
 theirs.
 
