@@ -3,6 +3,8 @@ TIDE 2.0 Runner Module.
 
 Provides job runners for recognition, anonymization, and transformer jobs.
 
+.. include:: ../../../guides/large_scale_pipeline.md
+
 Runner classes:
 - LocalJobRunner: Single-node execution using Ray (laptop or GCP VM)
 

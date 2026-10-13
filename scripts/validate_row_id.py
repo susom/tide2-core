@@ -35,15 +35,15 @@ def _run_checks(df: pd.DataFrame) -> list[str]:
     else:
         print("[PASS] All row_ids are unique")
 
-    # 4. Same text_hash + different uid = different row_id
+    # 4. Same text_hash + different patient_id = different row_id
     hash1_rows = df[df["text_hash"] == "hash1"]
     if len(hash1_rows) == HASH1_ROW_COUNT and hash1_rows["row_id"].iloc[0] == hash1_rows["row_id"].iloc[1]:
-        errors.append("ERROR: Same text_hash with different UIDs should have different row_ids")
+        errors.append("ERROR: Same text_hash with different patient_ids should have different row_ids")
     else:
-        print("[PASS] Same text_hash with different UIDs produce different row_ids")
+        print("[PASS] Same text_hash with different patient_ids produce different row_ids")
 
     # 5. Deterministic
-    test_composite = "hash1:uid_a"
+    test_composite = "hash1:patient_a"
     hash_a = hashlib.sha256(test_composite.encode()).hexdigest()
     hash_b = hashlib.sha256(test_composite.encode()).hexdigest()
     if hash_a != hash_b:
@@ -58,6 +58,15 @@ def _run_checks(df: pd.DataFrame) -> list[str]:
     else:
         print("[PASS] row_id format is lowercase hex")
 
+    # 7. Null and blank patient_id hash consistency (uses DEFAULT_ROW_ID_PATIENT_ID = "None")
+    null_row = df[df["patient_id"].isna()]
+    if len(null_row) > 0:
+        expected_null_hash = hashlib.sha256(b"hash3:None").hexdigest()
+        if null_row["row_id"].iloc[0] != expected_null_hash:
+            errors.append("ERROR: Null patient_id should use 'None' sentinel in row_id hash")
+        else:
+            print("[PASS] Null patient_id correctly resolves to 'None' sentinel in row_id hash")
+
     return errors
 
 
@@ -71,7 +80,7 @@ def validate_row_id_generation() -> bool:
     df = pd.DataFrame(
         {
             "text_hash": ["hash1", "hash1", "hash2", "hash3"],
-            "patient_id": ["uid_a", "uid_b", "uid_a", None],
+            "patient_id": ["patient_a", "patient_b", "patient_a", None],
             "note_text": ["text1", "text1", "text2", "text3"],
         }
     )

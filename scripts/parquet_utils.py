@@ -31,10 +31,11 @@ Required columns:
 
 Auto-populated when absent:
   text_hash             SHA256 of note_text.
-  patient_id            Defaults to text_hash.
+  row_id                SHA256 of text_hash:patient_id (added via add_row_id).
   patient_identifiers   JSON string of known PHI values per entity type.
 
 Optional pass-through columns:
+  patient_id            Patient identifier (preserved as None if absent).
   jitter
   recognizer_results_json
 """
@@ -115,6 +116,8 @@ def create_pipeline_parquet(
     if not notes:
         raise ValueError("notes list cannot be empty")
 
+    from tide2.runner.local_runner import add_row_id
+
     rows: list[dict] = []
     for i, note in enumerate(notes):
         if "note_text" not in note or note["note_text"] is None:
@@ -122,7 +125,7 @@ def create_pipeline_parquet(
 
         note_text: str = str(note["note_text"])
         text_hash: str = note.get("text_hash") or _compute_text_hash(note_text)
-        patient_id: str = note.get("patient_id") or text_hash
+        patient_id = note.get("patient_id")
 
         raw_pi = note.get("patient_identifiers", "{}")
         patient_identifiers = json.dumps(raw_pi) if isinstance(raw_pi, dict) else str(raw_pi) if raw_pi else "{}"
@@ -130,30 +133,28 @@ def create_pipeline_parquet(
         row: dict = {
             "note_text": note_text,
             "text_hash": text_hash,
-            "patient_id": patient_id,
             "patient_identifiers": patient_identifiers,
         }
+        if patient_id is not None:
+            row["patient_id"] = str(patient_id)
+        if "row_id" in note and note["row_id"] is not None:
+            row["row_id"] = str(note["row_id"])
 
         for optional_col in (
             "jitter",
             "recognizer_results_json",
         ):
-            if optional_col in note:
+            if optional_col in note and note[optional_col] is not None:
                 row[optional_col] = note[optional_col]
 
         rows.append(row)
 
-    df = pd.DataFrame(rows)
-
-    ordered_cols = ["note_text", "text_hash", "patient_id", "patient_identifiers"]
-    for col in ("jitter", "recognizer_results_json"):
-        if col in df.columns:
-            ordered_cols.append(col)
-    df = df[ordered_cols]
+    table = pa.Table.from_pylist(rows)
+    table = add_row_id(table)
 
     dest = Path(output_path).resolve()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(dest, index=False, compression=compression)
+    pq.write_table(table, dest, compression=compression)
     return dest
 
 

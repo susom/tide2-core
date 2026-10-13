@@ -197,6 +197,20 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --num-actors 1 --worker-num-cpus 1.5 \
     --read-cpus 0.25 --write-cpus 0.25 \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
+
+# Generate visualizer JSON files from a finished pipeline run
+tide2-runner visualizer-json -o ./data/output
+```
+
+### Visualizer JSON Generation (Python API)
+
+After running the pipeline, generate JSON files for `tide2-visualizer`:
+
+```python
+from tide2.runner.utils import write_visualizer_json
+
+counts = write_visualizer_json(output_dir="./data/output")
+print(f"Generated {counts.get('recognizer', 0):,} recognizer and {counts.get('anonymizer', 0):,} anonymizer JSON files")
 ```
 
 #### Execution modes: `discrete` (default) vs `streamed`
@@ -247,6 +261,19 @@ reads the folder the previous stage wrote.
 > `llm_recognizer_output`: it deletes the merged folder and writes it again, so
 > keep both recognizer folders until the run is finished. If one of them has no
 > files, the merge stops with an error and deletes nothing.
+>
+> **Example deduplication before merge mode:**
+> ```python
+> import pyarrow as pa
+> from tide2.runner.local_runner import add_row_id
+>
+> # Deduplicate on row_id to prevent Cartesian join expansion in merge mode
+> table = pa.parquet.read_table("notes.parquet")
+> table = add_row_id(table)  # ensures sha256(text_hash:patient_id) is present
+> unique_df = table.to_pandas().drop_duplicates(subset=["row_id"])
+> deduplicated_table = pa.Table.from_pandas(unique_df)
+> pa.parquet.write_table(deduplicated_table, "deduplicated_notes.parquet")
+> ```
 
 Use `streamed` for development, benchmarks, and single-box batches, where one
 cluster does all three stages. Stay on `discrete` for production, for anything
@@ -285,6 +312,10 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
 This section is for people who launch many tide2 workers from a scheduler
 (Kubernetes, Airflow, a batch queue) and need a crashed worker to be relaunched
 without reprocessing notes it already finished. It applies to `discrete` mode.
+
+For comprehensive individual stage input/output contracts, GPU/CPU fleet orchestration,
+and multi-machine shared filesystem walkthroughs, see the
+[Large-Scale Distributed Pipeline Guide](guides/large_scale_pipeline.md).
 
 With checkpointing on (the default), re-running a stage on the same output
 location skips notes already written. The mechanism, and why the rules below
@@ -404,6 +435,50 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
 
 On a machine with 4 CPUs or fewer the pipeline applies both fixes for you (the `tiny`
 rule) — see *Hardware autotuning* below. The knobs above remain the way to override it.
+
+### Standalone Stage Execution (Python API)
+
+To run individual stages in Python across separate compute environments:
+
+```python
+from tide2.runner.local_runner import LocalJobRunner
+
+runner = LocalJobRunner(num_gpus=1.0)
+
+# Stage 1: Transformer inference
+runner.run_transformer(
+    input_path="shard_01.parquet",
+    output_path="transformer_output",
+    model_name="stanford-med-hdr/tide2-sentry-clinical-ner",
+)
+
+# Stage 2: Pattern and dictionary recognizer
+runner.run_recognition(
+    input_path="transformer_output",
+    output_path="recognizer_output",
+)
+
+# Stage 3: Cryptographic anonymization
+runner.run_anonymization(
+    input_path="recognizer_output",
+    output_path="anonymizer_output",
+    salt_path="salt.bin",
+    key_path="key.bin",
+)
+```
+
+**Common Stage Job Parameters:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `num_actors` | `int` | `None` | Worker actor pool size (auto-detected via hardware autotune if unset). |
+| `batch_size` | `int` | `150` / `200` | Batch size per worker actor. |
+| `read_cpus` | `float` | `0.25` | CPUs reserved per `read_parquet` task. |
+| `write_cpus` | `float` | `1.0` | CPUs reserved per `write_parquet` task. |
+| `worker_num_cpus` | `float` | `1.0` | CPUs reserved per worker actor (lower to fit smaller machines). |
+| `override_num_blocks` | `int` | `None` | Split input into explicit number of Ray Data blocks to prevent core starvation. |
+| `enable_checkpoint` | `bool` | `True` | Row-level resume checkpointing (`<output>_ray_checkpoint`). Disable on $\le 4$ CPUs. |
+| `dry_run` | `bool` | `False` | Validate schema and configuration without processing data. |
 
 ### Hardware autotuning
 
@@ -744,14 +819,23 @@ This project is licensed under the MIT License - see the [LICENSE-MIT](LICENSE-M
 
 ## Citation
 
-If you use TIDE 2.0 in your research, please cite:
+If you use TIDE 2.0 or the SHIELD benchmark in your research, please cite:
 
 ```bibtex
-@software{tide2,
-  title={TIDE 2.0: Data De-identification and Anonymization Toolkit},
-  author={TIDE 2.0 Team},
-  year={2025},
-  url={https://github.com/susom/tide2}
+@article{posada2026tide2,
+  title={TIDE 2.0: an open, model-agnostic engine for keyed de-identification of clinical notes},
+  author={Posada, Jose D. and Datta, Somalee and Desai, Priya},
+  journal={arXiv preprint arXiv:2610.07224},
+  year={2026},
+  url={https://arxiv.org/abs/2610.07224}
+}
+
+@article{posada2026shield,
+  title={SHIELD: A Diverse Clinical Note Dataset and Distilled Small Language Models for Enterprise-Scale De-identification},
+  author={Posada, Jose D. and Love, David and Datta, Somalee and Desai, Priya},
+  journal={arXiv preprint arXiv:2605.03301},
+  year={2026},
+  url={https://arxiv.org/abs/2605.03301}
 }
 ```
 
