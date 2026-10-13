@@ -5,9 +5,11 @@ This module provides common functions used across all execution modes
 (local, VM, cluster) to reduce code duplication.
 """
 
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -341,6 +343,16 @@ def log_ray_cluster_info() -> None:
         logger.warning(f"Could not get Ray cluster info: {e}")
 
 
+_SAFE_FILE_STEM = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _file_stem(sample_id: str) -> str:
+    """Return ``sample_id`` as a file name part; an id that is not a plain token becomes its sha256."""
+    if _SAFE_FILE_STEM.fullmatch(sample_id):
+        return sample_id
+    return hashlib.sha256(sample_id.encode()).hexdigest()
+
+
 def _parquet_files_under(folder: Path) -> list[Path]:
     return sorted(folder.glob("**/*.parquet")) if folder.is_dir() else []
 
@@ -376,7 +388,9 @@ def _write_recognizer_json(files: list[Path], text_map: dict[str, str], out_dir:
             "value": row.get("note_text") or text_map.get(sample_id, ""),
             "recognizer_results": json.loads(results_json),
         }
-        (out_dir / f"{sample_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        (out_dir / f"{_file_stem(sample_id)}.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         count += 1
     return count
 
@@ -402,7 +416,9 @@ def _write_anonymizer_json(files: list[Path], out_dir: Path) -> int:
                 items = json.loads(row[col]) if isinstance(row[col], str) else list(row[col])
                 break
         data = {"text": text, "items": items}
-        (out_dir / f"{sample_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        (out_dir / f"{_file_stem(sample_id)}.json").write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         count += 1
     return count
 

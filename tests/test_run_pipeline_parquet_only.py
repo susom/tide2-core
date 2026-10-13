@@ -421,6 +421,29 @@ def test_write_visualizer_json_after_a_streamed_run_writes_only_the_anonymizer_j
     assert not (tmp_path / "viz" / "cli_recognizer_json").exists()
 
 
+def test_write_visualizer_json_keeps_file_names_inside_the_json_folders(tmp_path):
+    run = tmp_path / "run"
+    for stage in ("recognizer", "anonymizer"):
+        folder = run / lr.STAGE_DIRS[stage]
+        folder.mkdir(parents=True)
+        columns = {"text_hash": ["../../escape", "/tmp/absolute"], "note_text": ["a", "b"]}
+        if stage == "recognizer":
+            columns["recognizer_results_json"] = ["[]", "[]"]
+        else:
+            columns["anonymized_note_text"] = ["a", "b"]
+            columns["anonymizer_results_json"] = ["[]", "[]"]
+        pq.write_table(pa.table(columns), folder / "part-0.parquet")
+
+    counts = write_visualizer_json(run)
+
+    assert counts == {"recognizer_json": 2, "anonymizer_json": 2}
+    written = sorted(p.relative_to(run).parent.as_posix() for p in run.rglob("*.json"))
+    assert written == ["cli_anonymizer_json"] * 2 + ["cli_recognizer_json"] * 2
+    assert not (tmp_path / "escape.json").exists()
+    keys = {json.loads(p.read_text())["key"] for p in (run / "cli_recognizer_json").glob("*.json")}
+    assert keys == {"../../escape", "/tmp/absolute"}
+
+
 def test_write_visualizer_json_needs_a_local_folder(tmp_path):
     with pytest.raises(ValueError, match="local output_dir"):
         write_visualizer_json("gs://bucket/run")

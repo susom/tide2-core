@@ -591,7 +591,10 @@ tide2-runner visualizer-json -o ./output
 ```
 
 The command writes `cli_recognizer_json/` and `cli_anonymizer_json/` in the output
-folder. Use `--json-dir` to write them in another folder. After a `streamed` run only
+folder. Each file is named after the note's `text_hash`; a `text_hash` that is not
+a plain token (letters, digits, `_` and `-`, up to 128 characters) is replaced by
+its sha256 in the file name, and the recognizer JSON keeps the original value in its
+`key` field. Use `--json-dir` to write them in another folder. After a `streamed` run only
 the anonymizer JSON is written, because that mode keeps no recognizer folder. In
 Python, call `tide2.runner.utils.write_visualizer_json(output_dir, json_dir=None)`.
 
