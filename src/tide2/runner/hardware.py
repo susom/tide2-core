@@ -378,7 +378,5 @@ def render_settings(settings: Settings, entries: list[SettingEntry]) -> str:
         f" {'stage':<12} {'knob':<24} {'value':>8}   source",
     ]
     for entry in entries:
-        if entry.knob == "num_cpus" and entry.source != "USER":
-            continue  # an implementation detail of the CPU slot; not worth a row
         lines.append(f" {entry.stage:<12} {entry.knob:<24} {entry.value!s:>8}   {entry.source}")
     return "\n".join(lines)

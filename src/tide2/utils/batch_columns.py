@@ -1,6 +1,6 @@
 """Case-insensitive column accessor for Ray Data batch dicts."""
 
-import warnings
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -9,34 +9,10 @@ import pyarrow as pa
 from tide2.utils.nulls import is_null
 
 
-def _check_deprecated_patient_uid(container: Any, location: str = "") -> None:
-    """Emit a DeprecationWarning and raise ValueError if deprecated patient_uid is present."""
-    if container is None:
-        return
-    has_uid = False
-    if hasattr(container, "columns"):
-        has_uid = any(isinstance(c, str) and c.lower() == "patient_uid" for c in container.columns)
-    elif isinstance(container, (str, bytes)):
-        has_uid = (
-            container.lower() == "patient_uid" if isinstance(container, str) else container.lower() == b"patient_uid"
-        )
-    else:
-        try:
-            if "patient_uid" in container:
-                has_uid = True
-            else:
-                for item in container:
-                    if isinstance(item, str) and item.lower() == "patient_uid":
-                        has_uid = True
-                        break
-        except Exception:
-            has_uid = False
-
-    if has_uid:
-        loc_str = f" in {location}" if location else ""
-        msg = f"`patient_uid`{loc_str} is deprecated and no longer supported. Please use `patient_id` instead."
-        warnings.warn(msg, DeprecationWarning, stacklevel=2)
-        raise ValueError(msg)
+def check_no_patient_uid(columns: Iterable[str], location: str) -> None:
+    """Raise when an input schema still has the removed ``patient_uid`` column."""
+    if any(isinstance(c, str) and c.lower() == "patient_uid" for c in columns):
+        raise ValueError(f"`patient_uid` in {location} is no longer supported. Use `patient_id` instead.")
 
 
 class BatchColumns:
@@ -96,7 +72,6 @@ def copy_passthrough(
         indices: Optional list of row indices to slice from *batch*.
         empty: When True, emit empty lists instead of copying values.
     """
-    _check_deprecated_patient_uid(batch)
     cols = batch if isinstance(batch, BatchColumns) else BatchColumns(batch)
     for col in PASSTHROUGH_COLS:
         if col in cols:

@@ -38,9 +38,9 @@ object_store_gb: 100
 # =========================================================================
 # Actor tuning (recognizer, anonymizer, pipeline)
 # =========================================================================
-# num_actors / worker_num_cpus are left unset on purpose: the hardware recommender
-# sizes them from the detected node shape. Uncomment only to override the
-# recommendation. worker_num_cpus is the CPU reservation per actor slot.
+# num_actors / worker_num_cpus are left unset on purpose: the hardware rules
+# size them from this machine. Uncomment only to override the
+# recommendation. worker_num_cpus is the CPU reservation per actor.
 # num_actors: 200
 # worker_num_cpus: 1
 batch_size: 200

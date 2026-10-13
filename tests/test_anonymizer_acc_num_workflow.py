@@ -41,29 +41,6 @@ def _get_worker_instance(acc_num_salt: str = "test_salt", acc_num_study_id: str 
 class TestAnonymizerWorkerAccNumDirect:
     """Unit tests for AnonymizerWorker.process_note accession hashing."""
 
-    def test_deprecated_patient_uid_raises_in_process_note(self):
-        """Passing patient_uid raises ValueError with DeprecationWarning."""
-        worker = _get_worker_instance()
-        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
-            worker.process_note(
-                note_text="Note text",
-                original_text_hash="hash_a",
-                recognizer_results_json="[]",
-                patient_uid="patient_AAA",
-            )
-
-    def test_deprecated_patient_uid_raises_in_create_operators(self):
-        """Passing patient_uid raises ValueError with DeprecationWarning."""
-        worker = _get_worker_instance()
-        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
-            worker._create_operators_for_note(patient_uid="patient_AAA")
-
-    def test_deprecated_patient_uid_raises_in_compute_jitter(self):
-        """Passing patient_uid raises ValueError with DeprecationWarning."""
-        worker = _get_worker_instance()
-        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
-            worker._compute_jitter_for_patient(patient_uid="patient_AAA")
-
     def test_per_patient_uniqueness_short_path(self):
         """Different patient_ids yield distinct hashes for identical accession text."""
         worker = _get_worker_instance()
@@ -321,9 +298,7 @@ class TestAnonymizerWorkerRayWorkflow:
 
     def test_remote_worker_execution(self):
         """Remote Ray actor processes note and preserves patient_id scoping."""
-        from tide2.actors.anonymizer import AnonymizerWorkerActor
-
-        worker = AnonymizerWorkerActor.remote(
+        worker = ray.remote(AnonymizerWorker).remote(
             salt=b"0" * 32,
             key=b"1" * 32,
             acc_num_salt="ray_salt",

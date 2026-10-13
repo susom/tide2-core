@@ -5,7 +5,6 @@ The tests need no Ray cluster and no GPU: machines are built by hand.
 
 import argparse
 import inspect
-import re
 import subprocess
 import sys
 
@@ -57,8 +56,8 @@ HARDWARE_TABLE = [
                 "gpu_batch_size": 64,
                 "batch_size": 512,
             },
-            "recognizer": {"num_actors": 14, "num_cpus": 0, "worker_num_cpus": 1.0, "override_num_blocks": 32},
-            "anonymizer": {"num_actors": 14, "num_cpus": 0, "worker_num_cpus": 1.0, "override_num_blocks": 32},
+            "recognizer": {"num_actors": 14, "worker_num_cpus": 1.0, "override_num_blocks": 32},
+            "anonymizer": {"num_actors": 14, "worker_num_cpus": 1.0, "override_num_blocks": 32},
             "runner": {"no_progress_timeout_s": 600},
         },
         id="reference-L4-16cpu",
@@ -373,7 +372,6 @@ def test_render_settings():
     assert f"Rules:    cpu-stages, gpu   Model: {MODEL} (measured, L4)" in table
     assert "num_transformer_actors" in table
     assert "USER" in table
-    assert re.search(r"\bnum_cpus\b", table) is None
 
 
 # ---------------------------------------------------------------------------

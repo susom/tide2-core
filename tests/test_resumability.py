@@ -192,9 +192,7 @@ def test_run_recognition_passes_gs_paths_unchanged(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runner, seen = _fake_ray_stage(monkeypatch, source_columns=["text_hash", "note_text"])
 
-    runner.run_recognition(
-        "gs://b/in", "gs://b/run/shard", num_actors=1, num_cpus=None, worker_num_cpus=1, enable_checkpoint=True
-    )
+    runner.run_recognition("gs://b/in", "gs://b/run/shard", num_actors=1, worker_num_cpus=1, enable_checkpoint=True)
 
     assert seen["write_path"] == "gs://b/run/shard"
     assert seen["checkpoint_path"] == "gs://b/run/shard_ray_checkpoint"
@@ -205,7 +203,7 @@ def test_run_recognition_local_relative_path_still_resolved(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     runner, seen = _fake_ray_stage(monkeypatch, source_columns=["text_hash", "note_text"])
 
-    runner.run_recognition("in", "rel/shard", num_actors=1, num_cpus=None, worker_num_cpus=1, enable_checkpoint=True)
+    runner.run_recognition("in", "rel/shard", num_actors=1, worker_num_cpus=1, enable_checkpoint=True)
 
     assert seen["write_path"] == str((tmp_path / "rel" / "shard").resolve())
     assert seen["checkpoint_path"] == str((tmp_path / "rel" / "shard_ray_checkpoint").resolve())

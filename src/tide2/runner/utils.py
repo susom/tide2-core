@@ -12,7 +12,7 @@ from typing import Any
 
 import ray
 
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.batch_columns import check_no_patient_uid
 
 logger = logging.getLogger(__name__)
 
@@ -214,7 +214,7 @@ def detect_columns(sample_file: str, required: list[str], optional: list[str]) -
         available_columns = set(pq.ParquetFile(sample_file).schema_arrow.names)
     lower_to_actual = {c.lower(): c for c in available_columns}
 
-    _check_deprecated_patient_uid(lower_to_actual, location=f"schema of {sample_file}")
+    check_no_patient_uid(lower_to_actual, f"schema of {sample_file}")
 
     columns = []
     for c in required:

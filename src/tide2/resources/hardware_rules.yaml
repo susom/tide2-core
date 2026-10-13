@@ -38,7 +38,6 @@ defaults:
     num_agg_actors: "0 if gpus > 0 else 1"
   cpu_stages:
     num_actors: "max(1, cpus // 2)"
-    num_cpus: 0                            # 0 + worker_num_cpus is the CPU slot of one actor
     worker_num_cpus: 1.0
   runner:
     no_progress_timeout_s: 600

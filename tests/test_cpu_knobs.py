@@ -2,8 +2,7 @@
 
 Covers the behaviour introduced for ≲4-CPU boxes (e.g. Google Colab):
 
-1. Supervisor ``worker_num_cpus`` override is applied to the worker actor only
-   when set (``.options(num_cpus=...)``), never otherwise.
+1. ``worker_num_cpus`` sets the CPUs one actor reserves (1.0 when unset).
 2. ``_configure_checkpoint`` gates Ray Data checkpointing on ``enable`` and uses
    the expected ``id_column``.
 3. Each stage's read/write (and the transformer's flat_map) carry the expected
@@ -29,23 +28,14 @@ from tide2.runner.local_runner import _resolve_slot_cpus
 
 
 class TestSlotCpuResolution:
-    """Slot CPU resolution preserves pre-collapse accounting across combinations."""
+    """One actor reserves worker_num_cpus CPUs, or 1.0 when it is unset."""
 
     @pytest.mark.parametrize(
-        ("num_cpus", "worker_num_cpus", "expected_slot_cpus"),
-        [
-            (0, 1.0, 1.0),
-            (2, None, 3.0),
-            (0, 0.25, 0.25),
-            (2, 0.75, 2.75),
-            (0, 0, 0.0),
-            (0.5, 1.0, 1.5),
-            (0.5, None, 1.5),
-            (None, 1.5, 1.5),
-        ],
+        ("worker_num_cpus", "expected_slot_cpus"),
+        [(None, 1.0), (1.0, 1.0), (0.25, 0.25), (0, 0.0), (1.5, 1.5)],
     )
-    def test_resolve_slot_cpus(self, num_cpus, worker_num_cpus, expected_slot_cpus):
-        slot_cpus, ray_remote_args, resolved = _resolve_slot_cpus(num_cpus, worker_num_cpus)
+    def test_resolve_slot_cpus(self, worker_num_cpus, expected_slot_cpus):
+        slot_cpus, ray_remote_args, resolved = _resolve_slot_cpus(worker_num_cpus)
         assert slot_cpus == expected_slot_cpus
         assert ray_remote_args["num_cpus"] == expected_slot_cpus
         assert resolved["resolved_slot_cpus"] == expected_slot_cpus
@@ -80,19 +70,17 @@ class TestSlotCpuResolution:
             input_path="in",
             output_path=str(tmp_path / "out"),
             num_actors=4,
-            num_cpus=2,
             worker_num_cpus=0.5,
             enable_checkpoint=False,
         )
 
-        # Worker class passed directly to map_batches (not a supervisor class)
+        # Worker class passed directly to map_batches
         assert captured_map_batches["fn"] is RecognizerWorker
         strategy = captured_map_batches["kwargs"]["compute"]
         assert isinstance(strategy, ray.data.ActorPoolStrategy)
         assert strategy.min_size == 4
         assert strategy.max_size == 4
-        # Slot CPUs resolved additively (2 + 0.5 = 2.5)
-        assert captured_map_batches["kwargs"]["num_cpus"] == 2.5
+        assert captured_map_batches["kwargs"]["num_cpus"] == 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -346,27 +334,17 @@ def test_cli_llm_recognizer_forwards_cpu_knobs(monkeypatch):
     assert captured["enable_checkpoint"] is False
 
 
-def test_cli_cpus_per_actor_accepts_fractional_value(monkeypatch):
-    """--cpus-per-actor takes a float, so legacy small-box commands such as 0.5 still parse."""
+@pytest.mark.parametrize("flag", [("--cpus-per-actor", "0.5"), ("--batch-timeout", "100"), ("--chunk-size", "512")])
+def test_cli_rejects_the_removed_flags(monkeypatch, flag):
+    """The flags that were deprecated and ignored are gone, so argparse refuses them."""
     from tide2.runner import cli
-    from tide2.runner.local_runner import LocalJobRunner
 
-    captured: dict = {}
+    monkeypatch.setattr("sys.argv", ["tide2-runner", "run", "recognizer", "-i", "in", "-o", "out", *flag])
 
-    def fake_run_recognition(self, **kwargs):
-        captured.update(kwargs)
-        return {}
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
 
-    monkeypatch.setattr(LocalJobRunner, "run_recognition", fake_run_recognition)
-    monkeypatch.setattr(LocalJobRunner, "shutdown", lambda _self: None)
-    monkeypatch.setattr(
-        "sys.argv",
-        ["tide2-runner", "run", "recognizer", "-i", "in", "-o", "out", "--cpus-per-actor", "0.5"],
-    )
-
-    cli.main()
-
-    assert captured["num_cpus"] == 0.5
+    assert exc.value.code == 2
 
 
 def test_cli_small_box_recipe_from_readme_parses(monkeypatch):
@@ -394,4 +372,4 @@ def test_cli_small_box_recipe_from_readme_parses(monkeypatch):
     for stage in ("recognizer_kwargs", "anonymizer_kwargs"):
         kwargs = captured[stage]
         assert "num_cpus" not in kwargs
-        assert _resolve_slot_cpus(kwargs.get("num_cpus"), kwargs["worker_num_cpus"])[0] == 1.5
+        assert _resolve_slot_cpus(kwargs["worker_num_cpus"])[0] == 1.5

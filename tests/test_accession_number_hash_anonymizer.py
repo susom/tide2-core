@@ -48,16 +48,6 @@ class TestAccessionNumberHashAnonymizer:
         with pytest.raises(ValueError, match="Entity type 'INVALID' is not supported"):
             self.anonymizer.validate({"entity_type": "INVALID"})
 
-    def test_deprecated_patient_uid_raises_in_operate(self):
-        """Raise ValueError with DeprecationWarning when patient_uid is passed to operate."""
-        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
-            self.anonymizer.operate("ACC123", {"patient_uid": "pat_123"})
-
-    def test_deprecated_patient_uid_raises_in_validate(self):
-        """Raise ValueError with DeprecationWarning when patient_uid is passed to validate."""
-        with pytest.deprecated_call(), pytest.raises(ValueError, match=r"`patient_uid`.*is deprecated"):
-            self.anonymizer.validate({"patient_uid": "pat_123"})
-
     def test_per_patient_uniqueness(self):
         """Ensure different patient_ids produce distinct hashes for identical text."""
         params_a = {"salt": "mysalt", "study_id": "study1", "patient_id": "patient_A"}

@@ -383,10 +383,8 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
   `--agg-num-cpus` (BIO aggregation actor), `--transformer-cpus` (CPU floor for the
   transformer actor; leave unset on GPU, set to ~`C - 1` on CPU-only boxes — it also
   caps the actor's torch threads).
-- **Recognizer / anonymizer stages**: `--worker-num-cpus` (CPUs per worker actor),
-  `--read-cpus`, `--write-cpus`. `--cpus-per-actor` (a float) is deprecated; it is added to
-  `--worker-num-cpus`, so `--cpus-per-actor 0.5 --worker-num-cpus 1.0` is the same as
-  `--worker-num-cpus 1.5`. Do not confuse `--worker-num-cpus` with total cluster CPUs (`--num-cpus`).
+- **Recognizer / anonymizer stages**: `--worker-num-cpus` (CPUs per actor),
+  `--read-cpus`, `--write-cpus`. Do not confuse `--worker-num-cpus` with total cluster CPUs (`--num-cpus`).
 - **All stages on C ≲ 4**: add `--no-checkpoint`.
 
 On a machine with 4 CPUs or fewer the pipeline applies both fixes for you (the `tiny`

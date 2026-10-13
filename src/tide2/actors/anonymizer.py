@@ -2,14 +2,9 @@
 Ray Actor for batch anonymization processing using Presidio AnonymizerEngine.
 
 This module provides a Ray Actor for batch processing clinical notes using
-Microsoft Presidio's AnonymizerEngine with custom anonymizers.
-
-Architecture:
-    AnonymizerSupervisor (used by map_batches)
-        └── AnonymizerWorker (does actual processing, can be killed on timeout)
-
-    The supervisor pattern enables true note-level timeouts. When a note hangs,
-    ray.kill() terminates the worker process and a new worker is spawned.
+Microsoft Presidio's AnonymizerEngine with custom anonymizers. Ray Data drives
+``AnonymizerWorker`` directly; a hang is caught by Ray Data's execution-level
+no-progress timeout.
 
 Output columns:
     - text_hash: SHA256 hash of original note_text
@@ -37,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 import orjson
-import ray
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_anonymizer.entities import RecognizerResult
@@ -59,7 +53,6 @@ from tide2.anonymizers.guarded import summarize
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.span_metrics import resolve_recognizer_results
@@ -95,7 +88,6 @@ class AnonymizerWorker:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
-        **kwargs: Any,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -107,13 +99,7 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
-            **kwargs: Deprecated parameters. Passing any deprecated argument
-                will raise a ValueError with a deprecation warning.
         """
-        from tide2.actors import check_deprecated_actor_kwargs
-
-        check_deprecated_actor_kwargs(kwargs, "AnonymizerWorker")
-
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
 
@@ -248,7 +234,6 @@ class AnonymizerWorker:
         date_jitter: int | None = None,
         patient_id: Any = None,
         mask_dates: bool = False,
-        **kwargs: Any,
     ) -> dict[str, OperatorConfig]:
         """
         Create operators including per-note parameters.
@@ -261,7 +246,6 @@ class AnonymizerWorker:
         Returns:
             Dictionary of operator configurations for this note.
         """
-        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker._create_operators_for_note")
         operators = self._base_operators.copy()
 
         # Random jitter between 4-60 days if not provided
@@ -345,7 +329,7 @@ class AnonymizerWorker:
             )
         return parsed
 
-    def _compute_jitter_for_patient(self, patient_id: Any = None, **kwargs: Any) -> int:
+    def _compute_jitter_for_patient(self, patient_id: Any = None) -> int:
         """
         Compute deterministic jitter for a patient when not provided.
 
@@ -359,7 +343,6 @@ class AnonymizerWorker:
         Returns:
             Integer jitter value in days.
         """
-        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker._compute_jitter_for_patient")
         if is_null(patient_id):
             return secrets.randbelow(357) - 178  # Random between -178 and +178
         val_str = str(patient_id).strip()
@@ -483,13 +466,9 @@ class AnonymizerWorker:
         recognizer_results_json: str | list | None,
         patient_id: str | None = None,
         jitter: int | None = None,
-        **kwargs: Any,
     ) -> dict[str, Any]:
         """
         Process a single note and return results.
-
-        This method is called by AnonymizerSupervisor for each note.
-        If this method hangs, the supervisor will kill this worker via ray.kill().
 
         Args:
             note_text: The note text to anonymize.
@@ -507,7 +486,6 @@ class AnonymizerWorker:
             NoteError: If the recognizer results are unusable. Any other exception
                 comes from outside the operators; the caller fails the note.
         """
-        _check_deprecated_patient_uid(kwargs, location="AnonymizerWorker.process_note")
         recognizer_results = self._parse_recognizer_results(recognizer_results_json, len(note_text))
 
         events = start_note()
@@ -591,8 +569,6 @@ class AnonymizerWorker:
         """
         Process a batch of notes in a single call. No IPC per note.
 
-        Called by AnonymizerSupervisor to avoid per-note ray.get() overhead.
-
         Input columns are read into ``input_*`` locals (e.g. ``input_patient_ids``)
         and kept distinct from the output accumulators they feed (e.g.
         ``patient_ids``). This separation is deliberate: collapsing an input column
@@ -618,7 +594,6 @@ class AnonymizerWorker:
         row_ids = []
 
         cols = BatchColumns(batch)
-        _check_deprecated_patient_uid(cols, location="AnonymizerWorker.process_batch")
         batch_size = len(cols["note_text"])
         jitters = cols.get("jitter", [None] * batch_size)
         input_patient_ids = cols.get("patient_id", [None] * batch_size)
@@ -691,64 +666,7 @@ class AnonymizerWorker:
         return self.process_batch(batch)
 
 
-class AnonymizerSupervisor:
-    """
-    Deprecated supervisor shim for backwards compatibility.
-
-    Delegates directly to AnonymizerWorker in-process. Ray Data now drives
-    AnonymizerWorker directly with hang protection provided by Ray Data's
-    execution-level no-progress timeout.
-    """
-
-    def __init__(
-        self,
-        salt: bytes,
-        key: bytes,
-        acc_num_salt: str | None = None,
-        acc_num_study_id: str | None = None,
-        jitter_required: bool = False,
-        **kwargs: Any,
-    ) -> None:
-        """
-        Initialize supervisor shim (deprecated).
-
-        Args:
-            salt: 32-byte salt for HIPS anonymizers.
-            key: 32-byte key for HIPS anonymizers.
-            acc_num_salt: Salt for accession number hashing.
-            acc_num_study_id: Study ID for accession number hashing.
-            jitter_required: If True, notes without a jitter value fail instead
-                of computing one automatically.
-            **kwargs: Deprecated parameters. Passing any deprecated argument
-                will raise a ValueError with a deprecation warning.
-        """
-        import warnings
-
-        from tide2.actors import check_deprecated_actor_kwargs
-
-        warnings.warn(
-            "AnonymizerSupervisor is deprecated and will be removed in a future release. "
-            "Pass AnonymizerWorker (or AnonymizerActor) directly to map_batches.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        check_deprecated_actor_kwargs(kwargs, "AnonymizerSupervisor")
-        self.worker = AnonymizerWorker(
-            salt=salt,
-            key=key,
-            acc_num_salt=acc_num_salt,
-            acc_num_study_id=acc_num_study_id,
-            jitter_required=jitter_required,
-        )
-
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """Delegate batch processing directly to in-process worker."""
-        return self.worker.process_batch(batch)
-
-
-# Backwards compatibility aliases
 AnonymizerActor = AnonymizerWorker
-AnonymizerWorkerActor = ray.remote(AnonymizerWorker)
 
 
 def _load_key_material(key_material: bytes | str | os.PathLike) -> bytes:
@@ -766,7 +684,6 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
-    **kwargs: Any,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -781,8 +698,6 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
-        **kwargs: Deprecated parameters. Passing any deprecated argument
-            will raise a ValueError with a deprecation warning.
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -797,9 +712,6 @@ def create_anonymizer_actor(
         # Mixed
         Actor = create_anonymizer_actor(Path("/keys/salt.key"), key_bytes)
     """
-    from tide2.actors import check_deprecated_actor_kwargs
-
-    check_deprecated_actor_kwargs(kwargs, "create_anonymizer_actor")
     # Load key material (handles both bytes and file paths)
     salt_bytes = _load_key_material(salt)
     key_bytes = _load_key_material(key)

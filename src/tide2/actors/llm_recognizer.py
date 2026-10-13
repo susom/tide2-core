@@ -3,16 +3,9 @@ Ray Actor for LLM-based PHI recognition processing.
 
 This module provides a Ray Actor that uses LlmJsonRecognizer for LLM-based
 entity detection in clinical text. Each actor instance holds a single
-LlmJsonRecognizer and processes batches of notes serially.
-
-Architecture:
-    LlmRecognizerSupervisor (used by map_batches)
-        └── LlmRecognizerWorker (does actual processing, can be killed on timeout)
-
-    The supervisor pattern enables batch-level timeouts. When a batch hangs
-    (e.g., an HTTP call blocks indefinitely), ray.kill() terminates the worker
-    process and a new worker is spawned. The batch is returned empty so notes
-    retry on the next run.
+LlmJsonRecognizer and processes batches of notes serially. Ray Data drives
+``LlmRecognizerWorker`` directly; a hang (for example an HTTP call that never
+returns) is caught by Ray Data's execution-level no-progress timeout.
 
 Concurrency:
     Each actor processes notes serially within a batch. Throughput comes from
@@ -28,12 +21,10 @@ from datetime import datetime
 from functools import partial
 from typing import Any
 
-import ray
 from presidio_analyzer import RecognizerResult
 
 from tide2.recognizers.llm_json_recognizer import LlmJsonRecognizer
 from tide2.utils.batch_columns import BatchColumns
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
@@ -67,7 +58,6 @@ class LlmRecognizerWorker:
         max_retries: int = 3,
         context_length: int = DEFAULT_CONTEXT_LENGTH,
         prompt_name: str = "phi_detection",
-        **kwargs: Any,
     ) -> None:
         """
         Initialize the worker with an LlmJsonRecognizer.
@@ -84,13 +74,7 @@ class LlmRecognizerWorker:
             context_length: Model context window in tokens. Used to derive the
                 maximum chunk size for long notes (context_length * 4 chars/token).
             prompt_name: Name of the prompt config in resources/llm_prompts/ (default: "phi_detection").
-            **kwargs: Deprecated parameters. Passing any deprecated argument
-                will raise a ValueError with a deprecation warning.
         """
-        from tide2.actors import check_deprecated_actor_kwargs
-
-        check_deprecated_actor_kwargs(kwargs, "LlmRecognizerWorker")
-
         self.recognizer = LlmJsonRecognizer(
             project_id=project_id,
             provider_type=provider_type,
@@ -215,7 +199,6 @@ class LlmRecognizerWorker:
         stage_statuses: list[str | None] = []
 
         cols = BatchColumns(batch)
-        _check_deprecated_patient_uid(cols, location="LlmRecognizerActor.process_batch")
         batch_size = len(cols["note_text"])
         note_texts = cols["note_text"]
         input_text_hashes = cols["text_hash"]
@@ -273,75 +256,4 @@ class LlmRecognizerWorker:
         return self.process_batch(batch)
 
 
-class LlmRecognizerSupervisor:
-    """
-    Deprecated supervisor shim for backwards compatibility.
-
-    Delegates directly to LlmRecognizerWorker in-process. Ray Data now drives
-    LlmRecognizerWorker directly with hang protection provided by Ray Data's
-    execution-level no-progress timeout.
-    """
-
-    def __init__(
-        self,
-        project_id: str | int,
-        provider_type: str = "google",
-        model_name: str | None = None,
-        temperature: float = 0.0,
-        max_tokens: int = 2000,
-        region: str = "us-central1",
-        endpoint_id: int | None = None,
-        max_retries: int = 3,
-        context_length: int = DEFAULT_CONTEXT_LENGTH,
-        prompt_name: str = "phi_detection",
-        **kwargs: Any,
-    ) -> None:
-        """
-        Initialize supervisor shim (deprecated).
-
-        Args:
-            project_id: Google Cloud project ID or project number.
-            provider_type: LLM provider type (e.g., 'google', 'openai', 'anthropic').
-            model_name: Name of the model to use.
-            temperature: Model temperature for response generation.
-            max_tokens: Maximum tokens for LLM output.
-            region: Cloud region for the API.
-            endpoint_id: Optional Vertex AI endpoint ID.
-            max_retries: Maximum retry attempts for failed LLM requests.
-            context_length: Model context window in tokens.
-            prompt_name: Name of the prompt config in resources/llm_prompts/.
-            **kwargs: Deprecated parameters. Passing any deprecated argument
-                will raise a ValueError with a deprecation warning.
-        """
-        import warnings
-
-        from tide2.actors import check_deprecated_actor_kwargs
-
-        warnings.warn(
-            "LlmRecognizerSupervisor is deprecated and will be removed in a future release. "
-            "Pass LlmRecognizerWorker (or LlmRecognizerActor) directly to map_batches.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        check_deprecated_actor_kwargs(kwargs, "LlmRecognizerSupervisor")
-        self.worker = LlmRecognizerWorker(
-            project_id=project_id,
-            provider_type=provider_type,
-            model_name=model_name,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            region=region,
-            endpoint_id=endpoint_id,
-            max_retries=max_retries,
-            context_length=context_length,
-            prompt_name=prompt_name,
-        )
-
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """Delegate batch processing directly to in-process worker."""
-        return self.worker.process_batch(batch)
-
-
-# Backwards compatibility aliases
 LlmRecognizerActor = LlmRecognizerWorker
-LlmRecognizerWorkerActor = ray.remote(LlmRecognizerWorker)

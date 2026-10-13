@@ -20,7 +20,6 @@ from typing import Any
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.nulls import is_null
 
 
@@ -92,7 +91,6 @@ class AccessionNumberHashAnonymizer(Operator):
         Returns:
             16-character uppercase hexadecimal hash
         """
-        _check_deprecated_patient_uid(params, location="accession_number_hash params")
         salt = params.get("salt")
         study_id = params.get("study_id")
         # Read patient_id for SQL entity component; entity_type is reserved by Presidio
@@ -120,9 +118,8 @@ class AccessionNumberHashAnonymizer(Operator):
             params: Dictionary that may contain 'entity_type', 'salt', 'study_id', 'patient_id'
 
         Raises:
-            ValueError: If entity_type is provided but not supported or if deprecated patient_uid is used
+            ValueError: If entity_type is provided but not supported
         """
-        _check_deprecated_patient_uid(params, location="accession_number_hash params")
         entity_type = params.get("entity_type", "DEFAULT")
         if entity_type not in self.entities_supported:
             raise ValueError(

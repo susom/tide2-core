@@ -38,7 +38,6 @@ import logging
 import math
 import os
 import time
-import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import replace
@@ -56,7 +55,7 @@ import ray.data.exceptions
 from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
+from tide2.utils.batch_columns import check_no_patient_uid
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import merge_stage_status
@@ -88,93 +87,26 @@ from .utils import write_text_file
 logger = logging.getLogger(__name__)
 
 KEY_SIZE_BYTES = 32
-DEFAULT_RECOGNITION_BATCH_TIMEOUT = 120
-DEFAULT_LLM_BATCH_TIMEOUT = 300
 
 
 def _resolve_slot_cpus(
-    num_cpus: int | float | None,
     worker_num_cpus: int | float | None,
     stage_name: str = "",
 ) -> tuple[float, dict[str, Any], dict[str, Any]]:
-    """Resolve pool slot CPU reservation, preserving pre-collapse accounting.
-
-    Before removing the supervisor tier, each pool slot reserved ``num_cpus`` for
-    the supervisor actor plus ``worker_num_cpus`` (defaulting to 1.0) for the
-    spawned worker actor. To maintain exact cluster resource allocation across
-    all existing callers and configurations, this helper adds the two values together:
-        slot_cpus = float(num_cpus or 0.0) + (1.0 if worker_num_cpus is None else float(worker_num_cpus))
-
-    Args:
-        num_cpus: CPUs per actor/slot (deprecated).
-        worker_num_cpus: CPUs reserved for the worker actor.
-        stage_name: Name of the pipeline stage for logging/warnings.
+    """Return the CPUs one actor reserves (``worker_num_cpus``, default 1.0) and its Ray remote args.
 
     Returns:
         Tuple of (slot_cpus, ray_remote_args, resolved_config_dict).
     """
-    if num_cpus:
-        import warnings
-
-        warnings.warn(
-            f"{stage_name + ': ' if stage_name else ''}`num_cpus` (or `--cpus-per-actor` / YAML `cpus_per_actor`) "
-            "for stage actors is deprecated in favor of `worker_num_cpus`. "
-            "Total reserved CPUs per pool slot remain identical via additive resolution. "
-            "(Note: runner cluster-level `LocalJobRunner(num_cpus=...)` is unchanged.)",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-
-    slot_cpus = float(num_cpus or 0.0) + (1.0 if worker_num_cpus is None else float(worker_num_cpus))
+    slot_cpus = 1.0 if worker_num_cpus is None else float(worker_num_cpus)
     ray_remote_args = get_ray_remote_args_cpu(num_cpus=slot_cpus)
     resolved = {
         "stage": stage_name,
-        "input_num_cpus": num_cpus,
         "input_worker_num_cpus": worker_num_cpus,
         "resolved_slot_cpus": slot_cpus,
         "ray_remote_args": ray_remote_args,
     }
     return slot_cpus, ray_remote_args, resolved
-
-
-DEPRECATED_TRANSFORMER_KWARGS: frozenset[str] = frozenset(
-    {
-        "chunk_size",
-        "flat_map_cpus",
-        "compile_model",
-        "compile_cache_path",
-        "pre_chunked",
-        "short_seq_budget",
-    }
-)
-
-
-def _check_deprecated_transformer_kwargs(kwargs: dict[str, Any], caller_name: str) -> None:
-    """Validate keyword arguments against deprecated transformer parameters.
-
-    Args:
-        kwargs: Keyword arguments passed to run_transformer.
-        caller_name: Name of the calling function/method for error messages.
-
-    Raises:
-        ValueError: If any deprecated parameter is supplied.
-        TypeError: If an unrecognized parameter is supplied.
-    """
-    for param in (
-        "chunk_size",
-        "flat_map_cpus",
-        "compile_model",
-        "compile_cache_path",
-        "pre_chunked",
-        "short_seq_budget",
-    ):
-        if param in kwargs:
-            msg = f"The parameter '{param}' is deprecated and no longer supported. Please remove it from your call."
-            warnings.warn(msg, DeprecationWarning, stacklevel=3)
-            raise ValueError(msg)
-    if kwargs:
-        unexpected = next(iter(kwargs))
-        raise TypeError(f"{caller_name}() got an unexpected keyword argument '{unexpected}'")
 
 
 def _configure_checkpoint(
@@ -321,7 +253,7 @@ def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
         lower_to_actual[lower] = name
         actual_to_lower[name] = lower
 
-    _check_deprecated_patient_uid(schema.names, location=f"schema of {files[0] if isinstance(files, list) else files}")
+    check_no_patient_uid(schema.names, f"schema of {files[0] if isinstance(files, list) else files}")
 
     if "note_text" not in lower_to_actual:
         raise ValueError("Input data must contain a 'note_text' column")
@@ -1061,14 +993,12 @@ class LocalJobRunner:
             **get_ray_remote_args_cpu(num_cpus=agg_num_cpus),
         )
 
-    def run_recognition(  # noqa: PLR0915
+    def run_recognition(
         self,
         input_path: str | list[str],
         output_path: str,
         num_actors: int | None = None,
         batch_size: int = 150,
-        batch_timeout: int = 120,
-        num_cpus: int | float = 2,
         read_parallelism: int | None = None,
         read_cpus: float = 0.25,
         read_op_min_num_blocks: int = 200,
@@ -1099,15 +1029,12 @@ class LocalJobRunner:
             output_path: Output directory (local path, network mount, or ``gs://`` URI)
             num_actors: Actor count (auto-detect if None)
             batch_size: Batch size per actor
-            num_cpus: CPUs per actor (affects streaming executor scheduling)
             read_parallelism: Number of read output blocks (default: num input files)
             read_cpus: CPUs per read task (lower = more concurrent reads)
             read_op_min_num_blocks: Minimum read output blocks for DataContext
             target_max_block_size_mb: Max block size in MB for DataContext
             target_min_block_size_mb: Min block size in MB for DataContext
-            worker_num_cpus: CPUs to reserve for each supervisor's worker actor.
-                None = Ray default (1). Each pool slot needs supervisor
-                (num_cpus) + worker (worker_num_cpus) CPUs; lower both to fit
+            worker_num_cpus: CPUs reserved for each actor (None = 1.0); lower it to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
                 reproduces Ray's default task reservation.
@@ -1145,20 +1072,8 @@ class LocalJobRunner:
         make_output_dir(output_dir)
         shutdown = GracefulShutdown()
 
-        # Warn if batch_timeout was passed
-        if batch_timeout != DEFAULT_RECOGNITION_BATCH_TIMEOUT:
-            import warnings
-
-            warnings.warn(
-                "`batch_timeout` is deprecated and ignored; Ray Data's execution-level "
-                "no-progress timeout now guards against hangs.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         # Resolve slot CPU reservation
         _slot_cpus, ray_remote_args, resolved_cpus = _resolve_slot_cpus(
-            num_cpus=num_cpus,
             worker_num_cpus=worker_num_cpus,
             stage_name="run_recognition",
         )
@@ -1194,7 +1109,7 @@ class LocalJobRunner:
         logger.info(f"  Output: {output_path}")
         logger.info(
             f"  Actors: {num_actors}, Batch size: {batch_size}, "
-            f"Slot CPUs: {_slot_cpus} (from num_cpus={num_cpus}, worker_num_cpus={worker_num_cpus}), "
+            f"Slot CPUs: {_slot_cpus} (worker_num_cpus={worker_num_cpus}), "
             f"no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}"
         )
         logger.info(f"  Resolved CPU config: {resolved_cpus}")
@@ -1280,8 +1195,6 @@ class LocalJobRunner:
         max_retries: int = 3,
         num_actors: int | None = None,
         batch_size: int = 10,
-        batch_timeout: int = 300,
-        num_cpus: int | float = 1,
         worker_num_cpus: int | float | None = None,
         read_parallelism: int | None = None,
         read_cpus: float = 0.25,
@@ -1321,10 +1234,8 @@ class LocalJobRunner:
             num_actors: Actor count (auto-detect if None)
             batch_size: Batch size per actor (default: 10, lower than regex recognizer
                 because each note requires an LLM API call)
-            batch_timeout: Seconds before a batch is killed (default: 300)
-            num_cpus: CPUs per supervisor actor
-            worker_num_cpus: CPUs per worker actor (None = Ray default of 1).
-                Set to 0 along with num_cpus=0 for I/O-bound oversubscription.
+            worker_num_cpus: CPUs reserved for each actor (None = 1.0). Set it to 0 to
+                oversubscribe an I/O-bound stage.
             read_parallelism: Number of read output blocks (default: num input files)
             read_cpus: CPUs per read task (lower = more concurrent reads)
             read_op_min_num_blocks: Minimum read output blocks for DataContext
@@ -1362,20 +1273,8 @@ class LocalJobRunner:
         make_output_dir(output_dir)
         shutdown = GracefulShutdown()
 
-        # Warn if batch_timeout was passed
-        if batch_timeout != DEFAULT_LLM_BATCH_TIMEOUT:
-            import warnings
-
-            warnings.warn(
-                "`batch_timeout` is deprecated and ignored; Ray Data's execution-level "
-                "no-progress timeout now guards against hangs.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         # Resolve slot CPU reservation
         _slot_cpus, ray_remote_args, resolved_cpus = _resolve_slot_cpus(
-            num_cpus=num_cpus,
             worker_num_cpus=worker_num_cpus,
             stage_name="run_llm_recognition",
         )
@@ -1411,7 +1310,7 @@ class LocalJobRunner:
         logger.info(f"  Model: {model_name} (provider: {provider_type}, prompt: {prompt_name})")
         logger.info(
             f"  Actors: {num_actors}, Batch size: {batch_size}, "
-            f"Slot CPUs: {_slot_cpus} (from num_cpus={num_cpus}, worker_num_cpus={worker_num_cpus}), "
+            f"Slot CPUs: {_slot_cpus} (worker_num_cpus={worker_num_cpus}), "
             f"no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}"
         )
         logger.info(f"  Resolved CPU config: {resolved_cpus}")
@@ -1504,7 +1403,6 @@ class LocalJobRunner:
         key_path: str | None = None,
         num_actors: int | None = None,
         batch_size: int = 200,
-        num_cpus: int | float = 2,
         read_parallelism: int | None = None,
         read_cpus: float = 0.25,
         read_op_min_num_blocks: int = 200,
@@ -1538,7 +1436,6 @@ class LocalJobRunner:
             key_path: Path to FPE key file, a local path or ``gs://`` URI (use with ``salt_path``)
             num_actors: Actor count (auto-detect if None)
             batch_size: Batch size per actor
-            num_cpus: CPUs per actor (affects streaming executor scheduling)
             read_parallelism: Number of read output blocks (default: num input files)
             read_cpus: CPUs per read task (lower = more concurrent reads)
             read_op_min_num_blocks: Minimum read output blocks for DataContext
@@ -1548,9 +1445,7 @@ class LocalJobRunner:
             acc_num_study_id: Study ID for accession number hashing
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically
-            worker_num_cpus: CPUs to reserve for each supervisor's worker actor.
-                None = Ray default (1). Each pool slot needs supervisor
-                (num_cpus) + worker (worker_num_cpus) CPUs; lower both to fit
+            worker_num_cpus: CPUs reserved for each actor (None = 1.0); lower it to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
                 reproduces Ray's default task reservation. Note the follow-up
@@ -1608,7 +1503,6 @@ class LocalJobRunner:
 
         # Resolve slot CPU reservation
         _slot_cpus, ray_remote_args, resolved_cpus = _resolve_slot_cpus(
-            num_cpus=num_cpus,
             worker_num_cpus=worker_num_cpus,
             stage_name="run_anonymization",
         )
@@ -1634,7 +1528,7 @@ class LocalJobRunner:
         logger.info(f"  Output: {output_path}")
         logger.info(
             f"  Actors: {num_actors}, Batch size: {batch_size}, "
-            f"Slot CPUs: {_slot_cpus} (from num_cpus={num_cpus}, worker_num_cpus={worker_num_cpus}), "
+            f"Slot CPUs: {_slot_cpus} (worker_num_cpus={worker_num_cpus}), "
             f"no_progress_timeout_s={getattr(ctx, 'execution_no_progress_timeout_s', None)}"
         )
         logger.info(f"  Resolved CPU config: {resolved_cpus}")
@@ -1734,7 +1628,7 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_transformer(  # noqa: PLR0915
+    def run_transformer(
         self,
         input_path: str | list[str],
         output_path: str,
@@ -1755,7 +1649,6 @@ class LocalJobRunner:
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
         _id_column: str = "text_hash",
-        **kwargs: Any,
     ) -> dict[str, Any]:
         """
         Run transformer NER job with token-accurate windowing.
@@ -1860,7 +1753,6 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
-        _check_deprecated_transformer_kwargs(kwargs, "LocalJobRunner.run_transformer")
         from tide2.actors import create_transformer_actor
         from tide2.transformers.config import load_model_config
 
@@ -2127,7 +2019,7 @@ class LocalJobRunner:
                 e.g. bucket_name, project_id, num_gpus, batch_size,
                 gpu_batch_size, chunk_overlap.
             recognizer_kwargs: Extra kwargs passed to self.run_recognition().
-                e.g. num_actors, batch_size, batch_timeout, num_cpus.
+                e.g. num_actors, batch_size, worker_num_cpus.
             anonymizer_kwargs: Extra kwargs passed to self.run_anonymization().
                 e.g. num_actors, batch_size, acc_num_salt, acc_num_study_id.
             llm_recognizer_mode: LLM recognizer mode. One of:
@@ -2620,12 +2512,12 @@ class LocalJobRunner:
             llm_actors = int(llm_recognizer_kwargs.get("num_actors") or 4)
             # Network-bound: it reserves CPU but barely uses any, so keep the
             # slot reservation small and the pool size independent of the budget.
-            llm_remote_args = get_ray_remote_args_cpu(num_cpus=float(llm_recognizer_kwargs.get("num_cpus") or 0.25))
+            llm_slot = llm_recognizer_kwargs.get("worker_num_cpus")
+            llm_remote_args = get_ray_remote_args_cpu(num_cpus=0.25 if llm_slot is None else float(llm_slot))
             pool_minimums["llm_recognizer"] = float(llm_remote_args["num_cpus"])
 
         if not use_llm:
             r_slot, r_remote_args, _ = _resolve_slot_cpus(
-                num_cpus=recognizer_kwargs.get("num_cpus"),
                 worker_num_cpus=recognizer_kwargs.get("worker_num_cpus"),
                 stage_name="streamed recognizer",
             )
@@ -2634,7 +2526,6 @@ class LocalJobRunner:
             pool_minimums["recognizer"] = r_slot * rec_min
 
         a_slot, a_remote_args, _ = _resolve_slot_cpus(
-            num_cpus=anonymizer_kwargs.get("num_cpus"),
             worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
             stage_name="streamed anonymizer",
         )
@@ -2701,7 +2592,9 @@ class LocalJobRunner:
             )
 
             if use_llm:
-                llm_kwargs = {k: v for k, v in llm_recognizer_kwargs.items() if k not in ("num_actors", "num_cpus")}
+                llm_kwargs = {
+                    k: v for k, v in llm_recognizer_kwargs.items() if k not in ("num_actors", "worker_num_cpus")
+                }
                 llm_kwargs.setdefault("provider_type", "google")
                 llm_kwargs.setdefault("model_name", "gemini-2.5-flash")
                 llm_kwargs.setdefault("prompt_name", "phi_detection")
@@ -3028,7 +2921,6 @@ def run_transformer_simple(
     num_cpus: int | None = None,
     object_store_gb: int | None = None,
     num_agg_actors: int | None = None,
-    **kwargs: Any,
 ) -> dict[str, Any]:
     """
     Simple function to run transformer NER job.
@@ -3045,13 +2937,10 @@ def run_transformer_simple(
         num_cpus: CPUs
         object_store_gb: Object store size GB
         num_agg_actors: Number of CPU actors for BIO aggregation (auto if None)
-        **kwargs: Deprecated parameters. Passing any deprecated argument
-            will raise a ValueError with a deprecation warning.
 
     Returns:
         Processing statistics
     """
-    _check_deprecated_transformer_kwargs(kwargs, "run_transformer_simple")
     runner = LocalJobRunner(
         num_cpus=num_cpus,
         num_gpus=num_gpus,

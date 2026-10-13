@@ -24,45 +24,9 @@ from tide2.runner.fault_tolerance import configure_data_context
 logger = logging.getLogger(__name__)
 
 
-# Flags that are parsed for backward compatibility but no longer do anything.
-# dest -> the message explaining what replaced it.
-_DEPRECATED_FLAGS: dict[str, str] = {
-    "chunk_size": (
-        "--chunk-size is deprecated and ignored: the per-window token budget is now the "
-        "model's real context window (MODEL_MAX_LENGTH). Remove it; use --chunk-overlap "
-        "to control window overlap."
-    ),
-    "batch_timeout": (
-        "--batch-timeout is deprecated and ignored: per-batch killing has been replaced "
-        "by Ray Data's execution-level no-progress timeout (--no-progress-timeout)."
-    ),
-}
-
-
-def _warn_deprecated_flags(args: argparse.Namespace) -> None:
-    """Emit a DeprecationWarning and fail fast for every deprecated flag present in *args*.
-
-    Args:
-        args: Parsed CLI namespace; each dest in :data:`_DEPRECATED_FLAGS` that
-            was actually supplied produces one warning and halts execution.
-    """
-    import warnings
-
-    errors = []
-    for dest, message in _DEPRECATED_FLAGS.items():
-        if getattr(args, dest, None) is not None:
-            warnings.warn(message, DeprecationWarning, stacklevel=2)
-            errors.append(message)
-    if errors:
-        sys.stderr.write("error: " + "\nerror: ".join(errors) + "\n")
-        sys.exit(2)
-
-
 def cmd_run(args: argparse.Namespace) -> None:
     """Run a job."""
     from tide2.runner.local_runner import LocalJobRunner
-
-    _warn_deprecated_flags(args)
 
     # Validate required fields (may come from CLI or config)
     if not args.input:
@@ -98,8 +62,6 @@ def cmd_run(args: argparse.Namespace) -> None:
     optional_kwargs: dict = {}
     for attr, key in [
         ("batch_size", "batch_size"),
-        ("batch_timeout", "batch_timeout"),
-        ("cpus_per_actor", "num_cpus"),
         ("read_parallelism", "read_parallelism"),
         ("read_cpus", "read_cpus"),
         ("read_op_min_num_blocks", "read_op_min_num_blocks"),
@@ -187,8 +149,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("max_retries", "max_retries"),
                 ("num_actors", "num_actors"),
                 ("batch_size", "batch_size"),
-                ("batch_timeout", "batch_timeout"),
-                ("cpus_per_actor", "num_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("read_parallelism", "read_parallelism"),
                 ("read_cpus", "read_cpus"),
@@ -241,8 +201,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             for attr, key in [
                 ("num_actors", "num_actors"),
                 ("batch_size", "batch_size"),
-                ("batch_timeout", "batch_timeout"),
-                ("cpus_per_actor", "num_cpus"),
                 ("read_cpus", "read_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -262,7 +220,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             for attr, key in [
                 ("num_actors", "num_actors"),
                 ("batch_size", "batch_size"),
-                ("cpus_per_actor", "num_cpus"),
                 ("acc_num_salt", "acc_num_salt"),
                 ("acc_num_study_id", "acc_num_study_id"),
                 ("read_cpus", "read_cpus"),
@@ -303,7 +260,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                     ("max_retries", "max_retries"),
                     ("num_actors", "num_actors"),
                     ("batch_size", "batch_size"),
-                    ("batch_timeout", "batch_timeout"),
                     ("prompt_name", "prompt_name"),
                 ]:
                     val = getattr(args, attr, None)
@@ -409,11 +365,6 @@ Examples:
     run_p.add_argument("--num-actors", type=int, help="Number of actors (auto-detect if not set)")
     run_p.add_argument("--batch-size", type=int, help="Batch size per actor (default: 150 recognizer, 200 anonymizer)")
     run_p.add_argument(
-        "--batch-timeout",
-        type=int,
-        help="DEPRECATED and ignored: per-batch timeout replaced by execution-level --no-progress-timeout",
-    )
-    run_p.add_argument(
         "--no-progress-timeout",
         dest="no_progress_timeout_s",
         type=float,
@@ -437,7 +388,6 @@ Examples:
         "the actor halves and retries on OOM. Nominal default if not set.",
     )
     run_p.add_argument("--object-store-gb", type=int, help="Object store memory in GB")
-    run_p.add_argument("--cpus-per-actor", type=float, help="Deprecated: use --worker-num-cpus (default: 2)")
     run_p.add_argument("--read-parallelism", type=int, help="Number of read output blocks")
     run_p.add_argument("--read-cpus", type=float, help="CPUs per read task (default: 0.25)")
     run_p.add_argument("--read-op-min-num-blocks", type=int, help="Min read output blocks (default: 200)")
@@ -446,8 +396,7 @@ Examples:
     run_p.add_argument(
         "--worker-num-cpus",
         type=float,
-        help="CPUs per supervisor worker actor (recognizer/anonymizer/llm-recognizer/pipeline). "
-        "Lower to fit small boxes; default: Ray default (1)",
+        help="CPUs per actor (recognizer/anonymizer/llm-recognizer/pipeline). Lower to fit small boxes; default: 1",
     )
     run_p.add_argument(
         "--write-cpus",
@@ -479,12 +428,6 @@ Examples:
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")
     run_p.add_argument("--bucket-name", help="GCS bucket for model loading (transformer jobs)")
     run_p.add_argument("--project-id", help="GCP project ID for model loading (transformer jobs)")
-    run_p.add_argument(
-        "--chunk-size",
-        type=int,
-        help="DEPRECATED and ignored (transformer/pipeline jobs): the per-window token budget is now "
-        "the model's real context window (MODEL_MAX_LENGTH), not a separate chunk size.",
-    )
     run_p.add_argument(
         "--chunk-overlap",
         type=int,

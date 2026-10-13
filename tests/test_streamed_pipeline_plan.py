@@ -404,7 +404,7 @@ class TestPlanShape:
                 lr.LocalJobRunner(),
                 df,
                 streamed_env["output_dir"],
-                recognizer_kwargs={"num_cpus": 2, "num_actors": 8},
+                recognizer_kwargs={"worker_num_cpus": 2, "num_actors": 8},
             )
 
 

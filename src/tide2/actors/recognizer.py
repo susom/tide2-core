@@ -6,12 +6,8 @@ processing batches of clinical notes. Each actor instance holds a single
 AnalyzerEngine with regex-based recognizers, and uses pre-computed DL results
 passed via ad-hoc recognizers.
 
-Architecture:
-    RecognizerSupervisor (used by map_batches)
-        └── RecognizerWorker (does actual processing, can be killed on timeout)
-
-    The supervisor pattern enables true note-level timeouts. When a note hangs,
-    ray.kill() terminates the worker process and a new worker is spawned.
+Ray Data drives ``RecognizerWorker`` directly; a hang is caught by Ray Data's
+execution-level no-progress timeout.
 
 Thread/Process Safety:
     Each Actor maintains its own AnalyzerEngine instance. A blank spaCy tokenizer
@@ -30,7 +26,6 @@ from functools import partial
 from typing import Any
 
 import orjson
-import ray
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer import EntityRecognizer
 from presidio_analyzer import RecognizerRegistry
@@ -55,7 +50,6 @@ from tide2.recognizers import UrlRecognizer
 from tide2.recognizers import create_cached_recognizer
 from tide2.recognizers import create_recognizers_for_patient
 from tide2.utils.batch_columns import BatchColumns
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import row_id_patient_part
@@ -219,7 +213,7 @@ class RecognizerWorker:
         analyzer: The Presidio AnalyzerEngine instance with regex recognizers.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self) -> None:
         """
         Initialize the worker with an AnalyzerEngine.
 
@@ -227,10 +221,6 @@ class RecognizerWorker:
         regex-based recognizers, and disables context enhancement for maximum
         throughput in batch processing scenarios.
         """
-        from tide2.actors import check_deprecated_actor_kwargs
-
-        check_deprecated_actor_kwargs(kwargs, "RecognizerWorker")
-
         # Patch Presidio's O(n²) remove_duplicates with a no-op passthrough.
         # Deduplication is handled downstream on the anonymizer side.
         from tide2.anonymizers.presidio_patches import patch_remove_duplicates
@@ -297,9 +287,6 @@ class RecognizerWorker:
     ) -> dict[str, Any]:
         """
         Process a single note and return results.
-
-        This method is called by RecognizerSupervisor for each note.
-        If this method hangs, the supervisor will kill this worker via ray.kill().
 
         Args:
             note_text: The note text to process.
@@ -496,8 +483,6 @@ class RecognizerWorker:
     def process_batch(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """
         Process a batch of notes in a single call. No IPC per note.
-
-        Called by RecognizerSupervisor to avoid per-note ray.get() overhead.
         Each note is processed via process_note() internally.
 
         Args:
@@ -517,7 +502,6 @@ class RecognizerWorker:
         stage_statuses = []
 
         cols = BatchColumns(batch)
-        _check_deprecated_patient_uid(cols, location="RecognizerWorker.process_batch")
         batch_size = len(cols["note_text"])
         note_texts = cols["note_text"]
         input_text_hashes = cols["text_hash"]
@@ -589,41 +573,4 @@ class RecognizerWorker:
         return self.process_batch(batch)
 
 
-class RecognizerSupervisor:
-    """
-    Deprecated supervisor shim for backwards compatibility.
-
-    Delegates directly to RecognizerWorker in-process. Ray Data now drives
-    RecognizerWorker directly with hang protection provided by Ray Data's
-    execution-level no-progress timeout.
-    """
-
-    def __init__(self, **kwargs: Any) -> None:
-        """
-        Initialize supervisor shim (deprecated).
-
-        Args:
-            **kwargs: Deprecated parameters. Passing any deprecated argument
-                will raise a ValueError with a deprecation warning.
-        """
-        import warnings
-
-        from tide2.actors import check_deprecated_actor_kwargs
-
-        warnings.warn(
-            "RecognizerSupervisor is deprecated and will be removed in a future release. "
-            "Pass RecognizerWorker (or RecognizerActor) directly to map_batches.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        check_deprecated_actor_kwargs(kwargs, "RecognizerSupervisor")
-        self.worker = RecognizerWorker()
-
-    def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
-        """Delegate batch processing directly to in-process worker."""
-        return self.worker.process_batch(batch)
-
-
-# Backwards compatibility aliases
 RecognizerActor = RecognizerWorker
-RecognizerWorkerActor = ray.remote(RecognizerWorker)

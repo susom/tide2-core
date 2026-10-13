@@ -52,7 +52,6 @@ from tide2.transformers.core import _dedupe_raw_predictions
 from tide2.transformers.core import _Window
 from tide2.transformers.core import plan_windows
 from tide2.utils.batch_columns import BatchColumns
-from tide2.utils.batch_columns import _check_deprecated_patient_uid
 from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
@@ -351,7 +350,6 @@ class TransformerInferenceActor:
                   with document-relative char offsets
         """
         cols = BatchColumns(batch)
-        _check_deprecated_patient_uid(cols, location="TransformerInferenceWorker")
         note_texts = cols["note_text"]
         text_hashes = cols["text_hash"]
         patient_ids = cols.get("patient_id", [None] * len(note_texts))
@@ -696,7 +694,6 @@ class BIOAggregationActor:
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Aggregate raw BIO tokens into document-level recognizer results."""
         cols = BatchColumns(batch)
-        _check_deprecated_patient_uid(cols, location="BIOAggregationActor")
         note_texts = ["" if is_null(t) else str(t) for t in cols["note_text"]]
         raw_json_list = cols["predictions_raw_json"]
         text_hashes = cols["text_hash"]
