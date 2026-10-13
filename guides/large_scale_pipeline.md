@@ -159,7 +159,7 @@ tide2-runner run llm-recognizer \
   -i /shared_fs/data/shards/shard_01.parquet \
   -o /shared_fs/runs/run_01/shard_01/llm_recognizer_output \
   --project-id my-gcp-project \
-  --model gemini-1.5-flash
+  --model gemini-2.5-flash
 ```
 
 #### Python Equivalent
@@ -171,7 +171,7 @@ runner.run_llm_recognition(
     input_path="/shared_fs/data/shards/shard_01.parquet",
     output_path="/shared_fs/runs/run_01/shard_01/llm_recognizer_output",
     project_id="my-gcp-project",
-    model_name="gemini-1.5-flash",
+    model_name="gemini-2.5-flash",
 )
 ```
 
@@ -328,7 +328,7 @@ Every stage supports independent row-level checkpointing for resume capability:
   $$\text{Checkpoint Path} = \langle\text{output\_dir}\rangle\text{\_ray\_checkpoint}$$
 - **Configured Checkpoint Key**: Ray keys the checkpoint directory on the stage's configured ID column:
   - `run_pipeline` and `run_anonymization` checkpoint on `row_id`.
-  - Standalone `run_transformer` and `run_recognition` default to `text_hash` (pass `_id_column="row_id"` in Python to checkpoint on `row_id`).
+  - Standalone `run_transformer`, `run_recognition`, and `run_llm_recognition` default to `text_hash` (pass `_id_column="row_id"` in Python to checkpoint on `row_id`).
 - **Two-Phase Commit Protocol**:
   1. The task writes a `.pending` checkpoint file.
   2. The task writes the Parquet output data file.
@@ -410,6 +410,7 @@ The `tide2.runner.hardware` module detects physical and container resources (CPU
 - `gpu` (CPUs $> 4$, GPUs $\ge 1$): Allocates up to 3 transformer worker actors per GPU based on available VRAM (requires ~7 GB per actor).
 - `cpu-stages` (CPUs $> 4$): Sets recognizer and anonymizer actors to approximately $87.5\%$ of host CPUs (for example, 14 actors on a 16-CPU host).
 - `tiny` (CPUs $\le 4$): Sets `enable_checkpoint: false` and allocates fractional CPUs to prevent Ray 2.55 reservation deadlocks on small VMs.
+  - **Standalone Stage Requirement**: Automatic `tiny` sizing (fractional CPUs and disabled checkpoints) is applied by `run_pipeline`. Standalone stage jobs (`run_transformer`, `run_recognition`, `run_anonymization`) auto-size actors but retain default task reservations (`read_cpus`, `write_cpus`) and enable checkpointing. On machines with $\le 4$ CPUs, standalone CLI commands must explicitly pass fractional CPU flags and `--no-checkpoint` (e.g. `--read-cpus 0.25 --write-cpus 0.25 --worker-num-cpus 0.5 --no-checkpoint`).
 - **User Overrides Always Win**: Any parameter specified on the CLI, via YAML config, or passed as a Python argument overrides the hardware autotune recommendations unconditionally.
 - **Opt-out**: Pass `--no-hardware-autotune` or set `hardware_autotune: false` to use safe static defaults.
 
