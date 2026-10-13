@@ -59,6 +59,7 @@ notebooks/sample_data/biomodern_bert_output/*
 notebooks/sample_data_i2b2/*
 notebooks/evaluation/phi_evaluation_results_files/*
 examples/
+notebooks/sample_data/input_notes.parquet
 notebooks/sample_data/pipeline_output
 notebooks/sample_data/pipeline_output_mac_test
 notebooks/sample_data/pipeline_output_cpu_test
