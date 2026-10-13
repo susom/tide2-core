@@ -89,9 +89,6 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # =========================================================================
 # Pipeline-specific (tide2-runner run pipeline)
 # =========================================================================
-# run_transformer: true
-# run_recognizer: true
-# run_anonymizer: true
 # produce_visualizer_json: false
 # salt_hex: "00" * 32
 # key_hex: "11" * 32

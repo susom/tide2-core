@@ -206,6 +206,24 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
 are executed. **`discrete` is the default and the production mode; nothing about
 it changed.**
 
+The stages depend only on the LLM mode (`--llm-recognizer-mode`):
+
+| Mode | Stages |
+|---|---|
+| `off` (default) | transformer, recognizer, anonymizer |
+| `only` | LLM recognizer, anonymizer |
+| `merge` | transformer, recognizer and LLM recognizer merged per note, anonymizer (discrete only) |
+
+`run_pipeline` has no switch to skip a stage. To run some stages only, or to run
+them on different machines, use the stage jobs. `tide2-runner run transformer`,
+`recognizer`, `llm-recognizer` and `anonymizer` take the same settings as the
+matching `run_pipeline` kwargs: `run_pipeline(transformer_kwargs=X)` does the same
+as `LocalJobRunner.run_transformer(input_path, output_path, **X)`, except for the
+hardware autotune (see below): `run_pipeline` fills every setting you left out and
+logs the resolved table, and the stage jobs fill only the actor counts and the GPU
+share. Each stage
+reads the folder the previous stage wrote.
+
 | | `discrete` (default) | `streamed` |
 |---|---|---|
 | Ray Data executions | one per stage | one for the whole pipeline |
@@ -400,7 +418,7 @@ Profile:  gpu-workstation   Model: stanford-med-hdr/tide2-sentry-clinical-ner (m
 ```
 
 **Opt out** with `--no-hardware-autotune` (CLI), `hardware_autotune: false`
-(YAML), or `hardware_autotune=False` (Python). The table is still logged, but
+(YAML), or `LocalJobRunner(hardware_autotune=False)` (Python). The table is still logged, but
 nothing is applied and the previous hard-coded defaults run. Benchmark protocols
 should pass it — a benchmark whose settings change with the host is not a
 benchmark.

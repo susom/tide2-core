@@ -816,8 +816,10 @@ class LocalJobRunner:
             no_progress_timeout_s: Ray Data hang-detection timeout applied to every
                 stage this runner launches. None = Ray Data's default. Stages reset
                 the DataContext per job, so the value is re-applied on each one.
-            hardware_autotune: Whether automatic hardware recommendations are enabled.
-                If False, automatic stage sizing recommendations are skipped.
+            hardware_autotune: Whether automatic hardware recommendations are enabled for every job
+                this runner runs: ``run_pipeline`` and the stage jobs. If False, the recommendations are
+                skipped and the built-in defaults run. It does not affect the Ray object store, which is
+                sized by ``object_store_gb`` or by Ray.
         """
         self.num_cpus = num_cpus
         self.num_gpus = num_gpus
@@ -890,21 +892,11 @@ class LocalJobRunner:
 
         self._initialized = True
 
-    def _auto_num_actors(self, fraction: float | None = None) -> int:
-        """Auto-detect number of actors from cluster resources.
-
-        Args:
-            fraction: Optional fraction override of cluster CPUs. If None,
-                derived from the hardware profile (e.g. ~0.875 on gpu-workstation).
-        """
+    def _auto_num_actors(self) -> int:
+        """Return the CPU actor count: the hardware recommendation, else 45% of the cluster CPUs."""
         hw = detect_hardware()
-        if fraction is not None:
-            return max(1, int(hw.cluster_cpu * fraction))
-        rec = recommend_settings(hw)
-        rec_actors = rec.recognizer.get("num_actors")
-        if rec_actors is not None:
-            return int(rec_actors)
-        return max(1, int(hw.cluster_cpu * 0.45))
+        rec_actors = recommend_settings(hw).recognizer.get("num_actors") if self.hardware_autotune else None
+        return int(rec_actors) if rec_actors is not None else max(1, int(hw.cluster_cpu * 0.45))
 
     def _resolve_transformer_resources(
         self,
@@ -918,10 +910,10 @@ class LocalJobRunner:
             Tuple of (num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors)
         """
         hw = detect_hardware()
-        rec = recommend_settings(hw)
+        rec_t = recommend_settings(hw).transformer if self.hardware_autotune else {}
 
         if num_gpus is None:
-            rec_gpus = rec.transformer.get("num_gpus")
+            rec_gpus = rec_t.get("num_gpus")
             num_gpus = rec_gpus if rec_gpus is not None else float(hw.cluster_gpu)
 
         cpu_only_mode = num_gpus == 0
@@ -929,7 +921,7 @@ class LocalJobRunner:
         if num_transformer_actors is None:
             # Each transformer actor is memory-intensive (~500MB+ for model)
             # CPU mode: limit actors; GPU mode: scale with GPUs
-            rec_actors = rec.transformer.get("num_transformer_actors")
+            rec_actors = rec_t.get("num_transformer_actors")
             if rec_actors is not None:
                 num_transformer_actors = rec_actors
             elif cpu_only_mode:
@@ -946,7 +938,7 @@ class LocalJobRunner:
             )
 
         if num_agg_actors is None:
-            rec_agg = rec.transformer.get("num_agg_actors")
+            rec_agg = rec_t.get("num_agg_actors")
             if rec_agg is not None:
                 num_agg_actors = rec_agg
             else:
@@ -1525,8 +1517,8 @@ class LocalJobRunner:
         self,
         input_path: str | list[str],
         output_path: str,
-        salt_path: str,
-        key_path: str,
+        salt_path: str | None = None,
+        key_path: str | None = None,
         num_actors: int | None = None,
         batch_size: int = 200,
         num_cpus: int | float = 2,
@@ -1542,6 +1534,8 @@ class LocalJobRunner:
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
         override_num_blocks: int | None = None,
+        salt_hex: str | None = None,
+        key_hex: str | None = None,
         dry_run: bool = False,
         _id_column: str = "row_id",
     ) -> dict[str, Any]:
@@ -1557,8 +1551,8 @@ class LocalJobRunner:
         Args:
             input_path: Input parquet files with recognizer results
             output_path: Output directory (local path, network mount, or ``gs://`` URI)
-            salt_path: Path to FPE salt file
-            key_path: Path to FPE key file (local path or ``gs://`` URI)
+            salt_path: Path to FPE salt file (use with ``key_path``)
+            key_path: Path to FPE key file, a local path or ``gs://`` URI (use with ``salt_path``)
             num_actors: Actor count (auto-detect if None)
             batch_size: Batch size per actor
             num_cpus: CPUs per actor (affects streaming executor scheduling)
@@ -1589,6 +1583,8 @@ class LocalJobRunner:
                 one live job per ``output_path``.
             override_num_blocks: Explicit number of Ray Data blocks to split the
                 input into (e.g. 32 to fix single-block starvation on multicore nodes).
+            salt_hex: Hex-encoded 32-byte FPE salt, instead of ``salt_path`` (use with ``key_hex``).
+            key_hex: Hex-encoded 32-byte FPE key, instead of ``key_path`` (use with ``salt_hex``).
             dry_run: If True, validate setup and show plan without processing
 
         Returns:
@@ -1596,6 +1592,7 @@ class LocalJobRunner:
             of rows written) so a successful run is observable.
 
         Raises:
+            ValueError: If the keys are not given as both paths or both hex strings.
             RuntimeError: If a non-empty input produces zero output rows. The
                 actors emit one row per input row, so this indicates a defect; the
                 guard surfaces it as a hard error.
@@ -1616,9 +1613,11 @@ class LocalJobRunner:
 
         start_time = time.time()
 
-        # Load keys
-        salt = self._load_key(salt_path)
-        key = self._load_key(key_path)
+        # Load keys: both as files or both as hex strings
+        if (salt_path is not None and key_path is not None) == (salt_hex is not None and key_hex is not None):
+            raise ValueError("Pass salt_path and key_path, or salt_hex and key_hex.")
+        salt = self._load_key(salt_path) if salt_hex is None else self._decode_key(salt_hex)
+        key = self._load_key(key_path) if key_hex is None else self._decode_key(key_hex)
 
         output_dir = output_location(output_path, resolve=True)
         make_output_dir(output_dir)
@@ -2028,9 +2027,6 @@ class LocalJobRunner:
         output_dir: str,
         model_name: str,
         *,
-        run_transformer: bool = True,
-        run_recognizer: bool = True,
-        run_anonymizer: bool = True,
         produce_visualizer_json: bool = False,
         salt_hex: str = "00" * 32,
         key_hex: str = "11" * 32,
@@ -2039,14 +2035,21 @@ class LocalJobRunner:
         anonymizer_kwargs: dict[str, Any] | None = None,
         llm_recognizer_mode: str = "off",
         llm_recognizer_kwargs: dict[str, Any] | None = None,
-        hardware_autotune: bool = True,
         execution_mode: Literal["discrete", "streamed"] = "discrete",
     ) -> dict[str, Any]:
         """
-        Run the full de-identification pipeline (transformer → recognizer → anonymizer).
+        Run the full de-identification pipeline.
 
-        Designed for small datasets. Each stage can be toggled independently.
-        When a stage is skipped, its output from a previous run is expected on disk.
+        The stages depend only on ``llm_recognizer_mode``:
+
+        - ``"off"`` (default): transformer, recognizer, anonymizer.
+        - ``"only"``: LLM recognizer, anonymizer.
+        - ``"merge"``: transformer, then the recognizer and the LLM recognizer, merged per
+          note, then the anonymizer (discrete execution only).
+
+        To run some stages only, call the stage jobs ``run_transformer``, ``run_recognition``,
+        ``run_llm_recognition`` and ``run_anonymization``. ``run_pipeline(<stage>_kwargs=X)``
+        does the same as ``run_<stage>(input_path, output_path, **X)``.
 
         Execution modes
         ---------------
@@ -2079,8 +2082,8 @@ class LocalJobRunner:
 
         Streamed **falls back to discrete, with a warning and a corrected
         ``execution_mode`` in the returned manifest**, when
-        ``llm_recognizer_mode="merge"``, when
-        ``produce_visualizer_json=True``, or when there is nothing to chain. It
+        ``llm_recognizer_mode="merge"`` or when
+        ``produce_visualizer_json=True``. It
         **raises** on multi-node clusters and on nodes with ≤4 CPUs, where a
         chained plan cannot be scheduled (see ``check_streamed_admission``).
 
@@ -2134,9 +2137,6 @@ class LocalJobRunner:
                 are written here too. ``execution_mode="streamed"`` and
                 ``produce_visualizer_json=True`` need a local directory.
             model_name: Transformer model name (e.g. "StanfordAIMI/stanford-deidentifier-base").
-            run_transformer: Run GPU transformer NER stage.
-            run_recognizer: Run CPU recognizer stage.
-            run_anonymizer: Run CPU anonymizer stage.
             produce_visualizer_json: Write JSON files for tide2-visualizer.
             salt_hex: Hex-encoded 32-byte FPE salt.
             key_hex: Hex-encoded 32-byte FPE key.
@@ -2156,10 +2156,6 @@ class LocalJobRunner:
             llm_recognizer_kwargs: Extra kwargs passed to self.run_llm_recognition().
                 e.g. project_id, model_name, provider_type, context_length,
                 max_tokens, num_actors, batch_size.
-            hardware_autotune: Enable hardware autotuning of per-stage settings.
-                When False, today's defaults run and recommendations are not applied.
-                It does not affect the Ray object store, which is sized by the
-                constructor's ``object_store_gb`` or by Ray.
             execution_mode: "discrete" (default) or "streamed" — see above.
 
         Returns:
@@ -2233,9 +2229,6 @@ class LocalJobRunner:
             reason = self._streamed_fallback_reason(
                 llm_recognizer_mode=llm_recognizer_mode,
                 produce_visualizer_json=produce_visualizer_json,
-                run_anonymizer=run_anonymizer,
-                run_transformer=run_transformer,
-                run_recognizer=run_recognizer,
             )
             if reason is not None:
                 logger.warning(
@@ -2258,9 +2251,6 @@ class LocalJobRunner:
                 input_info=input_info,
                 output_path=output_path,
                 model_name=model_name,
-                run_transformer=run_transformer,
-                run_recognizer=run_recognizer,
-                run_anonymizer=run_anonymizer,
                 salt_hex=salt_hex,
                 key_hex=key_hex,
                 transformer_kwargs=t_kw,
@@ -2268,7 +2258,6 @@ class LocalJobRunner:
                 anonymizer_kwargs=a_kw,
                 llm_recognizer_mode=llm_recognizer_mode,
                 llm_recognizer_kwargs=dict(llm_kw),
-                hardware_autotune=hardware_autotune,
                 start_time=start_time,
             )
 
@@ -2278,7 +2267,7 @@ class LocalJobRunner:
         self._init_ray()
 
         # Resolve settings via hardware recommender
-        self._apply_pipeline_recommendations(model_name, t_kw, r_kw, a_kw, hardware_autotune)
+        self._apply_pipeline_recommendations(model_name, t_kw, r_kw, a_kw)
 
         # Each stage derives text_hash and row_id from the note when they are absent, inside
         # its read; no normalized copy is written.
@@ -2290,11 +2279,8 @@ class LocalJobRunner:
         t_kwargs: dict[str, Any] = dict(t_kw)
 
         if llm_recognizer_mode == "only":
-            # In "only" mode, skip transformer entirely — LLM replaces it
-            if run_transformer:
-                logger.warning("llm_recognizer_mode='only' overrides run_transformer=True; skipping transformer stage")
             logger.info("Pipeline phase 1/3: Transformer NER (SKIPPED — LLM-only mode)")
-        elif run_transformer:
+        else:
             logger.info("Pipeline phase 1/3: Transformer NER")
             transformer_manifest = self.run_transformer(
                 input_path=first_stage_input_path,
@@ -2304,14 +2290,12 @@ class LocalJobRunner:
                 **t_kwargs,
             )
             results["transformer"] = transformer_manifest
-        else:
-            logger.info("Pipeline phase 1/3: Transformer NER (SKIPPED)")
 
         # ------------------------------------------------------------------
         # Phase 2: Recognizer (+ optional LLM recognizer)
         # ------------------------------------------------------------------
         r_kwargs: dict[str, Any] = dict(r_kw)
-        rec_input_path = str(transformer_output_path) if run_transformer else first_stage_input_path
+        rec_input_path = str(transformer_output_path)
 
         if llm_recognizer_mode == "only":
             # LLM replaces both transformer and regex recognizer
@@ -2330,22 +2314,17 @@ class LocalJobRunner:
             regex_output_path = join_location(output_path, "04a_regex_recognizer_output")
 
             # --- Standard regex recognizer ---
-            if run_recognizer:
-                recognizer_manifest = self.run_recognition(
-                    input_path=rec_input_path,
-                    output_path=str(regex_output_path),
-                    _id_column="row_id",
-                    **r_kwargs,
-                )
-                results["recognizer"] = recognizer_manifest
-            else:
-                logger.info("Regex recognizer stage skipped (run_recognizer=False)")
+            recognizer_manifest = self.run_recognition(
+                input_path=rec_input_path,
+                output_path=str(regex_output_path),
+                _id_column="row_id",
+                **r_kwargs,
+            )
+            results["recognizer"] = recognizer_manifest
 
             # --- LLM recognizer ---
-            llm_input_path = str(transformer_output_path) if run_transformer else first_stage_input_path
-
             llm_manifest = self.run_llm_recognition(
-                input_path=llm_input_path,
+                input_path=rec_input_path,
                 output_path=str(llm_recognizer_output_path),
                 _id_column="row_id",
                 **llm_kw,
@@ -2354,7 +2333,7 @@ class LocalJobRunner:
 
             # --- Merge results via Ray Data join ---
             logger.info("Merging regex and LLM recognizer results")
-            rec_files = list_parquet_files(regex_output_path) if run_recognizer else []
+            rec_files = list_parquet_files(regex_output_path)
             llm_files = list_parquet_files(llm_recognizer_output_path)
 
             alive_cpus = alive_node_cpus()
@@ -2409,24 +2388,16 @@ class LocalJobRunner:
                 merged_ds = joined_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
                 merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
 
-            elif rec_files:
-                regex_ds = ray.data.read_parquet(str(regex_output_path))
-                regex_ds = regex_ds.rename_columns({"recognizer_results_json": "results_regex"})
-                merged_ds = regex_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
-                merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
-
-            elif llm_files:
-                llm_ds = ray.data.read_parquet(str(llm_recognizer_output_path))
-                llm_ds = llm_ds.rename_columns({"recognizer_results_json": "results_llm"})
-                merged_ds = llm_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
-                merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
+            else:
+                raise RuntimeError(
+                    "llm_recognizer_mode='merge' needs output from both recognizers, and one wrote none."
+                )
 
             out_files = list_parquet_files(recognizer_output_path)
             merged_count = pads.dataset(out_files).count_rows() if out_files else 0
             logger.info("Merged %d notes from regex + LLM recognizers", merged_count)
 
-        elif run_recognizer:
-            # Standard recognizer path (no LLM)
+        else:
             logger.info("Pipeline phase 2/3: Recognizer")
             recognizer_manifest = self.run_recognition(
                 input_path=rec_input_path,
@@ -2435,41 +2406,27 @@ class LocalJobRunner:
                 **r_kwargs,
             )
             results["recognizer"] = recognizer_manifest
-        else:
-            logger.info("Pipeline phase 2/3: Recognizer (SKIPPED)")
 
         # ------------------------------------------------------------------
         # Phase 3: Anonymizer
         # ------------------------------------------------------------------
-        if run_anonymizer:
-            logger.info("Pipeline phase 3/3: Anonymizer")
+        logger.info("Pipeline phase 3/3: Anonymizer")
 
-            # Write hex keys to temp files
-            salt_file = join_location(output_path, "salt.bin")
-            key_file = join_location(output_path, "key.bin")
-            write_text_file(salt_file, salt_hex)
-            write_text_file(key_file, key_hex)
+        # Write hex keys to temp files
+        salt_file = join_location(output_path, "salt.bin")
+        key_file = join_location(output_path, "key.bin")
+        write_text_file(salt_file, salt_hex)
+        write_text_file(key_file, key_hex)
 
-            a_kwargs: dict[str, Any] = dict(a_kw)
-
-            if run_recognizer or llm_recognizer_mode != "off":
-                anon_input_path = str(recognizer_output_path)
-            elif run_transformer:
-                anon_input_path = str(transformer_output_path)
-            else:
-                anon_input_path = first_stage_input_path
-
-            anonymizer_manifest = self.run_anonymization(
-                input_path=anon_input_path,
-                output_path=str(anonymizer_output_path),
-                salt_path=str(salt_file),
-                key_path=str(key_file),
-                _id_column="row_id",
-                **a_kwargs,
-            )
-            results["anonymizer"] = anonymizer_manifest
-        else:
-            logger.info("Pipeline phase 3/3: Anonymizer (SKIPPED)")
+        anonymizer_manifest = self.run_anonymization(
+            input_path=str(recognizer_output_path),
+            output_path=str(anonymizer_output_path),
+            salt_path=str(salt_file),
+            key_path=str(key_file),
+            _id_column="row_id",
+            **dict(a_kw),
+        )
+        results["anonymizer"] = anonymizer_manifest
 
         # ------------------------------------------------------------------
         # Visualizer JSON output
@@ -2497,9 +2454,6 @@ class LocalJobRunner:
         *,
         llm_recognizer_mode: str,
         produce_visualizer_json: bool,
-        run_transformer: bool,
-        run_recognizer: bool,
-        run_anonymizer: bool,
     ) -> str | None:
         """Return why streamed cannot be used here, or None if it can.
 
@@ -2520,8 +2474,6 @@ class LocalJobRunner:
                 "needs the pre-anonymization recognizer_results_json, which the anonymizer does not carry "
                 "into the final output and which streamed mode writes no intermediate for."
             )
-        if not (run_transformer or run_recognizer or run_anonymizer) and llm_recognizer_mode == "off":
-            return "No stages are enabled, so there is nothing to chain."
         return None
 
     def _apply_pipeline_recommendations(
@@ -2530,9 +2482,8 @@ class LocalJobRunner:
         t_kw: dict[str, Any],
         r_kw: dict[str, Any],
         a_kw: dict[str, Any],
-        hardware_autotune: bool,
     ) -> None:
-        """Fill per-stage kwargs in place from the hardware recommender."""
+        """Fill per-stage kwargs in place from the hardware recommender and log the table."""
         hw = detect_hardware()
         rec = recommend_settings(hw, model_name=model_name)
         runner_kw: dict[str, Any] = {
@@ -2547,7 +2498,7 @@ class LocalJobRunner:
             recognizer=r_kw,
             anonymizer=a_kw,
             runner=runner_kw,
-            hardware_autotune=hardware_autotune,
+            hardware_autotune=self.hardware_autotune,
         )
         logger.info("\n" + render_settings_table(applied))
 
@@ -2627,9 +2578,6 @@ class LocalJobRunner:
         input_info: PipelineInputInfo,
         output_path: Path,
         model_name: str,
-        run_transformer: bool,
-        run_recognizer: bool,
-        run_anonymizer: bool,
         salt_hex: str,
         key_hex: str,
         transformer_kwargs: dict[str, Any],
@@ -2637,7 +2585,6 @@ class LocalJobRunner:
         anonymizer_kwargs: dict[str, Any],
         llm_recognizer_mode: str,
         llm_recognizer_kwargs: dict[str, Any],
-        hardware_autotune: bool,
         start_time: float,
     ) -> dict[str, Any]:
         """Chain the enabled stages into a single Ray Data execution.
@@ -2653,33 +2600,23 @@ class LocalJobRunner:
         )
 
         self._init_ray()
-        self._apply_pipeline_recommendations(
-            model_name, transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, hardware_autotune
-        )
+        self._apply_pipeline_recommendations(model_name, transformer_kwargs, recognizer_kwargs, anonymizer_kwargs)
         enable_checkpoint = not any(
             kw.get("enable_checkpoint") is False for kw in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs)
         )
 
         anonymizer_output_path = output_path / "06_anonymizer_output"
-        recognizer_output_path = output_path / "04_recognizer_output"
 
         use_llm = llm_recognizer_mode == "only"
-        if use_llm and run_transformer:
-            logger.warning("llm_recognizer_mode='only' overrides run_transformer=True; skipping transformer stage")
-        chain_transformer = run_transformer and not use_llm
-        chain_recognizer = run_recognizer and not use_llm
 
         # --- Column contracts, validated on the source before any operator ---
         contracts: list[tuple[str, StageColumns]] = []
         if use_llm:
             contracts.append(("llm_recognizer", LLM_RECOGNIZER_STAGE_COLUMNS))
         else:
-            if chain_transformer:
-                contracts.append(("transformer", TRANSFORMER_STAGE_COLUMNS))
-            if chain_recognizer:
-                contracts.append(("recognizer", RECOGNIZER_STAGE_COLUMNS))
-        if run_anonymizer:
-            contracts.append(("anonymizer", ANONYMIZER_STAGE_COLUMNS))
+            contracts.append(("transformer", TRANSFORMER_STAGE_COLUMNS))
+            contracts.append(("recognizer", RECOGNIZER_STAGE_COLUMNS))
+        contracts.append(("anonymizer", ANONYMIZER_STAGE_COLUMNS))
         final_columns = validate_stage_columns(input_info.columns | {"text_hash", "row_id"}, contracts)
 
         # --- Resolve pools and CPU budget, then admit or fail fast ---
@@ -2690,7 +2627,7 @@ class LocalJobRunner:
         pool_minimums["write"] = write_cpus
 
         transformer_actor = None
-        if chain_transformer:
+        if not use_llm:
             (
                 transformer_actor,
                 num_transformer_actors,
@@ -2712,7 +2649,7 @@ class LocalJobRunner:
             llm_remote_args = get_ray_remote_args_cpu(num_cpus=float(llm_recognizer_kwargs.get("num_cpus") or 0.25))
             pool_minimums["llm_recognizer"] = float(llm_remote_args["num_cpus"])
 
-        if chain_recognizer:
+        if not use_llm:
             r_slot, r_remote_args, _ = _resolve_slot_cpus(
                 num_cpus=recognizer_kwargs.get("num_cpus"),
                 worker_num_cpus=recognizer_kwargs.get("worker_num_cpus"),
@@ -2722,15 +2659,14 @@ class LocalJobRunner:
             rec_min = min(2, rec_max)
             pool_minimums["recognizer"] = r_slot * rec_min
 
-        if run_anonymizer:
-            a_slot, a_remote_args, _ = _resolve_slot_cpus(
-                num_cpus=anonymizer_kwargs.get("num_cpus"),
-                worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
-                stage_name="streamed anonymizer",
-            )
-            anon_max = int(anonymizer_kwargs.get("num_actors") or max(1, int(node_cpus * 0.5)))
-            anon_min = 1
-            pool_minimums["anonymizer"] = a_slot * anon_min
+        a_slot, a_remote_args, _ = _resolve_slot_cpus(
+            num_cpus=anonymizer_kwargs.get("num_cpus"),
+            worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
+            stage_name="streamed anonymizer",
+        )
+        anon_max = int(anonymizer_kwargs.get("num_actors") or max(1, int(node_cpus * 0.5)))
+        anon_min = 1
+        pool_minimums["anonymizer"] = a_slot * anon_min
 
         node_cpus = check_streamed_admission(pool_minimums)
 
@@ -2749,7 +2685,7 @@ class LocalJobRunner:
             )
         )
         ctx = ray.data.DataContext.get_current()
-        sink_dir = anonymizer_output_path if run_anonymizer else recognizer_output_path
+        sink_dir = anonymizer_output_path
         sink_dir.mkdir(parents=True, exist_ok=True)
         _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=sink_dir, id_column="row_id")
 
@@ -2804,59 +2740,51 @@ class LocalJobRunner:
                     pool_min_size=1,
                 )
             else:
-                if chain_transformer:
-                    assert transformer_actor is not None
-                    ds = self.build_transformer_stage(
-                        ds,
-                        transformer_actor=transformer_actor,
-                        model_name=model_name,
-                        batch_size=int(transformer_kwargs.get("batch_size") or 8),
-                        num_transformer_actors=num_transformer_actors,
-                        ray_remote_args_transformer=t_remote_args,
-                        num_agg_actors=num_agg_actors,
-                        agg_num_cpus=float(transformer_kwargs.get("agg_num_cpus") or 1.0),
-                    )
-                if chain_recognizer:
-                    ds = self.build_recognizer_stage(
-                        ds,
-                        batch_size=int(recognizer_kwargs.get("batch_size") or 150),
-                        num_actors=rec_max,
-                        ray_remote_args=r_remote_args,
-                        pool_min_size=rec_min,
-                    )
-
-            if run_anonymizer:
-                salt_file = output_path / "salt.bin"
-                key_file = output_path / "key.bin"
-                salt_file.write_text(salt_hex)
-                key_file.write_text(key_hex)
-                anonymizer_actor = create_anonymizer_actor_class(
-                    salt=self._load_key(str(salt_file)),
-                    key=self._load_key(str(key_file)),
-                    acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
-                    acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
-                    jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
-                )
-                ds = self.build_anonymizer_stage(
+                assert transformer_actor is not None
+                ds = self.build_transformer_stage(
                     ds,
-                    actor_cls=anonymizer_actor,
-                    batch_size=int(anonymizer_kwargs.get("batch_size") or 200),
-                    num_actors=anon_max,
-                    ray_remote_args=a_remote_args,
-                    pool_min_size=anon_min,
+                    transformer_actor=transformer_actor,
+                    model_name=model_name,
+                    batch_size=int(transformer_kwargs.get("batch_size") or 8),
+                    num_transformer_actors=num_transformer_actors,
+                    ray_remote_args_transformer=t_remote_args,
+                    num_agg_actors=num_agg_actors,
+                    agg_num_cpus=float(transformer_kwargs.get("agg_num_cpus") or 1.0),
                 )
-                sink_dir = anonymizer_output_path
-                # The anonymizer already emits exactly the final column set, so
-                # this projection is a guard, not a transformation: it is what
-                # keeps raw note_text out of the sink. ``final_columns`` comes
-                # from the contract walk, so it includes pass-throughs such as
-                # ``row_id`` that no stage lists under ``produces``.
-                sink_columns = sorted(FINAL_OUTPUT_COLUMNS & final_columns)
-            else:
-                sink_columns = None
+                ds = self.build_recognizer_stage(
+                    ds,
+                    batch_size=int(recognizer_kwargs.get("batch_size") or 150),
+                    num_actors=rec_max,
+                    ray_remote_args=r_remote_args,
+                    pool_min_size=rec_min,
+                )
 
-            if sink_columns:
-                ds = ds.select_columns(sink_columns)
+            salt_file = output_path / "salt.bin"
+            key_file = output_path / "key.bin"
+            salt_file.write_text(salt_hex)
+            key_file.write_text(key_hex)
+            anonymizer_actor = create_anonymizer_actor_class(
+                salt=self._load_key(str(salt_file)),
+                key=self._load_key(str(key_file)),
+                acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
+                acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
+                jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
+            )
+            ds = self.build_anonymizer_stage(
+                ds,
+                actor_cls=anonymizer_actor,
+                batch_size=int(anonymizer_kwargs.get("batch_size") or 200),
+                num_actors=anon_max,
+                ray_remote_args=a_remote_args,
+                pool_min_size=anon_min,
+            )
+            # The anonymizer already emits exactly the final column set, so
+            # this projection is a guard, not a transformation: it is what
+            # keeps raw note_text out of the sink. ``final_columns`` comes
+            # from the contract walk, so it includes pass-throughs such as
+            # ``row_id`` that no stage lists under ``produces``.
+            sink_columns = sorted(FINAL_OUTPUT_COLUMNS & final_columns)
+            ds = ds.select_columns(sink_columns)
             ds.write_parquet(str(sink_dir), compression="zstd", ray_remote_args={"num_cpus": write_cpus})
 
             # Row reconciliation. Count with pyarrow, never ds.count() — that
@@ -2910,8 +2838,12 @@ class LocalJobRunner:
 
     def _load_key(self, key_path: str) -> bytes:
         """Load a 32-byte key from a hex-encoded file (local path or URI)."""
-        hex_key = read_text_file(key_path).strip()
-        key = bytes.fromhex(hex_key)
+        return self._decode_key(read_text_file(key_path))
+
+    @staticmethod
+    def _decode_key(hex_key: str) -> bytes:
+        """Decode a hex-encoded 32-byte key."""
+        key = bytes.fromhex(hex_key.strip())
         if len(key) != KEY_SIZE_BYTES:
             raise ValueError(f"Key must be exactly {KEY_SIZE_BYTES} bytes, got {len(key)}")
         return key
@@ -3173,9 +3105,6 @@ def run_pipeline_simple(
     output_dir: str,
     model_name: str,
     *,
-    run_transformer: bool = True,
-    run_recognizer: bool = True,
-    run_anonymizer: bool = True,
     produce_visualizer_json: bool = False,
     num_cpus: int | None = None,
     num_gpus: int | None = None,
@@ -3193,9 +3122,6 @@ def run_pipeline_simple(
         input_path: Parquet file path, directory, glob, or list of file paths with at least a 'note_text' column.
         output_dir: Output directory for all intermediate and final files.
         model_name: Transformer model name.
-        run_transformer: Run GPU transformer NER stage.
-        run_recognizer: Run CPU recognizer stage.
-        run_anonymizer: Run CPU anonymizer stage.
         produce_visualizer_json: Write JSON files for tide2-visualizer.
         num_cpus: CPUs for Ray.
         num_gpus: GPUs for Ray.
@@ -3220,9 +3146,6 @@ def run_pipeline_simple(
             input_path=input_path,
             output_dir=output_dir,
             model_name=model_name,
-            run_transformer=run_transformer,
-            run_recognizer=run_recognizer,
-            run_anonymizer=run_anonymizer,
             produce_visualizer_json=produce_visualizer_json,
             transformer_kwargs=transformer_kwargs,
             recognizer_kwargs=recognizer_kwargs,

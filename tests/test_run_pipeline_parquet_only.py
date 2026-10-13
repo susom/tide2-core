@@ -516,6 +516,29 @@ def test_standalone_run_anonymization_row_id(tmp_path):
         assert not (out / "00_normalized_anonymizer_input").exists()
 
 
+def test_run_anonymization_takes_the_keys_as_files_or_as_hex(tmp_path):
+    runner = LocalJobRunner()
+    source = tmp_path / "in.parquet"
+    pq.write_table(pa.table({"note_text": ["text"], "recognizer_results_json": ["[]"]}), source)
+    salt_file = tmp_path / "salt.bin"
+    key_file = tmp_path / "key.bin"
+    salt_file.write_text("00" * 32)
+    key_file.write_text("11" * 32)
+
+    by_hex = runner.run_anonymization(
+        str(source), str(tmp_path / "a"), salt_hex="00" * 32, key_hex="11" * 32, dry_run=True
+    )
+    by_file = runner.run_anonymization(
+        str(source), str(tmp_path / "b"), salt_path=str(salt_file), key_path=str(key_file), dry_run=True
+    )
+    assert by_hex["keys_loaded"] and by_file["keys_loaded"]
+
+    with pytest.raises(ValueError, match="salt_path and key_path, or salt_hex and key_hex"):
+        runner.run_anonymization(str(source), str(tmp_path / "c"), salt_hex="00" * 32, dry_run=True)
+    with pytest.raises(ValueError, match="32 bytes"):
+        runner.run_anonymization(str(source), str(tmp_path / "d"), salt_hex="00", key_hex="11" * 32, dry_run=True)
+
+
 def test_stage_jobs_accept_a_raw_file_without_text_hash(tmp_path):
     """Every stage job derives text_hash in the read, so only note_text (and the recognizer results) are required."""
     runner = LocalJobRunner()

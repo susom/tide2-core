@@ -147,9 +147,6 @@ def run_streamed(runner, df, output_dir, **overrides):
         "input_info": info,
         "output_path": output_dir,
         "model_name": "some-model",
-        "run_transformer": True,
-        "run_recognizer": True,
-        "run_anonymizer": True,
         "salt_hex": "00" * 32,
         "key_hex": "11" * 32,
         "transformer_kwargs": {},
@@ -157,7 +154,6 @@ def run_streamed(runner, df, output_dir, **overrides):
         "anonymizer_kwargs": {},
         "llm_recognizer_mode": "off",
         "llm_recognizer_kwargs": {},
-        "hardware_autotune": False,
         "start_time": 0.0,
     }
     kwargs.update(overrides)
@@ -361,9 +357,9 @@ class TestPlanShape:
         )
         assert ctx.checkpoint_config is None
 
-    def test_skipping_the_recognizer_chains_transformer_to_anonymizer(self, streamed_env, df):
-        run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"], run_recognizer=False)
-        assert len(streamed_env["ds"].ops) == 2
+    def test_the_full_chain_has_transformer_recognizer_and_anonymizer(self, streamed_env, df):
+        run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
+        assert len(streamed_env["ds"].ops) == 3
 
     def test_llm_only_replaces_transformer_and_recognizer(self, streamed_env, df):
         from tide2.actors import LlmRecognizerActor
@@ -380,10 +376,6 @@ class TestPlanShape:
         assert ops[0]["fn"] is LlmRecognizerActor
         # Network-bound: reserves CPU but barely uses it.
         assert ops[0]["num_cpus"] == 0.25
-
-    def test_anonymizer_skipped_sinks_to_the_recognizer_output(self, streamed_env, df):
-        run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"], run_anonymizer=False)
-        assert streamed_env["ds"].state["sink"][0].endswith("04_recognizer_output")
 
     def test_source_is_projected_to_the_first_stage_contract(self, streamed_env, df):
         df = df.assign(unused_column=["x", "y"])
@@ -488,10 +480,7 @@ class TestFallbacks:
 
     @pytest.mark.parametrize(
         ("overrides", "expected_in_warning"),
-        [
-            ({"llm_recognizer_mode": "merge", "llm_recognizer_kwargs": {"project_id": "p"}}, "merge"),
-            ({"produce_visualizer_json": True}, "produce_visualizer_json=True"),
-        ],
+        [({"produce_visualizer_json": True}, "produce_visualizer_json=True")],
     )
     def test_falls_back_to_discrete_with_a_corrected_manifest(
         self, discrete_spy, in_file, tmp_path, caplog, overrides, expected_in_warning
@@ -508,6 +497,10 @@ class TestFallbacks:
         assert result["execution_mode"] == "discrete"
         assert expected_in_warning in caplog.text
         assert "Falling back to discrete execution" in caplog.text
+
+    def test_merge_mode_cannot_be_streamed(self):
+        reason = lr.LocalJobRunner._streamed_fallback_reason(llm_recognizer_mode="merge", produce_visualizer_json=False)
+        assert reason is not None and "merge" in reason
 
     def test_no_fallback_for_a_plain_streamed_run(self, discrete_spy, in_file, tmp_path):
         result = lr.LocalJobRunner().run_pipeline(

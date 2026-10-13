@@ -314,9 +314,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 input_path=args.input,
                 output_dir=args.output,
                 model_name=args.model,
-                run_transformer=getattr(args, "run_transformer", True),
-                run_recognizer=getattr(args, "run_recognizer", True),
-                run_anonymizer=getattr(args, "run_anonymizer", True),
                 produce_visualizer_json=getattr(args, "produce_visualizer_json", False),
                 salt_hex=getattr(args, "salt_hex", "00" * 32),
                 key_hex=getattr(args, "key_hex", "11" * 32),
@@ -325,7 +322,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 anonymizer_kwargs=a_kw,
                 llm_recognizer_mode=llm_mode,
                 llm_recognizer_kwargs=llm_kw if llm_kw else None,
-                hardware_autotune=getattr(args, "hardware_autotune", None) is not False,
                 execution_mode=getattr(args, "execution_mode", None) or "discrete",
             )
         else:
@@ -509,24 +505,6 @@ Examples:
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
     )
     # Pipeline-specific arguments
-    run_p.add_argument(
-        "--no-transformer",
-        dest="run_transformer",
-        action="store_false",
-        help="Skip transformer stage (pipeline jobs, default: run)",
-    )
-    run_p.add_argument(
-        "--no-recognizer",
-        dest="run_recognizer",
-        action="store_false",
-        help="Skip recognizer stage (pipeline jobs, default: run)",
-    )
-    run_p.add_argument(
-        "--no-anonymizer",
-        dest="run_anonymizer",
-        action="store_false",
-        help="Skip anonymizer stage (pipeline jobs, default: run)",
-    )
     run_p.add_argument(
         "--produce-visualizer-json",
         action="store_true",
