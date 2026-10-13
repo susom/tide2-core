@@ -98,14 +98,14 @@ class TestConfigureCheckpoint:
 
     def test_enabled_sets_config(self, tmp_path):
         ctx = SimpleNamespace(checkpoint_config=None)
-        output_dir = tmp_path / "06_anonymizer_output"
+        output_dir = tmp_path / "anonymizer_output"
         _configure_checkpoint(ctx, enable=True, output_dir=output_dir, id_column="text_hash")
 
         cfg = ctx.checkpoint_config
         assert cfg is not None
         assert cfg.id_column == "text_hash"
         # Sibling directory next to the output dir, suffixed _ray_checkpoint.
-        assert cfg.checkpoint_path == str(output_dir.parent / "06_anonymizer_output_ray_checkpoint")
+        assert cfg.checkpoint_path == str(output_dir.parent / "anonymizer_output_ray_checkpoint")
         assert cfg.delete_checkpoint_on_success is False
 
     def test_enabled_respects_id_column(self, tmp_path):

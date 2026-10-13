@@ -5,6 +5,7 @@ This module provides common functions used across all execution modes
 (local, VM, cluster) to reduce code duplication.
 """
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -290,3 +291,124 @@ def log_ray_cluster_info() -> None:
         logger.info(f"  Object Store: {resources.get('object_store_memory', 0) / 1e9:.1f} GB")
     except Exception as e:
         logger.warning(f"Could not get Ray cluster info: {e}")
+
+
+def _parquet_files_under(folder: Path) -> list[Path]:
+    return sorted(folder.glob("**/*.parquet")) if folder.is_dir() else []
+
+
+def _text_by_hash(transformer_files: list[Path]) -> dict[str, str]:
+    """Map ``text_hash`` to ``note_text`` from the transformer output, when it has both columns."""
+    import pyarrow.dataset as pads
+    import pyarrow.parquet as pq
+
+    if not transformer_files:
+        return {}
+    names = pq.read_schema(transformer_files[0]).names
+    if "note_text" not in names or "text_hash" not in names:
+        return {}
+    table = pads.dataset(transformer_files).to_table(columns=["text_hash", "note_text"])
+    text_map: dict[str, str] = {}
+    for row in table.to_pylist():
+        if row["text_hash"] is not None and row["text_hash"] not in text_map:
+            text_map[row["text_hash"]] = row["note_text"] or ""
+    return text_map
+
+
+def _write_recognizer_json(files: list[Path], text_map: dict[str, str], out_dir: Path) -> int:
+    import pyarrow.dataset as pads
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for row in pads.dataset(files).to_table().to_pylist():
+        sample_id = str(row.get("text_hash") or "unknown")
+        results_json = row.get("recognizer_results_json") or "[]"
+        data = {
+            "key": sample_id,
+            "value": row.get("note_text") or text_map.get(sample_id, ""),
+            "recognizer_results": json.loads(results_json),
+        }
+        (out_dir / f"{sample_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        count += 1
+    return count
+
+
+def _write_anonymizer_json(files: list[Path], out_dir: Path) -> int:
+    import pyarrow.dataset as pads
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for row in pads.dataset(files).to_table().to_pylist():
+        sample_id = str(row["text_hash"]) if row.get("text_hash") is not None else "unknown"
+        text = next(
+            (
+                str(row[col])
+                for col in ("anonymized_note_text", "deid_note_text", "anonymized_text", "note_text")
+                if row.get(col) is not None
+            ),
+            "",
+        )
+        items: list[Any] = []
+        for col in ("anonymizer_results_json", "items", "anonymizer_results"):
+            if row.get(col) is not None:
+                items = json.loads(row[col]) if isinstance(row[col], str) else list(row[col])
+                break
+        data = {"text": text, "items": items}
+        (out_dir / f"{sample_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        count += 1
+    return count
+
+
+def write_visualizer_json(
+    output_dir: str | os.PathLike[str], json_dir: str | os.PathLike[str] | None = None
+) -> dict[str, int]:
+    """Write the JSON files that ``tide2-visualizer`` reads, from a finished pipeline run.
+
+    Reads the stage folders under ``output_dir`` (a local directory) and writes
+    ``cli_recognizer_json/`` and ``cli_anonymizer_json/`` into ``json_dir``
+    (default: ``output_dir``). The recognizer JSON comes from the folder the anonymizer
+    read: ``merged_recognizer_output``, else ``llm_recognizer_output``, else
+    ``recognizer_output``. A streamed run has no recognizer folder, so only the
+    anonymizer JSON is written; each skipped part is logged.
+
+    Args:
+        output_dir: The ``output_dir`` that was given to ``run_pipeline``.
+        json_dir: Where to create the two JSON folders. Defaults to ``output_dir``.
+
+    Returns:
+        The number of files written: ``{"recognizer_json": n, "anonymizer_json": m}``.
+
+    Raises:
+        ValueError: If ``output_dir`` is a URI or is not a directory.
+    """
+    # Deferred: local_runner imports this module.
+    from tide2.runner.local_runner import STAGE_DIRS
+
+    if is_uri(output_dir):
+        raise ValueError(f"write_visualizer_json needs a local output_dir, got {output_dir!r}.")
+    root = Path(output_dir)
+    if not root.is_dir():
+        raise ValueError(f"output_dir is not a directory: {root}")
+    target = root if json_dir is None else Path(json_dir)
+
+    counts = {"recognizer_json": 0, "anonymizer_json": 0}
+
+    recognizer_files: list[Path] = []
+    for stage in ("merged_recognizer", "llm_recognizer", "recognizer"):
+        recognizer_files = _parquet_files_under(root / STAGE_DIRS[stage])
+        if recognizer_files:
+            break
+    if recognizer_files:
+        text_map = _text_by_hash(_parquet_files_under(root / STAGE_DIRS["transformer"]))
+        counts["recognizer_json"] = _write_recognizer_json(recognizer_files, text_map, target / "cli_recognizer_json")
+    else:
+        logger.info("No recognizer output under %s: recognizer JSON skipped.", root)
+
+    anonymizer_files = _parquet_files_under(root / STAGE_DIRS["anonymizer"])
+    if anonymizer_files:
+        counts["anonymizer_json"] = _write_anonymizer_json(anonymizer_files, target / "cli_anonymizer_json")
+    else:
+        logger.info("No anonymizer output under %s: anonymizer JSON skipped.", root)
+
+    logger.info("Visualizer JSON written to %s: %s", target, counts)
+    return counts

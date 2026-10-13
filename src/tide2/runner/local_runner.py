@@ -48,7 +48,6 @@ from typing import Literal
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as pads
-import pyarrow.parquet as pq
 import ray
 import ray.data
 import ray.data.exceptions
@@ -87,6 +86,15 @@ from .utils import write_text_file
 logger = logging.getLogger(__name__)
 
 KEY_SIZE_BYTES = 32
+
+#: Folder of each stage under ``output_dir``. A stage's checkpoint is the sibling ``<folder>_ray_checkpoint``.
+STAGE_DIRS = {
+    "transformer": "transformer_output",
+    "recognizer": "recognizer_output",
+    "llm_recognizer": "llm_recognizer_output",
+    "merged_recognizer": "merged_recognizer_output",
+    "anonymizer": "anonymizer_output",
+}
 
 
 def _resolve_slot_cpus(
@@ -1902,7 +1910,6 @@ class LocalJobRunner:
         output_dir: str,
         model_name: str,
         *,
-        produce_visualizer_json: bool = False,
         salt_hex: str = "00" * 32,
         key_hex: str = "11" * 32,
         transformer_kwargs: dict[str, Any] | None = None,
@@ -1946,8 +1953,7 @@ class LocalJobRunner:
           the rest through all stages. Stages are not checkpointed, so a failed
           run re-runs GPU inference for every unfinished row. Long-running or
           unattended jobs should stay on discrete.
-        - Only ``06_anonymizer_output`` is written; the ``01_``/``02_``/``04_``
-          intermediates are not.
+        - Only ``anonymizer_output`` is written; the other stage folders are not.
         - ``note_text`` stays resident in the object store across all three
           operators and may spill (in plaintext) to Ray's local spill directory.
           Size ``object_store_gb`` and host disk accordingly, and dispose of the
@@ -1957,8 +1963,7 @@ class LocalJobRunner:
 
         Streamed **falls back to discrete, with a warning and a corrected
         ``execution_mode`` in the returned manifest**, when
-        ``llm_recognizer_mode="merge"`` or when
-        ``produce_visualizer_json=True``. It
+        ``llm_recognizer_mode="merge"``. It
         **raises** on multi-node clusters and on nodes with ≤4 CPUs, where a
         chained plan cannot be scheduled (see ``check_streamed_admission``).
 
@@ -1967,8 +1972,8 @@ class LocalJobRunner:
         With checkpointing on (the default for discrete mode), re-running a stage
         on the same ``output_dir`` skips notes already written, so a crashed
         worker can be relaunched with the same command. Each stage uses its own
-        subdirectory (``02_transformer_output``, ``04_recognizer_output``,
-        ``06_anonymizer_output``) and a sibling ``*_ray_checkpoint`` location.
+        subdirectory (``STAGE_DIRS``: ``transformer_output``, ``recognizer_output``,
+        ``anonymizer_output`` and so on) and a sibling ``*_ray_checkpoint`` location.
         When ``row_id`` is absent it is derived from the note in the first
         stage's read; no normalized copy of the input is written.
 
@@ -2009,10 +2014,8 @@ class LocalJobRunner:
                 patient_id, recognizer_results_json, jitter, row_id.
             output_dir: Output directory for all intermediate and final files: a local
                 path, a network mount, or a ``gs://`` URI. ``salt.bin`` and ``key.bin``
-                are written here too. ``execution_mode="streamed"`` and
-                ``produce_visualizer_json=True`` need a local directory.
+                are written here too. ``execution_mode="streamed"`` needs a local directory.
             model_name: Transformer model name (e.g. "StanfordAIMI/stanford-deidentifier-base").
-            produce_visualizer_json: Write JSON files for tide2-visualizer.
             salt_hex: Hex-encoded 32-byte FPE salt.
             key_hex: Hex-encoded 32-byte FPE key.
             transformer_kwargs: Extra kwargs passed to self.run_transformer().
@@ -2072,16 +2075,23 @@ class LocalJobRunner:
         input_info = _inspect_pipeline_input(resolved_files)
 
         # --- Intermediate paths ---
-        transformer_output_path = join_location(output_path, "02_transformer_output")
-        recognizer_output_path = join_location(output_path, "04_recognizer_output")
-        anonymizer_output_path = join_location(output_path, "06_anonymizer_output")
-
-        llm_recognizer_output_path = join_location(output_path, "03b_llm_recognizer_output")
+        stage_paths = {stage: join_location(output_path, folder) for stage, folder in STAGE_DIRS.items()}
+        transformer_output_path = stage_paths["transformer"]
+        recognizer_output_path = stage_paths["recognizer"]
+        llm_recognizer_output_path = stage_paths["llm_recognizer"]
+        merged_output_path = stage_paths["merged_recognizer"]
+        anonymizer_output_path = stage_paths["anonymizer"]
 
         # Validate llm_recognizer_mode
         valid_llm_modes = ("off", "only", "merge")
         if llm_recognizer_mode not in valid_llm_modes:
             raise ValueError(f"llm_recognizer_mode must be one of {valid_llm_modes}, got '{llm_recognizer_mode}'")
+        # The folder the anonymizer reads, and the visualizer reads as the recognizer result, in each mode.
+        final_recognizer_path = {
+            "off": recognizer_output_path,
+            "only": llm_recognizer_output_path,
+            "merge": merged_output_path,
+        }[llm_recognizer_mode]
 
         results: dict[str, Any] = {"output_dir": str(output_path)}
         # Copied, not aliased: apply_recommendations fills these in place, and a
@@ -2097,14 +2107,9 @@ class LocalJobRunner:
         # ------------------------------------------------------------------
         if execution_mode not in ("discrete", "streamed"):
             raise ValueError(f"execution_mode must be 'discrete' or 'streamed', got {execution_mode!r}")
-        if produce_visualizer_json and not isinstance(output_path, Path):
-            raise ValueError(f"produce_visualizer_json=True needs a local output_dir, got {output_dir!r}.")
 
         if execution_mode == "streamed":
-            reason = self._streamed_fallback_reason(
-                llm_recognizer_mode=llm_recognizer_mode,
-                produce_visualizer_json=produce_visualizer_json,
-            )
+            reason = self._streamed_fallback_reason(llm_recognizer_mode=llm_recognizer_mode)
             if reason is not None:
                 logger.warning(
                     "%s Falling back to discrete execution: running the three stages sequentially, each "
@@ -2177,7 +2182,7 @@ class LocalJobRunner:
             logger.info("Pipeline phase 2/3: LLM Recognizer (only mode)")
             llm_manifest = self.run_llm_recognition(
                 input_path=first_stage_input_path,
-                output_path=str(recognizer_output_path),
+                output_path=str(llm_recognizer_output_path),
                 _id_column="row_id",
                 **llm_kw,
             )
@@ -2186,12 +2191,11 @@ class LocalJobRunner:
         elif llm_recognizer_mode == "merge":
             # Run both regex recognizer and LLM recognizer, then merge
             logger.info("Pipeline phase 2/3: Recognizer + LLM Recognizer (merge mode)")
-            regex_output_path = join_location(output_path, "04a_regex_recognizer_output")
 
             # --- Standard regex recognizer ---
             recognizer_manifest = self.run_recognition(
                 input_path=rec_input_path,
-                output_path=str(regex_output_path),
+                output_path=str(recognizer_output_path),
                 _id_column="row_id",
                 **r_kwargs,
             )
@@ -2208,7 +2212,7 @@ class LocalJobRunner:
 
             # --- Merge results via Ray Data join ---
             logger.info("Merging regex and LLM recognizer results")
-            rec_files = list_parquet_files(regex_output_path)
+            rec_files = list_parquet_files(recognizer_output_path)
             llm_files = list_parquet_files(llm_recognizer_output_path)
 
             node_cpus = self._machine().cpus
@@ -2225,7 +2229,7 @@ class LocalJobRunner:
                 reg_passthrough = [c for c in passthrough_cols if c in regex_names]
                 reg_status = [c for c in status_cols if c in regex_names]
 
-                regex_ds = ray.data.read_parquet(str(regex_output_path)).select_columns(
+                regex_ds = ray.data.read_parquet(str(recognizer_output_path)).select_columns(
                     ["row_id", "text_hash", "recognizer_results_json", *reg_passthrough, *reg_status]
                 )
                 regex_renames = {
@@ -2260,14 +2264,14 @@ class LocalJobRunner:
                     aggregator_ray_remote_args={"num_cpus": agg_cpus},
                 )
                 merged_ds = joined_ds.map_batches(_resolve_merged_batch, batch_format="pyarrow")
-                merged_ds.write_parquet(str(recognizer_output_path), compression="zstd")
+                merged_ds.write_parquet(str(merged_output_path), compression="zstd")
 
             else:
                 raise RuntimeError(
                     "llm_recognizer_mode='merge' needs output from both recognizers, and one wrote none."
                 )
 
-            out_files = list_parquet_files(recognizer_output_path)
+            out_files = list_parquet_files(merged_output_path)
             merged_count = pads.dataset(out_files).count_rows() if out_files else 0
             logger.info("Merged %d notes from regex + LLM recognizers", merged_count)
 
@@ -2293,7 +2297,7 @@ class LocalJobRunner:
         write_text_file(key_file, key_hex)
 
         anonymizer_manifest = self.run_anonymization(
-            input_path=str(recognizer_output_path),
+            input_path=str(final_recognizer_path),
             output_path=str(anonymizer_output_path),
             salt_path=str(salt_file),
             key_path=str(key_file),
@@ -2301,19 +2305,6 @@ class LocalJobRunner:
             **dict(a_kw),
         )
         results["anonymizer"] = anonymizer_manifest
-
-        # ------------------------------------------------------------------
-        # Visualizer JSON output
-        # ------------------------------------------------------------------
-        if produce_visualizer_json:
-            logger.info("Creating visualizer JSON files")
-            self._write_visualizer_json(
-                output_path=Path(output_path),
-                transformer_output_path=Path(transformer_output_path),
-                recognizer_output_path=Path(recognizer_output_path),
-                anonymizer_output_path=Path(anonymizer_output_path),
-            )
-            results["visualizer_json"] = True
 
         results["total_elapsed_seconds"] = round(time.time() - start_time, 2)
         logger.info(f"Pipeline complete in {results['total_elapsed_seconds']:.1f}s")
@@ -2324,15 +2315,11 @@ class LocalJobRunner:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _streamed_fallback_reason(
-        *,
-        llm_recognizer_mode: str,
-        produce_visualizer_json: bool,
-    ) -> str | None:
+    def _streamed_fallback_reason(*, llm_recognizer_mode: str) -> str | None:
         """Return why streamed cannot be used here, or None if it can.
 
         These are *fallbacks*, not errors: refusing to run because the caller
-        asked for resume (or for the visualizer) would be the wrong trade. The
+        asked for resume would be the wrong trade. The
         hard refusals — multi-node and ≤4-CPU nodes — live in
         ``check_streamed_admission``, because they cannot be satisfied at all.
         """
@@ -2341,12 +2328,6 @@ class LocalJobRunner:
                 "llm_recognizer_mode='merge' requires discrete execution: chaining it would consume the "
                 "shared transformer prefix twice (re-running GPU inference) and needs a row_id join that "
                 "streamed mode does not yet implement."
-            )
-        if produce_visualizer_json:
-            return (
-                "produce_visualizer_json=True requires discrete execution: the visualizer's recognizer JSON "
-                "needs the pre-anonymization recognizer_results_json, which the anonymizer does not carry "
-                "into the final output and which streamed mode writes no intermediate for."
             )
         return None
 
@@ -2471,7 +2452,7 @@ class LocalJobRunner:
             kw.get("enable_checkpoint") is False for kw in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs)
         )
 
-        anonymizer_output_path = output_path / "06_anonymizer_output"
+        anonymizer_output_path = output_path / STAGE_DIRS["anonymizer"]
 
         use_llm = llm_recognizer_mode == "only"
 
@@ -2731,101 +2712,6 @@ class LocalJobRunner:
             return input_path
         return f"{input_path}/*.parquet"
 
-    def _get_text_source(
-        self,
-        trans_files: list[Path],
-    ) -> dict[str, str]:
-        """Return a mapping of text_hash to note_text, preferring transformer output."""
-        if not trans_files:
-            return {}
-        schema = pq.read_schema(trans_files[0])
-        if "note_text" not in schema.names or "text_hash" not in schema.names:
-            return {}
-        tbl = pads.dataset(trans_files).to_table(columns=["text_hash", "note_text"])
-        text_map: dict[str, str] = {}
-        for row in tbl.to_pylist():
-            th = row.get("text_hash")
-            txt = row.get("note_text")
-            if th is not None and th not in text_map:
-                text_map[th] = txt or ""
-        return text_map
-
-    def _write_recognizer_json_files(
-        self,
-        cli_recognizer_dir: Path,
-        recognizer_output_path: Path,
-        transformer_output_path: Path,
-    ) -> None:
-        """Write per-sample recognizer JSON files for the visualizer."""
-        rec_files = list(recognizer_output_path.glob("**/*.parquet"))
-        if not rec_files:
-            return
-        tbl_rec = pads.dataset(rec_files).to_table()
-        trans_files = list(transformer_output_path.glob("**/*.parquet"))
-        text_map = self._get_text_source(trans_files)
-        count = 0
-        for row in tbl_rec.to_pylist():
-            sample_id = str(row.get("text_hash") or "unknown")
-            note_text = row.get("note_text") or text_map.get(sample_id, "")
-            results_json = row.get("recognizer_results_json") or "[]"
-            recognizer_results = json.loads(results_json) if results_json else []
-            cli_data = {"key": sample_id, "value": note_text, "recognizer_results": recognizer_results}
-            with (cli_recognizer_dir / f"{sample_id}.json").open("w", encoding="utf-8") as f:
-                json.dump(cli_data, f, ensure_ascii=False, indent=2)
-            count += 1
-        logger.info(f"Created {count} recognizer JSON files in {cli_recognizer_dir}")
-
-    def _write_anonymizer_json_files(
-        self,
-        cli_anonymizer_dir: Path,
-        anonymizer_output_path: Path,
-    ) -> None:
-        """Write per-sample anonymizer JSON files for the visualizer."""
-        anon_files = list(anonymizer_output_path.glob("**/*.parquet"))
-        if not anon_files:
-            return
-        tbl_anon = pads.dataset(anon_files).to_table()
-        count = 0
-        for row in tbl_anon.to_pylist():
-            sample_id = next(
-                (str(row[col]) for col in ["text_hash"] if row.get(col) is not None),
-                "unknown",
-            )
-            anonymized_text = next(
-                (
-                    str(row[col])
-                    for col in ["anonymized_note_text", "deid_note_text", "anonymized_text", "note_text"]
-                    if row.get(col) is not None
-                ),
-                "",
-            )
-            items: list[Any] = []
-            for col in ["anonymizer_results_json", "items", "anonymizer_results"]:
-                if row.get(col) is not None:
-                    items_data = row[col]
-                    items = json.loads(items_data) if isinstance(items_data, str) else list(items_data)
-                    break
-            cli_data = {"text": anonymized_text, "items": items}
-            with (cli_anonymizer_dir / f"{sample_id}.json").open("w", encoding="utf-8") as f:
-                json.dump(cli_data, f, ensure_ascii=False, indent=2)
-            count += 1
-        logger.info(f"Created {count} anonymizer JSON files in {cli_anonymizer_dir}")
-
-    def _write_visualizer_json(
-        self,
-        output_path: Path,
-        transformer_output_path: Path,
-        recognizer_output_path: Path,
-        anonymizer_output_path: Path,
-    ) -> None:
-        """Write JSON files for tide2-visualizer (unified_interface.py)."""
-        cli_recognizer_dir = output_path / "cli_recognizer_json"
-        cli_anonymizer_dir = output_path / "cli_anonymizer_json"
-        cli_recognizer_dir.mkdir(parents=True, exist_ok=True)
-        cli_anonymizer_dir.mkdir(parents=True, exist_ok=True)
-        self._write_recognizer_json_files(cli_recognizer_dir, recognizer_output_path, transformer_output_path)
-        self._write_anonymizer_json_files(cli_anonymizer_dir, anonymizer_output_path)
-
 
 def run_recognition_simple(
     input_path: str,
@@ -2968,7 +2854,6 @@ def run_pipeline_simple(
     output_dir: str,
     model_name: str,
     *,
-    produce_visualizer_json: bool = False,
     num_cpus: int | None = None,
     num_gpus: int | None = None,
     object_store_gb: int | None = None,
@@ -2985,7 +2870,6 @@ def run_pipeline_simple(
         input_path: Parquet file path, directory, glob, or list of file paths with at least a 'note_text' column.
         output_dir: Output directory for all intermediate and final files.
         model_name: Transformer model name.
-        produce_visualizer_json: Write JSON files for tide2-visualizer.
         num_cpus: CPUs for Ray.
         num_gpus: GPUs for Ray.
         object_store_gb: Object store size in GB.
@@ -3009,7 +2893,6 @@ def run_pipeline_simple(
             input_path=input_path,
             output_dir=output_dir,
             model_name=model_name,
-            produce_visualizer_json=produce_visualizer_json,
             transformer_kwargs=transformer_kwargs,
             recognizer_kwargs=recognizer_kwargs,
             anonymizer_kwargs=anonymizer_kwargs,

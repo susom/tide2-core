@@ -22,6 +22,7 @@ are the real ones.
 """
 
 import json
+import shutil
 import sys
 from collections import Counter
 from datetime import UTC
@@ -30,6 +31,7 @@ from datetime import datetime
 import pandas as pd
 import pyarrow.dataset as pads
 import pytest
+import ray
 from ray import cloudpickle
 
 import tide2.actors
@@ -38,6 +40,7 @@ import tide2.utils.gcs_resource_manager
 from tide2.runner.local_runner import LocalJobRunner
 
 pytestmark = pytest.mark.integration
+KEEP_RAY_BETWEEN_TESTS = True
 
 # Ray pickles actor classes by reference, and `tests/` is not importable inside a
 # Ray worker. Serializing this module by value ships the stub actor with the task.
@@ -94,33 +97,28 @@ class StubTransformerActor:
         return res
 
 
-@pytest.fixture
-def stub_transformer(monkeypatch):
+@pytest.fixture(scope="module", autouse=True)
+def shared_ray():
+    """One Ray cluster for the whole module: starting and stopping Ray is most of a run's cost."""
+    ray.init(num_cpus=8, include_dashboard=False, log_to_driver=False, ignore_reinit_error=True)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(LocalJobRunner, "shutdown", lambda _self: None)
+        yield
+    ray.shutdown()
+
+
+@pytest.fixture(scope="module")
+def stub_transformer():
     """Point both execution modes at the stub actor and skip the model download."""
-    monkeypatch.setattr(tide2.actors, "create_transformer_actor", lambda **_k: StubTransformerActor)
-    monkeypatch.setattr(
-        tide2.transformers.config,
-        "load_model_config",
-        lambda _name: {"MODEL_MAX_LENGTH": 512, "CHUNK_OVERLAP_SIZE": 40},
-    )
-    monkeypatch.setattr(tide2.utils.gcs_resource_manager, "resolve_model_path", lambda **_k: "/nonexistent/model")
-
-
-@pytest.fixture
-def notes():
-    """20 notes with repeated patients, so per-patient jitter is exercised."""
-    rows = []
-    for i in range(20):
-        rows.append(
-            {
-                "note_text": (
-                    f"Patient {STUB_ENTITY} (MRN 1234{i:02d}) was seen on 03/1{i % 9}/2021 "
-                    f"at 555-010{i % 9}-2020. Follow-up scheduled."
-                ),
-                "patient_id": f"patient-{i % 5}",
-            }
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tide2.actors, "create_transformer_actor", lambda **_k: StubTransformerActor)
+        patch.setattr(
+            tide2.transformers.config,
+            "load_model_config",
+            lambda _name: {"MODEL_MAX_LENGTH": 512, "CHUNK_OVERLAP_SIZE": 40},
         )
-    return pd.DataFrame(rows)
+        patch.setattr(tide2.utils.gcs_resource_manager, "resolve_model_path", lambda **_k: "/nonexistent/model")
+        yield
 
 
 def _rows_with_failures(*, with_results):
@@ -146,7 +144,7 @@ def _rows_with_failures(*, with_results):
 
 
 def read_output(output_dir):
-    files = list((output_dir / "06_anonymizer_output").glob("**/*.parquet"))
+    files = list((output_dir / "anonymizer_output").glob("**/*.parquet"))
     assert files, f"no anonymizer output under {output_dir}"
     return pads.dataset(files).to_table().to_pandas()
 
@@ -187,10 +185,21 @@ def entity_totals(df):
     return totals
 
 
+@pytest.fixture(scope="module")
+def shared_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("parity")
+
+
+@pytest.fixture(scope="module")
+def equivalence(shared_dir, notes, stub_transformer):
+    """One discrete and one streamed run, shared by the tests that compare or inspect them."""
+    return {mode: run_mode(shared_dir, notes, mode) for mode in ("discrete", "streamed")}
+
+
 class TestDiscreteStreamedEquivalence:
-    def test_equivalent_output(self, tmp_path, notes, stub_transformer):
-        discrete_manifest, discrete = run_mode(tmp_path, notes, "discrete")
-        streamed_manifest, streamed = run_mode(tmp_path, notes, "streamed")
+    def test_equivalent_output(self, notes, equivalence):
+        discrete_manifest, discrete = equivalence["discrete"]
+        streamed_manifest, streamed = equivalence["streamed"]
 
         assert discrete_manifest["execution_mode"] == "discrete"
         assert streamed_manifest["execution_mode"] == "streamed"
@@ -212,54 +221,57 @@ class TestDiscreteStreamedEquivalence:
 
         assert entity_totals(discrete) == entity_totals(streamed)
 
-    def test_streamed_writes_no_intermediates(self, tmp_path, notes, stub_transformer):
-        run_mode(tmp_path, notes, "streamed")
-        out = tmp_path / "streamed"
-        assert (out / "06_anonymizer_output").exists()
-        assert not (out / "01_transformer_input.parquet").exists()
-        assert not (out / "02_transformer_output").exists()
-        assert not (out / "04_recognizer_output").exists()
+    def test_streamed_writes_no_intermediates(self, shared_dir, equivalence):
+        out = shared_dir / "streamed"
+        assert (out / "anonymizer_output").exists()
+        assert not (out / "transformer_output").exists()
+        assert not (out / "recognizer_output").exists()
 
-    def test_raw_note_text_never_reaches_the_sink(self, tmp_path, notes, stub_transformer):
-        _, streamed = run_mode(tmp_path, notes, "streamed")
+    def test_raw_note_text_never_reaches_the_sink(self, equivalence):
+        _, streamed = equivalence["streamed"]
         assert "note_text" not in streamed.columns
         assert "anonymized_note_text" in streamed.columns
 
 
+@pytest.fixture(scope="module")
+def checkpointed(shared_dir, notes, stub_transformer):
+    return run_mode(shared_dir, notes, "streamed", checkpoint=True, name="checkpointed")
+
+
 class TestStreamedCheckpoint:
-    def test_checkpointed_streamed_run_matches_discrete(self, tmp_path, notes, stub_transformer):
-        _, discrete = run_mode(tmp_path, notes, "discrete")
-        manifest, streamed = run_mode(tmp_path, notes, "streamed", checkpoint=True)
+    def test_checkpointed_streamed_run_matches_discrete(self, shared_dir, equivalence, checkpointed):
+        manifest, streamed = checkpointed
+        _, discrete = equivalence["discrete"]
 
         assert manifest["dropped_rows"] == 0
         assert set(discrete["row_id"]) == set(streamed["row_id"])
-        assert (tmp_path / "streamed" / "06_anonymizer_output_ray_checkpoint").exists()
+        assert (shared_dir / "checkpointed" / "anonymizer_output_ray_checkpoint").exists()
 
-    def test_rerun_into_the_same_folder_adds_no_rows(self, tmp_path, notes, stub_transformer):
-        _, first = run_mode(tmp_path, notes, "streamed", checkpoint=True)
-        manifest, second = run_mode(tmp_path, notes, "streamed", checkpoint=True)
+    def test_rerun_into_the_same_folder_adds_no_rows(self, shared_dir, notes, checkpointed):
+        _, first = checkpointed
+        manifest, second = run_mode(shared_dir, notes, "streamed", checkpoint=True, name="checkpointed")
 
         assert manifest["output_rows"] == len(notes)
         assert second["row_id"].is_unique
         assert set(first["row_id"]) == set(second["row_id"])
 
-    def test_rerun_with_more_rows_processes_only_the_new_ones(self, tmp_path, notes, stub_transformer):
+    def test_rerun_with_more_rows_processes_only_the_new_ones(self, shared_dir, notes, stub_transformer):
         """A larger input stands in for a run that stopped after the first rows."""
-        run_mode(tmp_path, notes.iloc[:8], "streamed", checkpoint=True, name="resume")
-        before = {f.name for f in (tmp_path / "resume" / "06_anonymizer_output").glob("**/*.parquet")}
+        run_mode(shared_dir, notes.iloc[:3], "streamed", checkpoint=True, name="resume")
+        before = {f.name for f in (shared_dir / "resume" / "anonymizer_output").glob("**/*.parquet")}
 
-        manifest, resumed = run_mode(tmp_path, notes, "streamed", checkpoint=True, name="resume")
+        manifest, resumed = run_mode(shared_dir, notes, "streamed", checkpoint=True, name="resume")
 
-        after = {f.name for f in (tmp_path / "resume" / "06_anonymizer_output").glob("**/*.parquet")}
+        after = {f.name for f in (shared_dir / "resume" / "anonymizer_output").glob("**/*.parquet")}
         assert before <= after and before != after
         assert manifest["output_rows"] == len(notes)
         assert resumed["row_id"].is_unique
         assert len(resumed) == len(notes)
 
-    def test_rerun_without_a_checkpoint_is_refused_after_it_appends(self, tmp_path, notes, stub_transformer):
-        run_mode(tmp_path, notes, "streamed", checkpoint=False)
+    def test_rerun_without_a_checkpoint_is_refused_after_it_appends(self, shared_dir, notes, equivalence):
+        shutil.copytree(shared_dir / "streamed", shared_dir / "refused")
         with pytest.raises(RuntimeError, match="fresh output_dir"):
-            run_mode(tmp_path, notes, "streamed", checkpoint=False)
+            run_mode(shared_dir, notes, "streamed", checkpoint=False, name="refused")
 
 
 class TestRowReconciliation:

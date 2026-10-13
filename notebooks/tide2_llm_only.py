@@ -67,6 +67,7 @@ input_parquet = output_path / "input_notes.parquet"
 df.to_parquet(input_parquet, index=False)
 
 from tide2.runner import LocalJobRunner
+from tide2.runner.utils import write_visualizer_json
 
 runner = LocalJobRunner(num_cpus=4, object_store_gb=2)
 try:
@@ -74,7 +75,6 @@ try:
         input_path=str(input_parquet),
         output_dir=OUTPUT_DIR,
         model_name="unused-in-llm-only-mode",
-        produce_visualizer_json=True,
         salt_hex="00" * 32,
         key_hex="11" * 32,
         llm_recognizer_mode="only",
@@ -96,6 +96,8 @@ try:
             print(f"  {key}: {value}")
 finally:
     runner.shutdown()
+
+write_visualizer_json(OUTPUT_DIR)
 
 # ---------------------------------------------------------------------------
 # Part 2: Apply MaskingAnonymizer to recognizer output
@@ -122,7 +124,7 @@ engine.add_anonymizer(MaskingAnonymizer)
 
 # Read recognizer output + original note text
 output_path = Path(OUTPUT_DIR)
-recognizer_output_dir = output_path / "04_recognizer_output"
+recognizer_output_dir = output_path / "llm_recognizer_output"
 rec_files = list(recognizer_output_dir.glob("**/*.parquet"))
 if not rec_files:
     print("No recognizer output found. Part 1 may have failed.")

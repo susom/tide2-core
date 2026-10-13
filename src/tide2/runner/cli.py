@@ -4,6 +4,7 @@ TIDE 2.0 Runner CLI.
 
 Commands:
     run             Run a processing job (recognition, anonymization, transformer)
+    visualizer-json Write the JSON files that tide2-visualizer reads, from a finished run
 
 Usage Examples:
     # Run recognition locally
@@ -270,7 +271,6 @@ def cmd_run(args: argparse.Namespace) -> None:
                 input_path=args.input,
                 output_dir=args.output,
                 model_name=args.model,
-                produce_visualizer_json=getattr(args, "produce_visualizer_json", False),
                 salt_hex=getattr(args, "salt_hex", "00" * 32),
                 key_hex=getattr(args, "key_hex", "11" * 32),
                 transformer_kwargs=t_kw,
@@ -302,6 +302,23 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     finally:
         runner.shutdown()
+
+
+def cmd_visualizer_json(args: argparse.Namespace) -> None:
+    """Write the visualizer JSON files for a finished pipeline run."""
+    from tide2.runner.utils import write_visualizer_json
+
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    try:
+        counts = write_visualizer_json(args.output, args.json_dir)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    for name, count in counts.items():
+        print(f"  {name}: {count:,}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -448,11 +465,6 @@ Examples:
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
     )
     # Pipeline-specific arguments
-    run_p.add_argument(
-        "--produce-visualizer-json",
-        action="store_true",
-        help="Write JSON files for tide2-visualizer (pipeline jobs)",
-    )
     run_p.add_argument("--salt-hex", default="00" * 32, help="Hex-encoded FPE salt (pipeline jobs)")
     run_p.add_argument("--key-hex", default="11" * 32, help="Hex-encoded FPE key (pipeline jobs)")
     run_p.add_argument("--cpu-batch-size", type=int, help="Batch size for CPU actors (pipeline jobs, default: 100)")
@@ -536,8 +548,8 @@ Examples:
         help="Pipeline execution mode (pipeline jobs, default: discrete). 'discrete' runs each stage as its "
         "own Ray Data execution with a Parquet boundary between them — required for multi-machine runs, "
         "for ≲4-CPU boxes, and for row-level resume. 'streamed' chains the stages into one execution on a "
-        "single node, skipping the intermediate Parquet round-trips and overlapping GPU with CPU; it has no "
-        "row-level resume and writes only 06_anonymizer_output",
+        "single node, skipping the intermediate Parquet round-trips and overlapping GPU with CPU; it checkpoints "
+        "only its final output and writes only anonymizer_output",
     )
     run_p.add_argument("--dry-run", action="store_true", help="Validate setup without processing")
     run_p.add_argument("--include-dashboard", action="store_true", help="Enable Ray dashboard (port 8265)")
@@ -545,6 +557,22 @@ Examples:
         "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging level"
     )
     run_p.set_defaults(func=cmd_run)
+
+    # =========================================================================
+    # visualizer-json command
+    # =========================================================================
+    viz_p = subparsers.add_parser(
+        "visualizer-json",
+        help="Write the JSON files that tide2-visualizer reads, from a finished pipeline run",
+    )
+    viz_p.add_argument("--output", "-o", required=True, help="Local output folder of the pipeline run")
+    viz_p.add_argument(
+        "--json-dir", help="Folder for cli_recognizer_json/ and cli_anonymizer_json/ (default: --output)"
+    )
+    viz_p.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Logging level"
+    )
+    viz_p.set_defaults(func=cmd_visualizer_json)
 
     # Parse and execute
     args = parser.parse_args(argv)
@@ -560,7 +588,7 @@ def _cli_supplied_dests(run_parser: argparse.ArgumentParser, argv: list[str]) ->
     """Return the dests the user actually typed on the command line.
 
     The parsed value alone cannot tell us this: an explicit
-    ``--no-hardware-autotune`` and an unset ``--produce-visualizer-json`` both read
+    ``--no-hardware-autotune`` and an unset ``--jitter-required`` both read
     as ``False``. Matching argv against each action's option strings is what keeps
     "CLI flags always override config values" true for the negative flags.
     """

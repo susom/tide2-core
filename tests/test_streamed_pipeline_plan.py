@@ -294,7 +294,7 @@ class TestPlanShape:
         assert [type(op["fn"]).__name__ or op["fn"] for op in ds.ops]  # three operators were chained
         assert len(ds.ops) == 3
         assert ds.ops[0]["fn"] is streamed_env["transformer_actor"]
-        assert ds.state["sink"][0].endswith("06_anonymizer_output")
+        assert ds.state["sink"][0].endswith("anonymizer_output")
         assert result["execution_mode"] == "streamed"
         assert result["input_rows"] == 2
 
@@ -313,7 +313,7 @@ class TestPlanShape:
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        sink = streamed_env["output_dir"] / "06_anonymizer_output"
+        sink = streamed_env["output_dir"] / "anonymizer_output"
         sink.mkdir(parents=True)
         pq.write_table(pa.table({"row_id": ["old-1"]}), str(sink / "earlier-run.parquet"))
         streamed_env["input_rows"] = 1  # this attempt writes the one remaining row
@@ -337,7 +337,7 @@ class TestPlanShape:
         monkeypatch.setattr(ray.data.DataContext, "get_current", staticmethod(lambda: ctx))
         run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"])
         assert ctx.checkpoint_config.id_column == "row_id"
-        assert ctx.checkpoint_config.checkpoint_path.endswith("06_anonymizer_output_ray_checkpoint")
+        assert ctx.checkpoint_config.checkpoint_path.endswith("anonymizer_output_ray_checkpoint")
 
     def test_checkpointing_can_be_turned_off(self, streamed_env, df, monkeypatch):
         ctx = MagicMock(checkpoint_config="leftover")
@@ -468,28 +468,21 @@ class TestFallbacks:
         )
         return seen
 
-    @pytest.mark.parametrize(
-        ("overrides", "expected_in_warning"),
-        [({"produce_visualizer_json": True}, "produce_visualizer_json=True")],
-    )
-    def test_falls_back_to_discrete_with_a_corrected_manifest(
-        self, discrete_spy, in_file, tmp_path, caplog, overrides, expected_in_warning
-    ):
-        with caplog.at_level("WARNING"):
-            result = lr.LocalJobRunner().run_pipeline(
+    def test_merge_mode_falls_back_to_discrete_with_a_warning(self, discrete_spy, in_file, tmp_path, caplog):
+        with caplog.at_level("WARNING"), pytest.raises(RuntimeError, match="needs output from both"):
+            lr.LocalJobRunner().run_pipeline(
                 input_path=in_file,
                 output_dir=str(tmp_path),
                 model_name="m",
                 execution_mode="streamed",
-                **overrides,
+                llm_recognizer_mode="merge",
             )
         assert "streamed" not in discrete_spy
-        assert result["execution_mode"] == "discrete"
-        assert expected_in_warning in caplog.text
+        assert "llm_recognizer_mode='merge'" in caplog.text
         assert "Falling back to discrete execution" in caplog.text
 
     def test_merge_mode_cannot_be_streamed(self):
-        reason = lr.LocalJobRunner._streamed_fallback_reason(llm_recognizer_mode="merge", produce_visualizer_json=False)
+        reason = lr.LocalJobRunner._streamed_fallback_reason(llm_recognizer_mode="merge")
         assert reason is not None and "merge" in reason
 
     def test_no_fallback_for_a_plain_streamed_run(self, discrete_spy, in_file, tmp_path):

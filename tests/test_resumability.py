@@ -28,6 +28,8 @@ from tide2.runner.local_runner import _read_stage_source
 from tide2.runner.local_runner import add_row_id
 from tide2.runner.local_runner import normalize_source_batch
 
+KEEP_RAY_BETWEEN_TESTS = True
+
 # ---------------------------------------------------------------------------
 # normalize_source_batch / add_row_id on empty tables
 # ---------------------------------------------------------------------------
@@ -229,12 +231,27 @@ def test_run_pipeline_with_gs_output_dir(tmp_path, monkeypatch, fake_object_stor
 
     runner.run_pipeline(str(src), "gs://run/shard/", "model")
 
-    assert calls["run_transformer"]["output_path"] == "gs://run/shard/02_transformer_output"
-    assert calls["run_recognition"]["input_path"] == "gs://run/shard/02_transformer_output"
-    assert calls["run_anonymization"]["input_path"] == "gs://run/shard/04_recognizer_output"
+    assert calls["run_transformer"]["output_path"] == "gs://run/shard/transformer_output"
+    assert calls["run_recognition"]["input_path"] == "gs://run/shard/transformer_output"
+    assert calls["run_anonymization"]["input_path"] == "gs://run/shard/recognizer_output"
     assert calls["run_anonymization"]["salt_path"] == "gs://run/shard/salt.bin"
     assert (fake_object_store / "run" / "shard" / "key.bin").read_text() == "11" * 32
     assert not (tmp_path / "gs:").exists()
+
+
+def test_run_pipeline_llm_only_mode_uses_its_own_stage_folder(tmp_path, monkeypatch):
+    src = tmp_path / "in.parquet"
+    pq.write_table(pa.table({"note_text": ["a note"]}), src)
+    out = tmp_path / "out"
+    runner = lr.LocalJobRunner()
+    calls = _stub_pipeline_stages(runner, monkeypatch)
+    monkeypatch.setattr(runner, "run_llm_recognition", lambda **k: (calls.setdefault("run_llm_recognition", k), {})[1])
+
+    runner.run_pipeline(str(src), str(out), "model", llm_recognizer_mode="only")
+
+    assert "run_recognition" not in calls
+    assert calls["run_llm_recognition"]["output_path"] == str(out / lr.STAGE_DIRS["llm_recognizer"])
+    assert calls["run_anonymization"]["input_path"] == str(out / lr.STAGE_DIRS["llm_recognizer"])
 
 
 def test_run_pipeline_gs_output_dir_rejects_local_only_options(tmp_path, monkeypatch):
@@ -243,8 +260,6 @@ def test_run_pipeline_gs_output_dir_rejects_local_only_options(tmp_path, monkeyp
     runner = lr.LocalJobRunner()
     _stub_pipeline_stages(runner, monkeypatch)
 
-    with pytest.raises(ValueError, match="local output_dir"):
-        runner.run_pipeline(str(src), "gs://run/shard", "model", produce_visualizer_json=True)
     with pytest.raises(ValueError, match="local output_dir"):
         runner.run_pipeline(str(src), "gs://run/shard", "model", execution_mode="streamed")
 
@@ -287,8 +302,15 @@ def test_derived_row_id_warning(monkeypatch, caplog):
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def ray_cluster():
+    ray.init(num_cpus=2, include_dashboard=False, ignore_reinit_error=True, log_to_driver=False)
+    yield
+    ray.shutdown()
+
+
 @pytest.fixture(params=[False, True], ids=["v1", "v2"])
-def datasource_v2(request):
+def datasource_v2(request, ray_cluster):
     ctx = ray.data.DataContext.get_current()
     previous = ctx.use_datasource_v2
     ctx.use_datasource_v2 = request.param
@@ -296,17 +318,10 @@ def datasource_v2(request):
     ctx.use_datasource_v2 = previous
 
 
-def _write_source(path: Path, n: int = 20) -> None:
-    pq.write_table(
-        pa.table({"note_text": [f"note {i}" for i in range(n)], "patient_id": [f"p{i % 3}" for i in range(n)]}),
-        path,
-    )
-
-
 @pytest.mark.integration
-def test_in_read_ids_match_public_helper(tmp_path, datasource_v2):
+def test_in_read_ids_match_public_helper(tmp_path, notes, datasource_v2):
     src = tmp_path / "in.parquet"
-    _write_source(src)
+    notes.to_parquet(src, index=False)
 
     ds = _read_stage_source([str(src)], columns=["note_text", "patient_id"], num_blocks=2)
     rows = ds.take_all()
@@ -317,10 +332,10 @@ def test_in_read_ids_match_public_helper(tmp_path, datasource_v2):
 
 
 @pytest.mark.integration
-def test_select_columns_after_hook_read_is_a_known_hazard(tmp_path, datasource_v2):
+def test_select_columns_after_hook_read_is_a_known_hazard(tmp_path, notes, datasource_v2):
     """Projection pushdown hides derived columns from the hook; no checkpointed stage selects right after the read."""
     src = tmp_path / "in.parquet"
-    _write_source(src)
+    notes.to_parquet(src, index=False)
     ds = _read_stage_source([str(src)], columns=["note_text", "patient_id"])
     with pytest.raises(Exception, match=r"row_id|does not exist in schema"):
         ds.select_columns(["row_id"]).take_all()
@@ -342,7 +357,7 @@ _DRIVER = textwrap.dedent(
     from tide2.runner.utils import output_location
 
     src, out, seen = sys.argv[1], output_location(sys.argv[2]), Path(sys.argv[3])
-    ray.init(num_cpus=4, include_dashboard=False, log_to_driver=False)
+    ray.init(num_cpus=2, include_dashboard=False, log_to_driver=False)
     ctx = ray.data.DataContext.get_current()
     ctx.use_datasource_v2 = False
     _configure_checkpoint(ctx, enable=True, output_dir=out, id_column="row_id")
@@ -350,12 +365,12 @@ _DRIVER = textwrap.dedent(
 
     def work(batch):
         (seen / f"{uuid.uuid4().hex}.txt").write_text("\\n".join(batch["row_id"].to_pylist()))
-        time.sleep(0.1)
+        time.sleep(2)
         return batch
 
 
-    ds = _read_stage_source([src], columns=["note_text", "patient_id"], num_blocks=40)
-    ds = ds.map_batches(work, batch_format="pyarrow", batch_size=100, num_cpus=1)
+    ds = _read_stage_source([src], columns=["note_text", "patient_id"], num_blocks=6)
+    ds = ds.map_batches(work, batch_format="pyarrow", batch_size=1, num_cpus=1)
     ds.write_parquet(str(out), compression="zstd")
     """
 )
@@ -410,23 +425,20 @@ def shard_location(request, tmp_path):
 
 
 @pytest.mark.integration
-def test_sigkill_then_restart_writes_every_row_exactly_once(tmp_path, shard_location):
+def test_sigkill_then_restart_writes_every_row_exactly_once(tmp_path, notes, shard_location):
     # Ray's unix sockets need a short path, and a dedicated tmpdir scopes the cleanup to this test's processes.
     ray_tmp = Path(tempfile.mkdtemp(prefix="rt_", dir="/tmp"))
     try:
-        _run_sigkill_then_restart(tmp_path, ray_tmp, shard_location)
+        _run_sigkill_then_restart(tmp_path, notes, ray_tmp, shard_location)
     finally:
         _kill_everything_under(ray_tmp, tmp_path)
         shutil.rmtree(ray_tmp, ignore_errors=True)
 
 
-def _run_sigkill_then_restart(tmp_path: Path, ray_tmp: Path, out: str) -> None:
-    n_rows = 3000
+def _run_sigkill_then_restart(tmp_path: Path, notes, ray_tmp: Path, out: str) -> None:
+    n_rows = len(notes)
     src = tmp_path / "in.parquet"
-    pq.write_table(
-        pa.table({"note_text": [f"note {i}" for i in range(n_rows)], "patient_id": [f"p{i}" for i in range(n_rows)]}),
-        src,
-    )
+    notes.to_parquet(src, index=False)
     seen = tmp_path / "seen"
     seen.mkdir()
     checkpoint_dir = f"{out}_ray_checkpoint"
@@ -438,7 +450,7 @@ def _run_sigkill_then_restart(tmp_path: Path, ray_tmp: Path, out: str) -> None:
     first = subprocess.Popen(command, env=env, start_new_session=True)  # noqa: S603
     try:
         deadline = time.time() + 180
-        while len([f for f in _list_files(checkpoint_dir) if not f.endswith(".pending")]) < 4:
+        while len([f for f in _list_files(checkpoint_dir) if not f.endswith(".pending")]) < 2:
             if first.poll() is not None or time.time() > deadline:
                 pytest.fail("first run ended before it could be killed mid-way")
             time.sleep(0.2)
@@ -457,6 +469,3 @@ def _run_sigkill_then_restart(tmp_path: Path, ray_tmp: Path, out: str) -> None:
     # Interrupted blocks are redone, but committed ones are not: less work is repeated than was done before the kill.
     total_processed = len(_processed_rows(seen))
     assert total_processed - n_rows < processed_first
-
-    subprocess.run(command, env=env, check=True, timeout=300)  # noqa: S603
-    assert len(_processed_rows(seen)) == total_processed

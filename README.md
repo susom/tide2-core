@@ -229,12 +229,11 @@ reads the folder the previous stage wrote.
 | Ray Data executions | one per stage | one for the whole pipeline |
 | Stage boundary | Parquet on disk | blocks in the object store |
 | GPU/CPU overlap | none (stages are sequential) | yes — the GPU stage overlaps the CPU stages |
-| Files written | `02_`, `04_`, `06_` | `06_anonymizer_output` only |
+| Files written | one folder per stage | `anonymizer_output` only |
 | Row-level resume (`--no-checkpoint` off) | yes, every stage | final output only: a rerun into the same folder skips written rows but redoes every unfinished row through all stages |
 | Multi-machine (stage 1 on a GPU box, 2/3 elsewhere) | yes — this is the point of the mode | no, refused |
 | Nodes with ≤ 4 CPUs | supported (see below) | refused |
 | `--llm-recognizer-mode merge` | yes | falls back to discrete |
-| `--produce-visualizer-json` | yes | falls back to discrete |
 | Return shape | per-stage manifests | `operator_stats` + row counts |
 
 > **Merge mode limitation:** In `--llm-recognizer-mode merge`, discrete regex and
@@ -267,7 +266,7 @@ Two consequences worth planning for:
   so size `--object-store-gb` for it. If the object store overflows, Ray spills
   — in plaintext — to its local spill directory. That is the same clinical text
   already present on the host in memory, in the input Parquet, and (in discrete
-  mode) in the `02_`/`04_` intermediates, so plan host disk accordingly and
+  mode) in the stage folders (`transformer_output`, `recognizer_output`), so plan host disk accordingly and
   dispose of the host's storage under the same rules as the output directory.
 
 ```bash
@@ -304,7 +303,7 @@ attempt, which guarantee 3 already rules out.
 
 ```text
 gs://bucket/<run_id>/<shard>/                       # outputs, salt.bin, key.bin
-    02_transformer_output/  04_recognizer_output/  06_anonymizer_output/
+    transformer_output/  recognizer_output/  anonymizer_output/
 gs://bucket/<run_id>/<shard>/<stage>_ray_checkpoint  # per-stage checkpoints
 ```
 
@@ -318,7 +317,7 @@ tide2-runner run pipeline \
 
 Output locations may be a local path, a network mount (NFS, Filestore, gcsfuse;
 the same path must be visible on every node), or a `gs://` URI. `--execution-mode
-streamed` and `--produce-visualizer-json` need a local directory.
+streamed` needs a local directory.
 
 **What happens when something fails.**
 
@@ -345,6 +344,15 @@ deduplicate.** If notes can repeat, supply a unique `row_id` per source row in
 your data preparation. If identical notes must land in the same shard, shard by a
 hash of `row_id`.
 
+**When duplicates happen.**
+
+| Situation | Duplicate rows in the output? | Action |
+|---|---|---|
+| Checkpoint on, same output folder | No. | None. |
+| Checkpoint off, same output folder | Yes. Ray appends to the folder. | Use a fresh output folder. |
+| Two live runs on one output folder | Output can be lost or duplicated. | Prevent it (guarantee 3). |
+| Repeated `(text_hash, patient_id)` and no unique `row_id` | No. On resume the repeats count as one row, so some are skipped. | Supply a unique `row_id`. |
+
 **Do not**
 
 - share an output or checkpoint location between live jobs;
@@ -353,7 +361,7 @@ hash of `row_id`.
 
 **Cloud setup.** Every worker needs credentials for the bucket. `salt.bin` and
 `key.bin` are written under the run's output location, so access to that
-location also grants access to the key material. The `02_` and `04_`
+location also grants access to the key material. The `transformer_output` and `recognizer_output`
 intermediates contain raw notes and need the same retention rules as the input.
 
 #### Why small boxes deadlock (and how to size knobs by hardware)
@@ -564,6 +572,18 @@ Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
 tide2-visualizer
 ```
 
+To load the results of a pipeline run in the visualizer, write the JSON files it
+reads. This is a separate step, run after the pipeline on a local output folder:
+
+```bash
+tide2-runner visualizer-json -o ./output
+```
+
+The command writes `cli_recognizer_json/` and `cli_anonymizer_json/` in the output
+folder. Use `--json-dir` to write them in another folder. After a `streamed` run only
+the anonymizer JSON is written, because that mode keeps no recognizer folder. In
+Python, call `tide2.runner.utils.write_visualizer_json(output_dir, json_dir=None)`.
+
 ## Docker Images
 
 The `Dockerfile` builds one image, based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`, whose entrypoint is
@@ -691,7 +711,7 @@ Pages artifact.
 - `--execution-mode streamed` keeps raw `note_text` in Ray's object store for the
   whole run and may spill it, in plaintext, to Ray's local spill directory. The
   host is the trust boundary in either mode — it already holds the input Parquet
-  and, in `discrete` mode, the `02_`/`04_` intermediates — so size host disk for
+  and, in `discrete` mode, the `transformer_output` and `recognizer_output` folders — so size host disk for
   it and dispose of the host's storage under the same rules as the output
   directory. If you point Ray's spill directory at a network mount or an
   object-store FUSE path, that data leaves the host; keep it on local storage.

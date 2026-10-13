@@ -3,6 +3,7 @@
 import hashlib
 import inspect
 import json
+import shutil
 
 import pandas as pd
 import pyarrow as pa
@@ -12,6 +13,7 @@ import pytest
 import ray
 
 import tide2.runner.local_runner as lr
+from tide2.runner.cli import main as cli_main
 from tide2.runner.local_runner import DEFAULT_ROW_ID_PATIENT_ID
 from tide2.runner.local_runner import LocalJobRunner
 from tide2.runner.local_runner import PipelineInputInfo
@@ -19,6 +21,7 @@ from tide2.runner.local_runner import _inspect_pipeline_input
 from tide2.runner.local_runner import _resolve_merged_batch
 from tide2.runner.local_runner import add_row_id
 from tide2.runner.local_runner import normalize_source_batch
+from tide2.runner.utils import write_visualizer_json
 from tide2.utils.text_processing import compute_text_hash
 
 # ---------------------------------------------------------------------------
@@ -359,55 +362,79 @@ def test_resolve_merged_batch_coalesces_patient_id(regex_pid, llm_pid, expected)
 # ---------------------------------------------------------------------------
 
 
-def test_visualizer_json_helpers(tmp_path):
-    """_write_recognizer_json_files and _write_anonymizer_json_files write valid JSON."""
-    runner = LocalJobRunner()
-    rec_dir = tmp_path / "rec_out"
-    rec_dir.mkdir()
-    trans_dir = tmp_path / "trans_out"
-    trans_dir.mkdir()
-    anon_dir = tmp_path / "anon_out"
-    anon_dir.mkdir()
+def _write_visualizer_stage_folders(root, *, recognizer_folders=("recognizer",), with_anonymizer=True):
+    for stage in ("transformer", *recognizer_folders):
+        folder = root / lr.STAGE_DIRS[stage]
+        folder.mkdir(parents=True)
+        results = [{"entity_type": "NAME", "start": 0, "end": 6, "score": 0.9}] if stage != "transformer" else []
+        columns = {"text_hash": ["h1"], "note_text": ["Sample note"]}
+        if stage != "transformer":
+            columns["recognizer_results_json"] = [json.dumps(results)]
+            if stage == "merged_recognizer":
+                columns["recognizer_results_json"] = [json.dumps(results * 2)]
+        pq.write_table(pa.table(columns), folder / "part-0.parquet")
+    if with_anonymizer:
+        folder = root / lr.STAGE_DIRS["anonymizer"]
+        folder.mkdir(parents=True)
+        tbl_anon = pa.table(
+            {
+                "text_hash": ["h1"],
+                "anonymized_note_text": ["<NAME> note"],
+                "anonymizer_results_json": [json.dumps([{"entity_type": "NAME", "start": 0, "end": 6}])],
+            }
+        )
+        pq.write_table(tbl_anon, folder / "part-0.parquet")
 
-    # Recognizer output with note_text
-    tbl_rec = pa.table(
-        {
-            "text_hash": ["h1"],
-            "note_text": ["Sample note"],
-            "recognizer_results_json": [json.dumps([{"entity_type": "NAME", "start": 0, "end": 6, "score": 0.9}])],
-        }
-    )
-    pq.write_table(tbl_rec, rec_dir / "part-0.parquet")
 
-    # Anonymizer output
-    tbl_anon = pa.table(
-        {
-            "text_hash": ["h1"],
-            "anonymized_note_text": ["<NAME> note"],
-            "anonymizer_results_json": [json.dumps([{"entity_type": "NAME", "start": 0, "end": 6}])],
-        }
-    )
-    pq.write_table(tbl_anon, anon_dir / "part-0.parquet")
+def test_write_visualizer_json_writes_both_folders(tmp_path):
+    _write_visualizer_stage_folders(tmp_path)
 
-    runner._write_visualizer_json(
-        output_path=tmp_path,
-        transformer_output_path=trans_dir,
-        recognizer_output_path=rec_dir,
-        anonymizer_output_path=anon_dir,
-    )
+    counts = write_visualizer_json(tmp_path)
 
-    rec_json = tmp_path / "cli_recognizer_json" / "h1.json"
-    assert rec_json.exists()
-    rec_data = json.loads(rec_json.read_text())
+    assert counts == {"recognizer_json": 1, "anonymizer_json": 1}
+    rec_data = json.loads((tmp_path / "cli_recognizer_json" / "h1.json").read_text())
     assert rec_data["key"] == "h1"
     assert rec_data["value"] == "Sample note"
     assert len(rec_data["recognizer_results"]) == 1
-
-    anon_json = tmp_path / "cli_anonymizer_json" / "h1.json"
-    assert anon_json.exists()
-    anon_data = json.loads(anon_json.read_text())
+    anon_data = json.loads((tmp_path / "cli_anonymizer_json" / "h1.json").read_text())
     assert anon_data["text"] == "<NAME> note"
     assert len(anon_data["items"]) == 1
+
+
+def test_write_visualizer_json_prefers_the_merged_recognizer_folder(tmp_path):
+    _write_visualizer_stage_folders(tmp_path, recognizer_folders=("recognizer", "llm_recognizer", "merged_recognizer"))
+
+    write_visualizer_json(tmp_path)
+
+    rec_data = json.loads((tmp_path / "cli_recognizer_json" / "h1.json").read_text())
+    assert len(rec_data["recognizer_results"]) == 2
+
+
+def test_write_visualizer_json_after_a_streamed_run_writes_only_the_anonymizer_json(tmp_path):
+    _write_visualizer_stage_folders(tmp_path, recognizer_folders=())
+    shutil.rmtree(tmp_path / lr.STAGE_DIRS["transformer"])
+
+    counts = write_visualizer_json(tmp_path, json_dir=tmp_path / "viz")
+
+    assert counts == {"recognizer_json": 0, "anonymizer_json": 1}
+    assert (tmp_path / "viz" / "cli_anonymizer_json" / "h1.json").exists()
+    assert not (tmp_path / "viz" / "cli_recognizer_json").exists()
+
+
+def test_write_visualizer_json_needs_a_local_folder(tmp_path):
+    with pytest.raises(ValueError, match="local output_dir"):
+        write_visualizer_json("gs://bucket/run")
+    with pytest.raises(ValueError, match="not a directory"):
+        write_visualizer_json(tmp_path / "missing")
+
+
+def test_visualizer_json_command_writes_the_files(tmp_path):
+    _write_visualizer_stage_folders(tmp_path)
+
+    cli_main(["visualizer-json", "-o", str(tmp_path)])
+
+    assert (tmp_path / "cli_recognizer_json" / "h1.json").exists()
+    assert (tmp_path / "cli_anonymizer_json" / "h1.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +443,7 @@ def test_visualizer_json_helpers(tmp_path):
 
 
 def test_no_intermediate_parquet_files_written_in_discrete(tmp_path, monkeypatch):
-    """01_transformer_input.parquet and 03_llm_recognizer_input.parquet are never written."""
+    """The runner writes no copy of the input; only stage folders appear under the output directory."""
     f = tmp_path / "in.parquet"
     pq.write_table(pa.table({"note_text": ["text1"], "row_id": ["r1"]}), f)
 
@@ -435,8 +462,8 @@ def test_no_intermediate_parquet_files_written_in_discrete(tmp_path, monkeypatch
         model_name="test-model",
     )
 
-    assert not (out_dir / "01_transformer_input.parquet").exists()
-    assert not (out_dir / "03_llm_recognizer_input.parquet").exists()
+    assert not list(out_dir.glob("*.parquet"))
+    assert not list(out_dir.glob("*input*"))
 
 
 def test_pipeline_does_not_materialize_normalized_input(tmp_path, monkeypatch):
@@ -467,7 +494,7 @@ def test_pipeline_does_not_materialize_normalized_input(tmp_path, monkeypatch):
             model_name="test-model",
             transformer_kwargs={"enable_checkpoint": enable_checkpoint},
         )
-        assert not (out / "01_normalized_input").exists()
+        assert not list(out.glob("*input*"))
         assert stages_called["transformer"]["input_path"] == [str(f)]
         assert "_normalize" not in stages_called["transformer"]
         assert stages_called["transformer"]["_id_column"] == "row_id"
@@ -513,7 +540,7 @@ def test_standalone_run_anonymization_row_id(tmp_path):
             dry_run=True,
         )
         assert ("row_id" in res["columns_detected"]) is expect_row_id
-        assert not (out / "00_normalized_anonymizer_input").exists()
+        assert not list(out.glob("*input*"))
 
 
 def test_run_anonymization_takes_the_keys_as_files_or_as_hex(tmp_path):
@@ -589,7 +616,7 @@ def test_merge_mode_ray_join_no_fanout(tmp_path):
     )
     pq.write_table(tbl_llm, llm_out / "part-0.parquet")
 
-    merged_out = tmp_path / "04_recognizer_output"
+    merged_out = tmp_path / "merged_recognizer_output"
 
     regex_ds = ray.data.read_parquet(str(rec_out)).select_columns(
         ["row_id", "text_hash", "recognizer_results_json", "patient_id", "note_text"]

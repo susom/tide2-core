@@ -773,8 +773,17 @@ def test_directory_with_an_all_null_passthrough_block_reads_back(tmp_path, null_
         assert table["jitter"].null_count == 2
 
 
+@pytest.fixture(scope="module")
+def ray_cluster():
+    import ray
+
+    ray.init(num_cpus=2, include_dashboard=False, ignore_reinit_error=True, log_to_driver=False)
+    yield
+    ray.shutdown()
+
+
 @pytest.mark.integration
-def test_a_fully_failed_batch_still_writes_a_readable_parquet_directory(tmp_path):
+def test_a_fully_failed_batch_still_writes_a_readable_parquet_directory(tmp_path, ray_cluster):
     """Ray writes one file per block; a null-typed file must not break reading the directory."""
     import pyarrow.dataset as pads
     import ray
@@ -790,18 +799,14 @@ def test_a_fully_failed_batch_still_writes_a_readable_parquet_directory(tmp_path
         }
         for i in range(20)
     ]
-    ray.init(num_cpus=2, include_dashboard=False, ignore_reinit_error=True, log_to_driver=False)
-    try:
-        ds = ray.data.from_items(rows, override_num_blocks=4).map_batches(
-            RecognizerWorker,
-            batch_size=5,
-            batch_format="numpy",
-            compute=ray.data.ActorPoolStrategy(size=1),
-        )
-        ds.write_parquet(str(tmp_path / "out"))
-        table = pads.dataset(str(tmp_path / "out")).to_table()
-    finally:
-        ray.shutdown()
+    ds = ray.data.from_items(rows, override_num_blocks=4).map_batches(
+        RecognizerWorker,
+        batch_size=5,
+        batch_format="numpy",
+        compute=ray.data.ActorPoolStrategy(size=1),
+    )
+    ds.write_parquet(str(tmp_path / "out"))
+    table = pads.dataset(str(tmp_path / "out")).to_table()
 
     assert table.num_rows == 20
     assert table["recognizer_results_json"].null_count == 10
