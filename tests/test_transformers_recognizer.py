@@ -553,3 +553,31 @@ class TestTransformersRecognizer:
             assert len(tokens) == 1
         finally:
             Path(config_path).unlink()
+
+    @patch("tide2.transformers.core.resolve_model_path")
+    @patch("tide2.transformers.config.get_resource_path")
+    def test_unresolved_token_budget_propagates_instead_of_defaulting_to_512(self, mock_get_path, mock_resolve_model):
+        mock_resolve_model.return_value = "/fake/model/path"
+        config_path = create_temp_config(self.mock_config)
+        mock_get_path.return_value = config_path
+
+        try:
+            recognizer = TransformersRecognizer(model_name="TEST_MODEL")
+
+            class UnresolvedCore:
+                def tokenize_ragged(self, texts):
+                    return {"input_ids": [[1, 2]], "offset_mapping": [[(0, 1), (1, 2)]]}
+
+                def forward_windows(self, windows):
+                    raise AssertionError("no window may be forwarded without a token budget")
+
+                @property
+                def token_budget(self):
+                    raise ValueError("MODEL_MAX_LENGTH is not resolved")
+
+            recognizer._core = UnresolvedCore()
+
+            with pytest.raises(ValueError, match="MODEL_MAX_LENGTH"):
+                recognizer._infer_raw_tokens("sample text")
+        finally:
+            Path(config_path).unlink()

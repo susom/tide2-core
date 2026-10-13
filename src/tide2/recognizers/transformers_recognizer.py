@@ -253,13 +253,8 @@ class TransformersRecognizer(EntityRecognizer):
         if isinstance(input_ids, Mock) or isinstance(offset_mapping, Mock):
             return self._infer_raw_tokens_fallback(text)
 
-        try:
-            tb = self._core.token_budget
-            token_budget = tb if isinstance(tb, int) and tb > 0 else 510
-        except Exception:
-            mml = getattr(self._core, "model_max_length", 512)
-            model_max_length = mml if isinstance(mml, int) and mml > 0 else 512
-            token_budget = max(1, model_max_length - 2)
+        # token_budget is the single length authority and raises when the model length cannot be resolved.
+        token_budget = self._core.token_budget
 
         windows = plan_windows([text], input_ids, offset_mapping, token_budget, self.text_overlap_length)
         if not windows:
