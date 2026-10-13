@@ -72,6 +72,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         ("write_cpus", "write_cpus"),
         ("enable_checkpoint", "enable_checkpoint"),
         ("override_num_blocks", "override_num_blocks"),
+        ("id_column", "_id_column"),
     ]:
         val = getattr(args, attr, None)
         if val is not None:
@@ -123,6 +124,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("transformer_cpus", "transformer_cpus"),
                 ("enable_checkpoint", "enable_checkpoint"),
                 ("override_num_blocks", "override_num_blocks"),
+                ("id_column", "_id_column"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -159,6 +161,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("write_cpus", "write_cpus"),
                 ("enable_checkpoint", "enable_checkpoint"),
                 ("prompt_name", "prompt_name"),
+                ("id_column", "_id_column"),
             ]:
                 val = getattr(args, attr, None)
                 if val is not None:
@@ -279,6 +282,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 llm_recognizer_mode=llm_mode,
                 llm_recognizer_kwargs=llm_kw if llm_kw else None,
                 execution_mode=getattr(args, "execution_mode", None) or "discrete",
+                _id_column=getattr(args, "id_column", "row_id"),
             )
         else:
             print(f"Unknown job type: {args.job_type}")
@@ -440,6 +444,11 @@ Examples:
         "llm-recognizer/pipeline). REQUIRED on tiny clusters (≲4 CPUs, e.g. Colab): the checkpoint "
         "shuffle deadlocks Ray's reservation allocator. Trades resume capability, not correctness. "
         "With checkpointing on, a restart on the same output path skips notes already written.",
+    )
+    run_p.add_argument(
+        "--id-column",
+        default="row_id",
+        help="Column to use as primary key for Ray Data row-level checkpointing (default: row_id)",
     )
     run_p.add_argument("--model", help="Model name (required for transformer jobs)")
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")
@@ -613,8 +622,9 @@ def _apply_config(args: argparse.Namespace, run_parser: argparse.ArgumentParser,
     # YAML uses the same names as argparse dest (e.g. num_actors, batch_size)
     supplied = _cli_supplied_dests(run_parser, sys.argv[1:] if argv is None else argv)
     for key, value in config.items():
-        if key not in supplied:
-            setattr(args, key, value)
+        dest = "id_column" if key == "_id_column" else key
+        if dest not in supplied:
+            setattr(args, dest, value)
 
 
 if __name__ == "__main__":

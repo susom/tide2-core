@@ -331,7 +331,7 @@ guarantees:
 | 1 | Shards are disjoint: no note is in two shards. | tide2 does not deduplicate across jobs. |
 | 2 | Each shard has its own stable output location, reused by every retry. | The checkpoint lives next to the output (`<output>_ray_checkpoint`). A new location means a new start. |
 | 3 | At most one live attempt per shard. Launch a replacement only after the previous attempt is dead. | Ray's startup cleanup deletes the pending checkpoints and output files of any job using the same location, and committed IDs are loaded once at start. |
-| 4 | Retries use the same input, model, settings and keys. Change any of them and use a new `<run_id>`. | The checkpoint is keyed on the configured ID column (`row_id` for full pipeline and anonymization; `text_hash` by default for standalone transformer, recognizer, and llm-recognizer), so it cannot tell that a note was processed with different settings. |
+| 4 | Retries use the same input, model, settings and keys. Change any of them and use a new `<run_id>`. | The checkpoint is keyed on `row_id` by default across all stages (override with `--id-column`), so it cannot tell that a note was processed with different settings. |
 
 No manifest and no lock are required. A lock only guards against a duplicate
 attempt, which guarantee 3 already rules out.
