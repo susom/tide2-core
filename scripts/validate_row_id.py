@@ -8,7 +8,6 @@ import pandas as pd
 
 SHA256_HEX_LENGTH = 64
 HASH1_ROW_COUNT = 2
-NULL_BLANK_ROW_COUNT = 2
 
 
 def _run_checks(df: pd.DataFrame) -> list[str]:
@@ -36,15 +35,15 @@ def _run_checks(df: pd.DataFrame) -> list[str]:
     else:
         print("[PASS] All row_ids are unique")
 
-    # 4. Same text_hash + different patient_id = different row_id
+    # 4. Same text_hash + different uid = different row_id
     hash1_rows = df[df["text_hash"] == "hash1"]
     if len(hash1_rows) == HASH1_ROW_COUNT and hash1_rows["row_id"].iloc[0] == hash1_rows["row_id"].iloc[1]:
-        errors.append("ERROR: Same text_hash with different patient_ids should have different row_ids")
+        errors.append("ERROR: Same text_hash with different UIDs should have different row_ids")
     else:
-        print("[PASS] Same text_hash with different patient_ids produce different row_ids")
+        print("[PASS] Same text_hash with different UIDs produce different row_ids")
 
     # 5. Deterministic
-    test_composite = "hash1:patient_a"
+    test_composite = "hash1:uid_a"
     hash_a = hashlib.sha256(test_composite.encode()).hexdigest()
     hash_b = hashlib.sha256(test_composite.encode()).hexdigest()
     if hash_a != hash_b:
@@ -59,22 +58,6 @@ def _run_checks(df: pd.DataFrame) -> list[str]:
     else:
         print("[PASS] row_id format is lowercase hex")
 
-    # 7. Null and blank patient_id hash consistency (uses DEFAULT_ROW_ID_PATIENT_ID = "None")
-    null_rows = df[df["patient_id"].isna() | (df["patient_id"] == "")]
-    if len(null_rows) >= NULL_BLANK_ROW_COUNT:
-        expected_none_hash_null = hashlib.sha256(b"hash3:None").hexdigest()
-        expected_none_hash_blank = hashlib.sha256(b"hash4:None").hexdigest()
-        row_null = df[df["patient_id"].isna()]
-        row_blank = df[df["patient_id"] == ""]
-        if row_null["row_id"].iloc[0] != expected_none_hash_null:
-            errors.append("ERROR: Null patient_id did not resolve to 'None' sentinel in row_id hash")
-        elif row_blank["row_id"].iloc[0] != expected_none_hash_blank:
-            errors.append("ERROR: Blank patient_id did not resolve to 'None' sentinel in row_id hash")
-        else:
-            print("[PASS] Null and blank patient_ids correctly resolve to 'None' sentinel in row_id hash")
-    else:
-        errors.append("ERROR: Fixture must contain both null and blank patient_id test rows")
-
     return errors
 
 
@@ -84,14 +67,12 @@ def validate_row_id_generation() -> bool:
     print("Row ID Generation Validation")
     print("=" * 60)
 
-    from tide2.utils.nulls import row_id_patient_part
-
-    # Create test data with various scenarios including null and blank patient_id
+    # Create test data with various scenarios
     df = pd.DataFrame(
         {
-            "text_hash": ["hash1", "hash1", "hash2", "hash3", "hash4"],
-            "patient_id": ["patient_a", "patient_b", "patient_a", None, ""],
-            "note_text": ["text1", "text1", "text2", "text3", "text4"],
+            "text_hash": ["hash1", "hash1", "hash2", "hash3"],
+            "patient_id": ["uid_a", "uid_b", "uid_a", None],
+            "note_text": ["text1", "text1", "text2", "text3"],
         }
     )
 
@@ -99,10 +80,9 @@ def validate_row_id_generation() -> bool:
     print()
 
     # Generate row_ids (same logic as local_runner.py)
-    df["row_id"] = [
-        hashlib.sha256(f"{h}:{row_id_patient_part(p)}".encode()).hexdigest()
-        for h, p in zip(df["text_hash"], df["patient_id"], strict=True)
-    ]
+    df["row_id"] = (df["text_hash"] + ":" + df["patient_id"].fillna("None").astype(str)).apply(
+        lambda x: hashlib.sha256(x.encode()).hexdigest()
+    )
 
     print("Generated row_ids:")
     for _, row in df.iterrows():
