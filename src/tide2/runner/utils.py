@@ -353,6 +353,14 @@ def _file_stem(sample_id: str) -> str:
     return hashlib.sha256(sample_id.encode()).hexdigest()
 
 
+def _sample_id(row: dict[str, Any]) -> str:
+    """Return the file-name-safe id of a row: its ``row_id``, or the legacy ``text_hash``."""
+    for column in ("row_id", "text_hash"):
+        if row.get(column) is not None:
+            return _file_stem(str(row[column]))
+    return "unknown"
+
+
 def _parquet_files_under(folder: Path) -> list[Path]:
     return sorted(folder.glob("**/*.parquet")) if folder.is_dir() else []
 
@@ -381,16 +389,17 @@ def _write_recognizer_json(files: list[Path], text_map: dict[str, str], out_dir:
     out_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     for row in pads.dataset(files).to_table().to_pylist():
-        sample_id = str(row.get("text_hash") or "unknown")
+        sample_id = _sample_id(row)
+        text_hash = row.get("text_hash")
         results_json = row.get("recognizer_results_json") or "[]"
         data = {
             "key": sample_id,
-            "value": row.get("note_text") or text_map.get(sample_id, ""),
+            "text_hash": text_hash,
+            "row_id": row.get("row_id"),
+            "value": row.get("note_text") or text_map.get(str(text_hash), ""),
             "recognizer_results": json.loads(results_json),
         }
-        (out_dir / f"{_file_stem(sample_id)}.json").write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        (out_dir / f"{sample_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         count += 1
     return count
 
@@ -401,7 +410,7 @@ def _write_anonymizer_json(files: list[Path], out_dir: Path) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     for row in pads.dataset(files).to_table().to_pylist():
-        sample_id = str(row["text_hash"]) if row.get("text_hash") is not None else "unknown"
+        sample_id = _sample_id(row)
         text = next(
             (
                 str(row[col])
@@ -416,9 +425,7 @@ def _write_anonymizer_json(files: list[Path], out_dir: Path) -> int:
                 items = json.loads(row[col]) if isinstance(row[col], str) else list(row[col])
                 break
         data = {"text": text, "items": items}
-        (out_dir / f"{_file_stem(sample_id)}.json").write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        (out_dir / f"{sample_id}.json").write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         count += 1
     return count
 

@@ -440,8 +440,32 @@ def test_write_visualizer_json_keeps_file_names_inside_the_json_folders(tmp_path
     written = sorted(p.relative_to(run).parent.as_posix() for p in run.rglob("*.json"))
     assert written == ["cli_anonymizer_json"] * 2 + ["cli_recognizer_json"] * 2
     assert not (tmp_path / "escape.json").exists()
-    keys = {json.loads(p.read_text())["key"] for p in (run / "cli_recognizer_json").glob("*.json")}
-    assert keys == {"../../escape", "/tmp/absolute"}
+    recognizer = [json.loads(p.read_text()) for p in (run / "cli_recognizer_json").glob("*.json")]
+    assert {r["text_hash"] for r in recognizer} == {"../../escape", "/tmp/absolute"}
+    anonymizer_ids = {p.stem for p in (run / "cli_anonymizer_json").glob("*.json")}
+    assert {r["key"] for r in recognizer} == anonymizer_ids
+
+
+def test_write_visualizer_json_keeps_rows_that_share_a_text_hash(tmp_path):
+    run = tmp_path / "run"
+    for stage in ("recognizer", "anonymizer"):
+        folder = run / lr.STAGE_DIRS[stage]
+        folder.mkdir(parents=True)
+        columns = {"text_hash": ["same", "same"], "row_id": ["r1", "r2"], "note_text": ["a", "a"]}
+        if stage == "recognizer":
+            columns["recognizer_results_json"] = ["[]", "[]"]
+        else:
+            columns["anonymized_note_text"] = ["x", "y"]
+            columns["anonymizer_results_json"] = ["[]", "[]"]
+        pq.write_table(pa.table(columns), folder / "part-0.parquet")
+
+    counts = write_visualizer_json(run)
+
+    assert counts == {"recognizer_json": 2, "anonymizer_json": 2}
+    files = sorted(p.name for p in (run / "cli_anonymizer_json").glob("*.json"))
+    assert files == ["r1.json", "r2.json"]
+    assert json.loads((run / "cli_anonymizer_json" / "r2.json").read_text())["text"] == "y"
+    assert json.loads((run / "cli_recognizer_json" / "r2.json").read_text())["key"] == "r2"
 
 
 def test_write_visualizer_json_needs_a_local_folder(tmp_path):
