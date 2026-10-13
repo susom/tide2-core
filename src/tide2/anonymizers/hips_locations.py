@@ -6,6 +6,7 @@ substitutes selected via HMAC-based secure string selection from census data.
 
 import re
 import string
+from pathlib import Path
 from typing import ClassVar
 
 import pandas as pd
@@ -21,6 +22,11 @@ from tide2.utils.resource_utils import STATES_FILE
 from tide2.utils.resource_utils import STREET_NAMES_FILE
 from tide2.utils.resource_utils import ZIPCODES_FILE
 from tide2.utils.resource_utils import get_resource_path
+
+# Hospital length bucket thresholds
+TINY_HOSPITAL_MAX_LEN = 5
+SHORT_HOSPITAL_MAX_LEN = 15
+MEDIUM_HOSPITAL_MAX_LEN = 30
 
 
 class HipsLocationAnonymizer(Operator):
@@ -88,8 +94,11 @@ class HipsLocationAnonymizer(Operator):
 
         if cls._hospitals is None:
             # load the list for hospitals
-            with open(get_resource_path(HOSPITALS_FILE), encoding="utf-8") as f:
-                cls._hospitals = [line.strip().lower() for line in f.readlines() if line.strip()]
+            cls._hospitals = [
+                line.strip()
+                for line in Path(get_resource_path(HOSPITALS_FILE)).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
 
         if cls._hospitals_by_length is None:
             # Bucket hospitals by length for length-aware selection
@@ -102,11 +111,11 @@ class HipsLocationAnonymizer(Operator):
             }
             for h in cls._hospitals:
                 length = len(h)
-                if length <= 5:
+                if length <= TINY_HOSPITAL_MAX_LEN:
                     cls._hospitals_by_length["tiny"].append(h)
-                elif length <= 15:
+                elif length <= SHORT_HOSPITAL_MAX_LEN:
                     cls._hospitals_by_length["short"].append(h)
-                elif length <= 30:
+                elif length <= MEDIUM_HOSPITAL_MAX_LEN:
                     cls._hospitals_by_length["medium"].append(h)
                 else:
                     cls._hospitals_by_length["long"].append(h)
@@ -153,11 +162,11 @@ class HipsLocationAnonymizer(Operator):
         Returns:
             List of hospitals with similar length, or full list as fallback
         """
-        if text_length <= 5:
+        if text_length <= TINY_HOSPITAL_MAX_LEN:
             bucket = self.hospitals_by_length["tiny"]
-        elif text_length <= 15:
+        elif text_length <= SHORT_HOSPITAL_MAX_LEN:
             bucket = self.hospitals_by_length["short"]
-        elif text_length <= 30:
+        elif text_length <= MEDIUM_HOSPITAL_MAX_LEN:
             bucket = self.hospitals_by_length["medium"]
         else:
             bucket = self.hospitals_by_length["long"]
@@ -202,10 +211,7 @@ class HipsLocationAnonymizer(Operator):
             return True
 
         # Check if it's a single letter with punctuation (e.g., "A.", "B,")
-        if len(cleaned_text) == 1 and cleaned_text.isalpha():
-            return True
-
-        return False
+        return bool(len(cleaned_text) == 1 and cleaned_text.isalpha())
 
     def _component_cleaning(self, components: dict[str, str]) -> dict[str, str]:
         """Clean address components by stripping whitespace, lowercasing, and removing common punctuation."""
@@ -287,12 +293,16 @@ class HipsLocationAnonymizer(Operator):
             )
         else:
             # Use secure string selector for hospitals with length-aware bucket
-            input_text = text.strip().lower()
+            cleaned_text = text.strip()
+            input_text = cleaned_text.lower()
             hospital_bucket = self._get_hospital_bucket(len(input_text))
             new_text = secure_string_selector(salt, key, hospital_bucket, input_text)
-            # Uppercase the first letter if the original text was capitalized
-            if text and text[0].isupper():
-                new_text = new_text.title()
+            new_text = self.address_parser._apply_case_pattern(cleaned_text, new_text)
+
+            # Preserve any leading or trailing whitespace from the original span
+            leading_ws = text[: len(text) - len(text.lstrip())]
+            trailing_ws = text[len(text.rstrip()) :]
+            new_text = f"{leading_ws}{new_text}{trailing_ws}"
 
         return new_text
 

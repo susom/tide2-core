@@ -36,6 +36,7 @@ class TestHipsLocationAnonymizer:
         HipsLocationAnonymizer._countries_abbr = None
         HipsLocationAnonymizer._street_numbers = None
         HipsLocationAnonymizer._hospitals = None
+        HipsLocationAnonymizer._hospitals_by_length = None
         HipsLocationAnonymizer._address_parser = None
 
         # Create temporary test data files
@@ -73,7 +74,7 @@ class TestHipsLocationAnonymizer:
 
         # Create test hospitals data
         hospitals_data = (
-            "general hospital\nmetropolitan medical center\ncity clinic\nvalley health center\nriverview hospital"
+            "GMC\nGeneral Hospital\nMetropolitan Medical Center\nCity Clinic\nValley Health Center\nRiverview Hospital"
         )
         hospitals_path = os.path.join(self.temp_dir, "hospitals.txt")
         with open(hospitals_path, "w") as f:
@@ -438,3 +439,41 @@ class TestHipsLocationAnonymizer:
         for value in spurious_values:
             result = self.anonymizer.operate(value, params)
             assert result == value, f"Expected spurious value '{value}' to be returned unmodified"
+
+    def test_operate_hospital_casing_preserved(self):
+        """Test that hospital and institution replacements preserve input casing."""
+        params = {"entity_type": "HOSPITAL", "salt": self.valid_salt, "key": self.valid_key}
+
+        # Title Case input yields Title Case replacement
+        res_title = self.anonymizer.operate("Stanford Hospital", params)
+        assert res_title.istitle()
+
+        # ALL CAPS input yields ALL CAPS replacement
+        res_upper = self.anonymizer.operate("STANFORD HOSPITAL", params)
+        assert res_upper.isupper()
+
+        # Lowercase input yields lowercase replacement
+        res_lower = self.anonymizer.operate("stanford hospital", params)
+        assert res_lower.islower()
+
+    def test_operate_hospital_leading_whitespace(self):
+        """Test that leading or trailing whitespace preserves replacement casing and spacing."""
+        params = {"entity_type": "HOSPITAL", "salt": self.valid_salt, "key": self.valid_key}
+
+        res_leading = self.anonymizer.operate(" Stanford Hospital", params)
+        assert res_leading.startswith(" ")
+        assert res_leading.strip().istitle()
+
+        res_trailing = self.anonymizer.operate("Stanford Hospital ", params)
+        assert res_trailing.endswith(" ")
+        assert res_trailing.strip().istitle()
+
+    def test_operate_hospital_acronym(self):
+        """Test that acronyms preserve uppercase casing."""
+        params = {"entity_type": "HOSPITAL", "salt": self.valid_salt, "key": self.valid_key}
+
+        res_acronym = self.anonymizer.operate("SHC", params)
+        assert res_acronym.isupper()
+
+        res_lower_acronym = self.anonymizer.operate("shc", params)
+        assert res_lower_acronym.islower()
