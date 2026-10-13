@@ -121,6 +121,47 @@ def test_open_parquet_dataset_reads_local_files(tmp_path):
     assert runner_utils.open_parquet_dataset([str(tmp_path / "a.parquet")]).count_rows() == 2
 
 
+def test_remove_stage_dir_deletes_only_the_named_folder(tmp_path):
+    folder = tmp_path / "merged_recognizer_output"
+    (folder / "part").mkdir(parents=True)
+    (folder / "part" / "x.parquet").write_text("x")
+    sibling = tmp_path / "recognizer_output"
+    sibling.mkdir()
+
+    runner_utils.remove_stage_dir(folder, "merged_recognizer_output")
+    runner_utils.remove_stage_dir(folder, "merged_recognizer_output")
+
+    assert not folder.exists()
+    assert sibling.exists()
+
+
+def test_remove_stage_dir_refuses_other_names_and_symlinks(tmp_path):
+    target = tmp_path / "recognizer_output"
+    target.mkdir()
+    (target / "x").write_text("x")
+    link = tmp_path / "merged_recognizer_output"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match="not named"):
+        runner_utils.remove_stage_dir(target, "merged_recognizer_output")
+    with pytest.raises(ValueError, match="symlink"):
+        runner_utils.remove_stage_dir(link, "merged_recognizer_output")
+
+    assert (target / "x").exists()
+
+
+def test_remove_stage_dir_on_a_gs_folder(fake_object_store):
+    folder = fake_object_store / "run" / "shard" / "merged_recognizer_output"
+    folder.mkdir(parents=True)
+    (folder / "x").write_text("x")
+
+    runner_utils.remove_stage_dir("gs://run/shard/merged_recognizer_output", "merged_recognizer_output")
+
+    assert not folder.exists()
+    with pytest.raises(ValueError, match="no bucket"):
+        runner_utils.remove_stage_dir("gs://merged_recognizer_output", "merged_recognizer_output")
+
+
 def test_join_location():
     assert runner_utils.join_location("gs://b/run", "salt.bin") == "gs://b/run/salt.bin"
     assert runner_utils.join_location(Path("/x"), "salt.bin") == Path("/x/salt.bin")

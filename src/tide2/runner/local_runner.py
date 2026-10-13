@@ -81,6 +81,7 @@ from .utils import open_parquet_dataset
 from .utils import output_location
 from .utils import read_parquet_schema
 from .utils import read_text_file
+from .utils import remove_stage_dir
 from .utils import resolve_input_files
 from .utils import write_text_file
 
@@ -2223,6 +2224,9 @@ class LocalJobRunner:
             n_partitions = min(MIN_STREAMED_NODE_CPUS, max(1, int(node_cpus)))
 
             if rec_files and llm_files:
+                # The merged folder is derived from the two folders above, so a rerun replaces it
+                # instead of appending to it. Nothing is deleted when one of the sources is empty.
+                remove_stage_dir(merged_output_path, STAGE_DIRS["merged_recognizer"])
                 sample_schema = read_parquet_schema(rec_files[0])
                 regex_names = set(sample_schema.names)
                 passthrough_cols = ["note_text", "patient_id", "jitter", "patient_identifiers"]

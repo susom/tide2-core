@@ -8,6 +8,7 @@ This module provides common functions used across all execution modes
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,32 @@ def list_parquet_files(location: Path | str, *, recursive: bool = True) -> list[
         for info in filesystem.get_file_info(selector)
         if info.type == pafs.FileType.File and info.path.endswith(".parquet")
     )
+
+
+def remove_stage_dir(location: Path | str, expected_name: str) -> None:
+    """Delete one stage folder (local path or URI) so that it can be rebuilt; a missing folder is fine.
+
+    Raises:
+        ValueError: If the last path part is not ``expected_name``, the folder is a symlink,
+            or a URI has no bucket part. Nothing is deleted in these cases.
+    """
+    text = str(location).rstrip("/")
+    if text.rsplit("/", 1)[-1] != expected_name:
+        raise ValueError(f"Refusing to delete {text!r}: the folder is not named {expected_name!r}.")
+    if not is_uri(text):
+        folder = Path(text)
+        if folder.is_symlink():
+            raise ValueError(f"Refusing to delete {text!r}: it is a symlink.")
+        if folder.is_dir():
+            shutil.rmtree(folder)
+        return
+    from pyarrow import fs as pafs
+
+    filesystem, path = _filesystem_and_path(text)
+    if "/" not in path.strip("/"):
+        raise ValueError(f"Refusing to delete {text!r}: it has no bucket part.")
+    if filesystem.get_file_info(path).type == pafs.FileType.Directory:
+        filesystem.delete_dir(path)
 
 
 def open_parquet_dataset(files: list[str]) -> Any:

@@ -27,9 +27,12 @@ import sys
 from collections import Counter
 from datetime import UTC
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.dataset as pads
+import pyarrow.parquet as pq
 import pytest
 import ray
 from ray import cloudpickle
@@ -346,3 +349,88 @@ class TestUpstreamFailuresSurviveStreamedSource:
         assert statuses["streamed"] == statuses["discrete"]
         assert statuses["streamed"]["r0"] == "failed"
         assert statuses["streamed"]["r1"] == "success"
+
+
+def _write_recognizer_rows(folder, notes, name):
+    folder.mkdir(parents=True, exist_ok=True)
+    results = json.dumps([{"entity_type": "PERSON", "start": 8, "end": 16, "score": 0.9}])
+    pq.write_table(
+        pa.table(
+            {
+                "row_id": [f"r{i}" for i in range(len(notes))],
+                "text_hash": [f"h{i}" for i in range(len(notes))],
+                "note_text": list(notes["note_text"]),
+                "patient_id": list(notes["patient_id"]),
+                "recognizer_results_json": [results] * len(notes),
+            }
+        ),
+        folder / f"{name}.parquet",
+    )
+
+
+class TestMergeRerun:
+    """A rerun of merge mode replaces merged_recognizer_output; it never appends to it."""
+
+    @pytest.fixture
+    def merge_run(self, tmp_path, notes, monkeypatch):
+        in_file = tmp_path / "in.parquet"
+        notes.to_parquet(in_file, index=False)
+        out = tmp_path / "out"
+        state = {"write_sources": True}
+
+        def fake_stage(name):
+            def run(_self, **kwargs):
+                if state["write_sources"] and name in ("regex", "llm"):
+                    _write_recognizer_rows(Path(kwargs["output_path"]), notes, name)
+                return {}
+
+            return run
+
+        for method, name in [
+            ("run_transformer", "transformer"),
+            ("run_recognition", "regex"),
+            ("run_llm_recognition", "llm"),
+            ("run_anonymization", "anonymizer"),
+        ]:
+            monkeypatch.setattr(LocalJobRunner, method, fake_stage(name))
+
+        def run():
+            return LocalJobRunner(hardware_autotune=False).run_pipeline(
+                input_path=str(in_file),
+                output_dir=str(out),
+                model_name="stub-model",
+                llm_recognizer_mode="merge",
+                llm_recognizer_kwargs={"project_id": "p"},
+            )
+
+        return out, run, state
+
+    @staticmethod
+    def _merged_files(out):
+        return sorted((out / "merged_recognizer_output").glob("**/*.parquet"))
+
+    def test_rerun_replaces_the_merged_rows(self, notes, merge_run):
+        out, run, state = merge_run
+        run()
+        pq.write_table(pa.table({"row_id": ["stray"]}), out / "merged_recognizer_output" / "stray.parquet")
+        state["write_sources"] = False
+
+        run()
+
+        merged = pads.dataset(self._merged_files(out)).to_table().to_pandas()
+        assert len(merged) == len(notes)
+        assert merged["row_id"].is_unique
+        assert "stray" not in set(merged["row_id"])
+
+    def test_missing_source_leaves_the_merged_folder_alone(self, merge_run):
+        out, run, state = merge_run
+        run()
+        before = self._merged_files(out)
+        for f in (out / "llm_recognizer_output").glob("**/*.parquet"):
+            f.unlink()
+        state["write_sources"] = False
+
+        with pytest.raises(RuntimeError, match="needs output from both"):
+            run()
+
+        assert self._merged_files(out) == before

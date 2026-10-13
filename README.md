@@ -242,6 +242,11 @@ reads the folder the previous stage wrote.
 > notes for the same patient will experience Cartesian join expansion; upstream
 > deduplication or unique patient/note IDs are required. See
 > [Running under an external orchestrator](#running-under-an-external-orchestrator).
+>
+> A rerun rebuilds `merged_recognizer_output` from `recognizer_output` and
+> `llm_recognizer_output`: it deletes the merged folder and writes it again, so
+> keep both recognizer folders until the run is finished. If one of them has no
+> files, the merge stops with an error and deletes nothing.
 
 Use `streamed` for development, benchmarks, and single-box batches, where one
 cluster does all three stages. Stay on `discrete` for production, for anything
