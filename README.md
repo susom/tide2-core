@@ -267,12 +267,13 @@ reads the folder the previous stage wrote.
 > ```python
 > import uuid
 > import pyarrow as pa
+> import pyarrow.parquet as pq
 >
-> table = pa.parquet.read_table("notes.parquet")
+> table = pq.read_table("notes.parquet")
 > # Assign a unique UUID per record so every row has a distinct join key:
 > row_ids = [str(uuid.uuid4()) for _ in range(len(table))]
 > table = table.append_column("row_id", pa.array(row_ids, type=pa.string()))
-> pa.parquet.write_table(table, "prepared_notes.parquet")
+> pq.write_table(table, "prepared_notes.parquet")
 > ```
 
 Use `streamed` for development, benchmarks, and single-box batches, where one

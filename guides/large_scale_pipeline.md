@@ -255,21 +255,27 @@ When clinical notes can repeat (such as identical standard texts across encounte
 ```python
 import uuid
 import pyarrow as pa
+import pyarrow.parquet as pq
 
-# RECOMMENDED: Assign a globally unique UUID string per source record
-# This guarantees no checkpoint collisions or skipped rows when notes repeat
-row_ids = [str(uuid.uuid4()) for _ in range(len(source_table))]
-table_with_ids = source_table.append_column("row_id", pa.array(row_ids, type=pa.string()))
+# RECOMMENDED: Assign a globally unique UUID string per source record and persist to disk.
+# This guarantees no checkpoint collisions or skipped rows when notes repeat across retries.
+table = pq.read_table("source_notes.parquet")
+row_ids = [str(uuid.uuid4()) for _ in range(len(table))]
+table_with_ids = table.append_column("row_id", pa.array(row_ids, type=pa.string()))
+pq.write_table(table_with_ids, "prepared_notes.parquet")
 ```
 
 If notes are already known to be unique per patient, you can derive deterministic content IDs using `normalize_source_batch`:
 
 ```python
+import pyarrow.parquet as pq
 from tide2.runner.local_runner import normalize_source_batch
 
 # Content-derived IDs: derives sha256(text_hash:patient_id).
 # Notes with identical text and patient will share this ID.
-table_with_ids = normalize_source_batch(source_table)
+table = pq.read_table("source_notes.parquet")
+table_with_ids = normalize_source_batch(table)
+pq.write_table(table_with_ids, "prepared_notes.parquet")
 ```
 
 ---
