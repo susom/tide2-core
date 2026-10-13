@@ -464,6 +464,14 @@ def test_unknown_entity_type_gets_a_placeholder_not_a_deletion(anonymizer):
     assert (out["stage_status"], out["stage_reason"]) == ("degraded", "FOO")
 
 
+@pytest.mark.parametrize("label", ["Smith", "SMITH", "PERSON]\n[X", "A" * 500, "", "1ABC"])
+def test_an_unsafe_entity_type_label_is_replaced_by_entity(anonymizer, label):
+    out = _note(anonymizer, "Code Smith here", _spans((label, 5, 10)))
+    assert out["anonymized_note_text"] == "Code [ENTITY] here"
+    assert (out["stage_status"], out["stage_reason"]) == ("degraded", "ENTITY")
+    assert "Smith" not in out["anonymizer_results_json"]
+
+
 @pytest.mark.parametrize("entity_type", ["OTHER", "BASE64_IMAGE"])
 def test_configured_redactions_keep_a_placeholder(anonymizer, entity_type):
     out = _note(anonymizer, "see XXXXXX end", _spans((entity_type, 4, 10)))

@@ -511,7 +511,7 @@ or an exception message.
 
 | What happened | Output row | Status |
 |---|---|---|
-| An entity has no applicable anonymization path (an age format that is not recognized, a date that cannot be parsed, an unknown entity type) | The entity is replaced by `[ENTITY_TYPE]`; the rest is anonymized normally. | `degraded` |
+| An entity has no applicable anonymization path (an age format that is not recognized, a date that cannot be parsed, an unknown entity type) | The entity is replaced by `[ENTITY_TYPE]`; the rest is anonymized normally. An entity type that is not an upper-case identifier of up to 64 characters (`A-Z`, `0-9`, `_`), or that is the text of its own span, is written as `[ENTITY]`. | `degraded` |
 | An operator raises while anonymizing one entity, or `jitter_required` is set and the jitter is missing | That entity (all dates, for jitter) becomes `[ENTITY_TYPE]`; the rest is anonymized normally. | `failed`, with the entity and exception class |
 | A note's recognizer results or patient identifiers are malformed, a span is outside the text, or a stage raises for that note | Null results and null `anonymized_note_text`. | `failed`, with the stage and reason |
 | The GPU forward fails after the OOM recovery | Every note of that batch has null results. | `failed` (`transformer`) |

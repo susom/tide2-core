@@ -48,6 +48,7 @@ from tide2.anonymizers import presidio_patches
 from tide2.anonymizers.guarded import end_note
 from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import record_error
+from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
 from tide2.cryptographic.date_jitter import derive_date_jitter
@@ -281,12 +282,13 @@ class AnonymizerWorker:
 
         return operators
 
-    def _parse_recognizer_results(self, results_json: str | list | None, text_length: int) -> list[RecognizerResult]:
+    def _parse_recognizer_results(self, results_json: str | list | None, note_text: str) -> list[RecognizerResult]:
         """Parse and validate recognizer results.
 
         Args:
             results_json: A JSON list (string or already parsed) of results.
-            text_length: Length of the note; every span must lie inside it.
+            note_text: The note; every span must lie inside it, and an entity type that is the
+                text of its own span is replaced by ``ENTITY``.
 
         Raises:
             NoteError: If the results are null, malformed, or any span is invalid. A span we
@@ -321,12 +323,14 @@ class AnonymizerWorker:
                 not isinstance(entity_type, str)
                 or not isinstance(start, int)
                 or not isinstance(end, int)
-                or not (0 <= start <= end <= text_length)
+                or not (0 <= start <= end <= len(note_text))
             ):
                 raise NoteError("invalid_span")
-            parsed.append(
-                item if isinstance(item, RecognizerResult) else RecognizerResult(entity_type, start, end, score)
-            )
+            safe_type = safe_entity_type(entity_type, note_text[start:end])
+            if isinstance(item, RecognizerResult) and safe_type == entity_type:
+                parsed.append(item)
+            else:
+                parsed.append(RecognizerResult(safe_type, start, end, score))
         return parsed
 
     def _compute_jitter_for_patient(self, patient_id: Any = None) -> int:
@@ -486,7 +490,7 @@ class AnonymizerWorker:
             NoteError: If the recognizer results are unusable. Any other exception
                 comes from outside the operators; the caller fails the note.
         """
-        recognizer_results = self._parse_recognizer_results(recognizer_results_json, len(note_text))
+        recognizer_results = self._parse_recognizer_results(recognizer_results_json, note_text)
 
         events = start_note()
         try:

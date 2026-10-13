@@ -7,6 +7,7 @@ paths applies. The outcomes are collected per note and summarized as a status.
 """
 
 import contextvars
+import re
 
 from presidio_anonymizer.operators import Operator
 
@@ -18,6 +19,20 @@ from tide2.utils.stage_status import failure_reason
 _events: contextvars.ContextVar[list[tuple[str, str]] | None] = contextvars.ContextVar(
     "tide2_anonymizer_events", default=None
 )
+
+_SAFE_ENTITY_TYPE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+def safe_entity_type(entity_type: str, span_text: str = "") -> str:
+    """Return ``entity_type`` if it is an upper-case identifier, else ``ENTITY``.
+
+    The label ends up in the placeholder and in the status reason, so a label that
+    is note text must never get there. A label that equals the text of its own span
+    is also replaced.
+    """
+    if not _SAFE_ENTITY_TYPE.fullmatch(entity_type) or entity_type.casefold() == span_text.strip().casefold():
+        return "ENTITY"
+    return entity_type
 
 
 def mask(entity_type: str) -> str:
