@@ -286,6 +286,10 @@ This section is for people who launch many tide2 workers from a scheduler
 (Kubernetes, Airflow, a batch queue) and need a crashed worker to be relaunched
 without reprocessing notes it already finished. It applies to `discrete` mode.
 
+For comprehensive individual stage input/output contracts, GPU/CPU fleet orchestration,
+and multi-machine shared filesystem walkthroughs, see the
+[Large-Scale Distributed Pipeline Guide](guides/large_scale_pipeline.md).
+
 With checkpointing on (the default), re-running a stage on the same output
 location skips notes already written. The mechanism, and why the rules below
 follow from it, is described in the `_configure_checkpoint` docstring in the
