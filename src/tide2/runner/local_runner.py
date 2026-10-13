@@ -77,6 +77,7 @@ from .utils import join_location
 from .utils import list_parquet_files
 from .utils import log_ray_cluster_info
 from .utils import make_output_dir
+from .utils import open_parquet_dataset
 from .utils import output_location
 from .utils import read_parquet_schema
 from .utils import read_text_file
@@ -247,7 +248,7 @@ def _inspect_pipeline_input(files: list[str]) -> PipelineInputInfo:
     Validates schema requirements, checks for deprecated columns, and extracts
     row counts and column mappings from Parquet footers.
     """
-    ds = pads.dataset(files, format="parquet")
+    ds = open_parquet_dataset(files)
     schema = ds.schema
 
     lower_to_actual: dict[str, str] = {}
@@ -1598,7 +1599,7 @@ class LocalJobRunner:
             try:
                 output_files = list_parquet_files(output_dir, recursive=False)
                 if output_files:
-                    output_rows = pads.dataset(output_files).count_rows()
+                    output_rows = open_parquet_dataset(output_files).count_rows()
                 elif hasattr(processed, "count"):
                     output_rows = processed.count()
                 else:
@@ -2272,7 +2273,7 @@ class LocalJobRunner:
                 )
 
             out_files = list_parquet_files(merged_output_path)
-            merged_count = pads.dataset(out_files).count_rows() if out_files else 0
+            merged_count = open_parquet_dataset(out_files).count_rows() if out_files else 0
             logger.info("Merged %d notes from regex + LLM recognizers", merged_count)
 
         else:

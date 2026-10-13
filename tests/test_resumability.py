@@ -98,6 +98,29 @@ def test_make_output_dir_does_not_create_gs_directory(tmp_path, monkeypatch):
     assert (tmp_path / "local" / "out").is_dir()
 
 
+def test_inspect_pipeline_input_reads_gs_files(fake_object_store, notes):
+    (fake_object_store / "run").mkdir()
+    pq.write_table(pa.Table.from_pandas(notes, preserve_index=False), fake_object_store / "run" / "in.parquet")
+
+    info = lr._inspect_pipeline_input(["gs://run/in.parquet"])
+
+    assert info.num_rows == len(notes)
+    assert {"note_text", "patient_id"} <= info.columns
+
+
+def test_open_parquet_dataset_rejects_mixed_filesystems(fake_object_store, tmp_path):
+    with pytest.raises(ValueError, match="one filesystem"):
+        runner_utils.open_parquet_dataset(["gs://run/a.parquet", str(tmp_path / "b.parquet")])
+    with pytest.raises(ValueError, match="one filesystem"):
+        runner_utils.open_parquet_dataset(["gs://run/a.parquet", "s3://run/b.parquet"])
+
+
+def test_open_parquet_dataset_reads_local_files(tmp_path):
+    pq.write_table(pa.table({"note_text": ["a", "b"]}), tmp_path / "a.parquet")
+
+    assert runner_utils.open_parquet_dataset([str(tmp_path / "a.parquet")]).count_rows() == 2
+
+
 def test_join_location():
     assert runner_utils.join_location("gs://b/run", "salt.bin") == "gs://b/run/salt.bin"
     assert runner_utils.join_location(Path("/x"), "salt.bin") == Path("/x/salt.bin")

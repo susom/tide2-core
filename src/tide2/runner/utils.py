@@ -100,6 +100,27 @@ def list_parquet_files(location: Path | str, *, recursive: bool = True) -> list[
     )
 
 
+def open_parquet_dataset(files: list[str]) -> Any:
+    """Open local Parquet files, or files of one object store (``gs://``), as one pyarrow dataset.
+
+    ``pads.dataset`` cannot resolve a URI from a list of strings, so the filesystem is
+    resolved here and the scheme is removed from each path.
+
+    Raises:
+        ValueError: If the files mix a local path with a URI, or use different URI schemes.
+    """
+    import pyarrow.dataset as pads
+
+    schemes = {str(f).split("://", 1)[0] if is_uri(f) else "" for f in files}
+    if len(schemes) > 1:
+        raise ValueError(f"Input files must all be on one filesystem, got: {sorted(s or 'local' for s in schemes)}")
+    if "" in schemes or not files:
+        return pads.dataset(files, format="parquet")
+    filesystem, _ = _filesystem_and_path(str(files[0]))
+    paths = [str(f).split("://", 1)[1] for f in files]
+    return pads.dataset(paths, format="parquet", filesystem=filesystem)
+
+
 def read_parquet_schema(file: str | os.PathLike[str]) -> Any:
     """Read a Parquet file's Arrow schema from a local path or URI."""
     import pyarrow.parquet as pq
