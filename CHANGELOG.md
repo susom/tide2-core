@@ -2,6 +2,13 @@
 
 <!-- version list -->
 
+## [1.4.0](https://github.com/susom/tide2-core/compare/v1.3.1...v1.4.0) (2026-10-13)
+
+
+### Features
+
+* **runner:** rework the ray pipeline for token-accurate ner, direct actors, and hardware autotuning ([#62](https://github.com/susom/tide2-core/issues/62)) ([f8cd65f](https://github.com/susom/tide2-core/commit/f8cd65f5dfaf70ba6c5810da1ef864607dee3ffb))
+
 ## [1.3.1](https://github.com/susom/tide2-core/compare/v1.3.0...v1.3.1) (2026-09-23)
 
 
