@@ -1,0 +1,125 @@
+# Hardware rules for the runner's settings (see tide2/runner/hardware.py).
+#
+# How a setting is chosen:
+#   1. Start from `defaults`: safe values for any machine.
+#   2. Walk `rules` from top to bottom. EVERY rule whose `when` matches this machine is applied,
+#      and a later rule overrides an earlier one for the same setting. Put general rules first
+#      and specific ones last.
+#   3. If a measured `model_rules` entry matches the model and the GPU, add its batch sizes.
+#   4. A value the caller passed (Python, CLI or YAML) always wins. Nothing here overrides it.
+#
+# The machine facts you can match on and use in formulas:
+#   cpus        usable CPU cores (container limits count)
+#   ram_gb      memory in GB (container limits count)
+#   gpus        number of GPUs, 0 when there is none
+#   gpu_ram_gb  memory of one GPU in GB, 0 when there is none
+#
+# `when` takes min_<fact> and max_<fact> (both inclusive) for any fact above. No `when` matches all.
+#
+# A value is a number, true/false, or a formula in a string. A formula can use the facts above, the
+# names from the rule's `let` block, + - * / // %, comparisons, `x if cond else y`, and
+# max min round int abs. Nothing else is allowed.
+#
+# Sections of a rule: let, transformer, recognizer, anonymizer, runner, and cpu_stages
+# (a shortcut that sets the same value for recognizer and anonymizer).
+#
+# To add hardware: copy a rule below, set its `when`, set the values, and add a line to the table in
+# tests/test_hardware.py. To use your own file without editing the package, set TIDE2_HARDWARE_RULES
+# to its path.
+
+# GPU names are reduced to one of these families (a whole word in the GPU name).
+gpu_families: [L4, T4, A100, H100, V100, A10G]
+
+# Safe values: used when no rule matches, and the only values used with --no-hardware-autotune.
+defaults:
+  transformer:
+    num_transformer_actors: 1
+    num_gpus: "gpus"                       # one actor takes every GPU; 0 means CPU inference
+    num_agg_actors: "0 if gpus > 0 else 1"
+  cpu_stages:
+    num_actors: "max(1, cpus // 2)"
+    num_cpus: 0                            # 0 + worker_num_cpus is the CPU slot of one actor
+    worker_num_cpus: 1.0
+  runner:
+    no_progress_timeout_s: 600
+
+rules:
+  # --- Any machine with more than 4 CPUs ---------------------------------------------------------
+  - name: cpu-stages
+    when: {min_cpus: 5}
+    cpu_stages:
+      num_actors: "max(1, round(cpus * 0.875))"   # the reference box: 14 actors on 16 CPUs
+      override_num_blocks: 32
+
+  - name: many-cores
+    when: {min_cpus: 64}
+    cpu_stages:
+      num_actors: "max(1, cpus - 2)"
+
+  # --- GPU machines. Reference box: 16 CPUs, 1 NVIDIA L4 with 24 GB, 64 GB RAM ----------------------
+  - name: gpu
+    when: {min_cpus: 5, min_gpus: 1}
+    let:
+      # One transformer actor needs about 7 GB of GPU memory (6.8 GB peak was measured on an L4 at
+      # gpu_batch_size 64). More than 3 actors per GPU only compete for the CPUs.
+      actors_per_gpu: "max(1, min(3, int(gpu_ram_gb // 7)))"
+    transformer:
+      num_transformer_actors: "gpus * actors_per_gpu"
+      num_gpus: "round(1 / actors_per_gpu, 2)"
+      transformer_cpus: 4.0
+      num_agg_actors: 0
+      override_num_blocks: 16
+
+  # --- Machines without a GPU ----------------------------------------------------------------------
+  - name: cpu-only
+    when: {min_cpus: 5, max_gpus: 0}
+    transformer:
+      num_transformer_actors: "max(1, int(cpus * 0.25))"
+      num_gpus: 0.0
+      num_agg_actors: "max(1, int(cpus * 0.3))"
+      override_num_blocks: 16
+
+  - name: cpu-only-slow-start
+    when: {min_cpus: 5, max_cpus: 63, max_gpus: 0}
+    runner:
+      no_progress_timeout_s: 1200            # loading the model on CPU takes long
+
+  # --- Little memory: fewer CPU actors. About 2 GB each is a cautious guess, not a measurement. -----
+  - name: low-ram
+    when: {max_ram_gb: 24}
+    cpu_stages:
+      num_actors: "max(1, int(ram_gb // 2))"
+
+  # --- Up to 4 CPUs (for example Colab): fractional CPUs and no checkpoint, always together.
+  # Each alone still hangs at 0/1. See the README, "Why small boxes deadlock". -----------------------
+  - name: tiny
+    when: {max_cpus: 4}
+    transformer:
+      num_transformer_actors: 1
+      num_gpus: "gpus"
+      transformer_cpus: 0.25
+      read_cpus: 0.25
+      write_cpus: 0.25
+      agg_num_cpus: 0.5
+      num_agg_actors: 1
+      enable_checkpoint: false
+    cpu_stages:
+      num_actors: 1
+      worker_num_cpus: 0.5
+      read_cpus: 0.25
+      write_cpus: 0.25
+      enable_checkpoint: false
+    runner:
+      no_progress_timeout_s: 1200
+
+# Batch sizes that were measured. A model and GPU without an entry here gets no batch size advice,
+# because a guess could run out of GPU memory in the middle of a run.
+# To add one: run scripts/benchmark_stage_throughput.py on the GPU, then set min_gpu_ram_gb to the
+# peak GPU memory plus about 1 GB.
+model_rules:
+  - model: stanford-med-hdr/tide2-sentry-clinical-ner
+    gpu_family: L4
+    min_gpu_ram_gb: 7.77                    # peak 6.77 GB measured
+    transformer:
+      gpu_batch_size: 64
+      batch_size: 512

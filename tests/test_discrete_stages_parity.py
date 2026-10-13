@@ -31,6 +31,7 @@ from tide2.actors.recognizer import _DeduplicateLogFilter
 from tide2.actors.transformer import BIOAggregationActor
 from tide2.actors.transformer import TransformerInferenceActor
 from tide2.runner.cli import main as cli_main
+from tide2.runner.hardware import Machine
 from tide2.transformers.core import TransformerCore
 
 # ---------------------------------------------------------------------------
@@ -392,9 +393,9 @@ def test_anonymizer_worker_patient_id_normalization():
 def test_resolve_transformer_resources_fractional_gpu(monkeypatch):
     """LocalJobRunner._resolve_transformer_resources handles fractional GPUs properly."""
     runner = lr.LocalJobRunner()
-    # No autotune recommendations, so the legacy fractional-GPU heuristic is what is under test on any host.
-    monkeypatch.setattr(lr, "detect_hardware", lambda: SimpleNamespace(cluster_cpu=16.0, cluster_gpu=1.0))
-    monkeypatch.setattr(lr, "recommend_settings", lambda _hw: SimpleNamespace(transformer={}))
+    monkeypatch.setattr(
+        lr, "detect_machine", lambda: Machine(cpus=16, ram_gb=64.0, gpus=1, gpu_name="NVIDIA L4", gpu_ram_gb=22.5)
+    )
 
     # Requesting 0.33 GPU: should multiplex 3 actors and set num_agg_actors to 0 (in-actor aggregation)
     num_gpus, cpu_only, num_actors, num_agg = runner._resolve_transformer_resources(

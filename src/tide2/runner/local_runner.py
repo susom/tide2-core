@@ -41,6 +41,7 @@ import time
 import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from typing import Literal
@@ -64,11 +65,12 @@ from .fault_tolerance import GracefulShutdown
 from .fault_tolerance import configure_data_context
 from .fault_tolerance import get_ray_remote_args_cpu
 from .fault_tolerance import get_ray_remote_args_gpu
-from .hardware import alive_node_cpus
-from .hardware import apply_recommendations
-from .hardware import detect_hardware
-from .hardware import recommend_settings
-from .hardware import render_settings_table
+from .hardware import Machine
+from .hardware import Settings
+from .hardware import apply_settings
+from .hardware import detect_machine
+from .hardware import recommend
+from .hardware import render_settings
 from .utils import DEFAULT_DASHBOARD_HOST
 from .utils import detect_columns
 from .utils import gpu_worker_runtime_env
@@ -705,15 +707,6 @@ def validate_stage_columns(
     return available
 
 
-def _alive_node_cpus() -> list[float]:
-    """CPU capacity of each alive node in the cluster.
-
-    Goes through :mod:`tide2.runner.hardware`, which is the only module that
-    reads ``ray.nodes()`` directly.
-    """
-    return alive_node_cpus()
-
-
 def _log_execution_timeout(stage: str, ctx: Any, extra: str = "") -> None:
     """Log a Ray Data no-progress timeout uniformly for every stage.
 
@@ -730,12 +723,12 @@ def _log_execution_timeout(stage: str, ctx: Any, extra: str = "") -> None:
     )
 
 
-def check_streamed_admission(pool_minimums: dict[str, float]) -> float:
+def check_streamed_admission(pool_minimums: dict[str, float], cpus: int | float) -> float:
     """Fail fast instead of deadlocking when the chained plan cannot be scheduled.
 
     A chained plan holds every operator's pool resident at once. Under Ray
     2.55+'s ``ReservationOpResourceAllocator`` the per-operator reservations must
-    all fit on a single node or nothing schedules and the run hangs at ``0/1``.
+    all fit on the machine or nothing schedules and the run hangs at ``0/1``.
     This converts that silent hang into an error.
 
     This is a **heuristic**: the allocator reserves via
@@ -746,41 +739,32 @@ def check_streamed_admission(pool_minimums: dict[str, float]) -> float:
 
     Args:
         pool_minimums: Operator name → minimum CPUs it reserves.
+        cpus: CPUs of this machine.
 
     Returns:
-        The CPU capacity of the largest alive node.
+        ``cpus``, for the caller's log line.
 
     Raises:
-        ValueError: If the cluster is multi-node, the largest node has
-            ≤ ``MIN_STREAMED_NODE_CPUS`` CPUs, or the minimums do not fit.
+        ValueError: If the machine has ≤ ``MIN_STREAMED_NODE_CPUS`` CPUs or the minimums do not fit.
     """
-    node_cpus = _alive_node_cpus()
-    if not node_cpus:
-        raise ValueError("No alive Ray nodes found; cannot admit a streamed plan.")
-    if len(node_cpus) > 1:
+    if cpus <= MIN_STREAMED_NODE_CPUS:
         raise ValueError(
-            f"execution_mode='streamed' is single-node only; found {len(node_cpus)} alive nodes "
-            f"({node_cpus} CPUs). Use execution_mode='discrete', which is the multi-node path."
-        )
-    largest = max(node_cpus)
-    if largest <= MIN_STREAMED_NODE_CPUS:
-        raise ValueError(
-            f"execution_mode='streamed' needs more than {MIN_STREAMED_NODE_CPUS} CPUs on a single node "
-            f"(largest node has {largest}). Use execution_mode='discrete' with the small-box recipe "
+            f"execution_mode='streamed' needs more than {MIN_STREAMED_NODE_CPUS} CPUs "
+            f"(this machine has {cpus}). Use execution_mode='discrete' with the small-box recipe "
             "(fractional CPU knobs AND enable_checkpoint=False) — see README, 'Why small boxes deadlock'."
         )
 
     total_min = sum(pool_minimums.values())
-    budget = largest - 1.0
+    budget = cpus - 1.0
     if total_min > budget:
         breakdown = ", ".join(f"{k}={v}" for k, v in sorted(pool_minimums.items()))
         raise ValueError(
-            f"Streamed plan reserves a minimum of {total_min} CPUs ({breakdown}) but the node has "
-            f"{largest} CPUs (usable budget {budget}). Lower the per-operator minimums "
+            f"Streamed plan reserves a minimum of {total_min} CPUs ({breakdown}) but the machine has "
+            f"{cpus} CPUs (usable budget {budget}). Lower the per-operator minimums "
             "(read_cpus, write_cpus, transformer_cpus, num_cpus/worker_num_cpus) or use "
             "execution_mode='discrete'."
         )
-    return largest
+    return cpus
 
 
 class LocalJobRunner:
@@ -892,11 +876,22 @@ class LocalJobRunner:
 
         self._initialized = True
 
+    def _machine(self) -> Machine:
+        """Return what this machine has, with the CPU and GPU counts the caller set on the runner."""
+        machine = detect_machine()
+        if self.num_cpus:
+            machine = replace(machine, cpus=int(self.num_cpus))
+        if self.num_gpus is not None:
+            machine = replace(machine, gpus=math.ceil(self.num_gpus) if self.num_gpus > 0 else 0)
+        return machine
+
+    def _settings(self, model_name: str | None = None) -> Settings:
+        """Return the recommended settings; only the safe defaults when ``hardware_autotune`` is off."""
+        return recommend(self._machine(), model_name, use_rules=self.hardware_autotune)
+
     def _auto_num_actors(self) -> int:
-        """Return the CPU actor count: the hardware recommendation, else 45% of the cluster CPUs."""
-        hw = detect_hardware()
-        rec_actors = recommend_settings(hw).recognizer.get("num_actors") if self.hardware_autotune else None
-        return int(rec_actors) if rec_actors is not None else max(1, int(hw.cluster_cpu * 0.45))
+        """Return the CPU actor count for a stage job whose caller did not set one."""
+        return int(self._settings().recognizer["num_actors"])
 
     def _resolve_transformer_resources(
         self,
@@ -909,27 +904,19 @@ class LocalJobRunner:
         Returns:
             Tuple of (num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors)
         """
-        hw = detect_hardware()
-        rec_t = recommend_settings(hw).transformer if self.hardware_autotune else {}
-
+        recommended = self._settings().transformer
+        chosen_gpu_share = num_gpus
         if num_gpus is None:
-            rec_gpus = rec_t.get("num_gpus")
-            num_gpus = rec_gpus if rec_gpus is not None else float(hw.cluster_gpu)
+            num_gpus = recommended["num_gpus"]
 
         cpu_only_mode = num_gpus == 0
 
         if num_transformer_actors is None:
-            # Each transformer actor is memory-intensive (~500MB+ for model)
-            # CPU mode: limit actors; GPU mode: scale with GPUs
-            rec_actors = rec_t.get("num_transformer_actors")
-            if rec_actors is not None:
-                num_transformer_actors = rec_actors
-            elif cpu_only_mode:
-                num_transformer_actors = max(1, int(hw.cluster_cpu * 0.25))
-            elif num_gpus < 1.0 and num_gpus > 0:
-                num_transformer_actors = max(1, round(1.0 / num_gpus))
+            if chosen_gpu_share:
+                # The caller chose the GPU share, so fill the GPUs with actors of that share.
+                num_transformer_actors = max(1, round(self._machine().gpus / chosen_gpu_share))
             else:
-                num_transformer_actors = int(num_gpus)
+                num_transformer_actors = recommended["num_transformer_actors"]
 
         if cpu_only_mode:
             logger.warning(
@@ -938,11 +925,7 @@ class LocalJobRunner:
             )
 
         if num_agg_actors is None:
-            rec_agg = rec_t.get("num_agg_actors")
-            if rec_agg is not None:
-                num_agg_actors = rec_agg
-            else:
-                num_agg_actors = 0 if not cpu_only_mode and num_gpus < 1.0 else max(1, int(hw.cluster_cpu * 0.3))
+            num_agg_actors = recommended["num_agg_actors"]
 
         return num_gpus, cpu_only_mode, num_transformer_actors, num_agg_actors
 
@@ -2336,8 +2319,7 @@ class LocalJobRunner:
             rec_files = list_parquet_files(regex_output_path)
             llm_files = list_parquet_files(llm_recognizer_output_path)
 
-            alive_cpus = alive_node_cpus()
-            node_cpus = max(alive_cpus or [1.0])
+            node_cpus = self._machine().cpus
             agg_cpus = (
                 min(0.25, node_cpus / float(MIN_STREAMED_NODE_CPUS)) if node_cpus <= MIN_STREAMED_NODE_CPUS else 0.5
             )
@@ -2484,23 +2466,15 @@ class LocalJobRunner:
         a_kw: dict[str, Any],
     ) -> None:
         """Fill per-stage kwargs in place from the hardware recommender and log the table."""
-        hw = detect_hardware()
-        rec = recommend_settings(hw, model_name=model_name)
+        settings = self._settings(model_name)
         runner_kw: dict[str, Any] = {
             # Seeded from the constructor so an explicitly supplied timeout is
             # reported as USER and never overridden by a recommendation.
             "no_progress_timeout_s": self.no_progress_timeout_s,
             "object_store_gb": self.object_store_gb,
         }
-        applied = apply_recommendations(
-            rec,
-            transformer=t_kw,
-            recognizer=r_kw,
-            anonymizer=a_kw,
-            runner=runner_kw,
-            hardware_autotune=self.hardware_autotune,
-        )
-        logger.info("\n" + render_settings_table(applied))
+        entries = apply_settings(settings, transformer=t_kw, recognizer=r_kw, anonymizer=a_kw, runner=runner_kw)
+        logger.info("\n" + render_settings(settings, entries))
 
         # Make the resolved timeout sticky: every stage below reconfigures the
         # DataContext and would otherwise reset it to the library default.
@@ -2639,7 +2613,7 @@ class LocalJobRunner:
                 agg_slot = float(transformer_kwargs.get("agg_num_cpus") or 1.0)
                 pool_minimums["bio_aggregation"] = num_agg_actors * agg_slot
 
-        node_cpus = max(_alive_node_cpus() or [0.0])
+        node_cpus = self._machine().cpus
 
         llm_remote_args: dict[str, Any] = {}
         if use_llm:
@@ -2655,7 +2629,7 @@ class LocalJobRunner:
                 worker_num_cpus=recognizer_kwargs.get("worker_num_cpus"),
                 stage_name="streamed recognizer",
             )
-            rec_max = int(recognizer_kwargs.get("num_actors") or max(2, int(node_cpus * 0.625)))
+            rec_max = int(recognizer_kwargs["num_actors"])
             rec_min = min(2, rec_max)
             pool_minimums["recognizer"] = r_slot * rec_min
 
@@ -2664,11 +2638,11 @@ class LocalJobRunner:
             worker_num_cpus=anonymizer_kwargs.get("worker_num_cpus"),
             stage_name="streamed anonymizer",
         )
-        anon_max = int(anonymizer_kwargs.get("num_actors") or max(1, int(node_cpus * 0.5)))
+        anon_max = int(anonymizer_kwargs["num_actors"])
         anon_min = 1
         pool_minimums["anonymizer"] = a_slot * anon_min
 
-        node_cpus = check_streamed_admission(pool_minimums)
+        node_cpus = check_streamed_admission(pool_minimums, node_cpus)
 
         # --- One DataContext for the whole plan ---
         # Today each stage method calls configure_data_context with its own

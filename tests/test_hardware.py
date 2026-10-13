@@ -1,226 +1,311 @@
-"""Tests for hardware detection and per-stage settings recommendation.
+"""Tests for the machine detection and the hardware rules in resources/hardware_rules.yaml.
 
-Validates the pure-function contracts of hardware autotuning without requiring
-a live Ray cluster:
-1. Profile matching over synthetic NodeShapes at boundaries.
-2. Cluster vs node distinction and heterogeneous cluster handling.
-3. Precedence: user-supplied knobs always win with source="USER".
-4. Model gating: measured-only batch sizes, VRAM/GPU-family checks, deprecation alias.
-5. Deprecation is non-destructive: old explanation preserved.
-6. Reference-box parity: exact equality with reference literals.
-7. Opt-out: hardware_autotune=False preserves legacy defaults.
-8. Small-box pairing: fractional CPUs + enable_checkpoint=False emitted together.
+The tests need no Ray cluster and no GPU: machines are built by hand.
 """
 
 import argparse
 import inspect
+import re
+import subprocess
 import sys
 
 import pytest
 
 from tide2.runner import cli
-from tide2.runner.hardware import CANONICAL_MODEL
-from tide2.runner.hardware import DEPRECATED_MODEL
-from tide2.runner.hardware import HardwareFacts
-from tide2.runner.hardware import NodeShape
-from tide2.runner.hardware import apply_recommendations
-from tide2.runner.hardware import classify_profile
-from tide2.runner.hardware import detect_hardware
+from tide2.runner import hardware
+from tide2.runner.hardware import Machine
+from tide2.runner.hardware import apply_settings
+from tide2.runner.hardware import detect_machine
 from tide2.runner.hardware import extract_gpu_family
-from tide2.runner.hardware import recommend_object_store_gb
-from tide2.runner.hardware import recommend_settings
-from tide2.runner.hardware import render_settings_table
+from tide2.runner.hardware import load_rules
+from tide2.runner.hardware import recommend
+from tide2.runner.hardware import render_settings
 from tide2.runner.local_runner import LocalJobRunner
+from tide2.transformers.config import CANONICAL_MODEL_NAME
+from tide2.transformers.config import DEPRECATED_MODEL_NAME
 from tide2.transformers.config import load_model_config
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+MODEL = CANONICAL_MODEL_NAME
 
-
-def make_facts(
-    cpu_count: float,
-    gpu_count: float,
-    gpu_name: str | None = None,
-    vram_gb: float | None = None,
-    ram_gb: float = 64.0,
-    cluster_nodes: int = 1,
-    homogeneous: bool = True,
-    profile_override: str | None = None,
-) -> HardwareFacts:
-    """Construct synthetic HardwareFacts for testing."""
-    node = NodeShape(
-        cpu_count=cpu_count,
-        gpu_count=gpu_count,
-        gpu_name=gpu_name,
-        vram_gb=vram_gb,
-        ram_gb=ram_gb,
-    )
-    nodes = tuple(node for _ in range(cluster_nodes))
-    profile = profile_override or classify_profile(node, homogeneous)
-    return HardwareFacts(
-        cluster_cpu=cpu_count * cluster_nodes,
-        cluster_gpu=gpu_count * cluster_nodes,
-        nodes=nodes,
-        homogeneous=homogeneous,
-        node=node if homogeneous else None,
-        profile=profile,
-    )
-
+# Machines used below. The reference box is the one every measurement was taken on.
+REFERENCE = Machine(cpus=16, ram_gb=64.0, gpus=1, gpu_name="NVIDIA L4", gpu_ram_gb=22.5)
+CPU_ONLY = Machine(cpus=16, ram_gb=64.0)
+TINY_CPU = Machine(cpus=2, ram_gb=8.0)
+TINY_GPU = Machine(cpus=2, ram_gb=8.0, gpus=1, gpu_name="Tesla T4", gpu_ram_gb=15.0)
+LARGE_CPU = Machine(cpus=128, ram_gb=512.0)
+GPU_SERVER = Machine(cpus=64, ram_gb=256.0, gpus=1, gpu_name="NVIDIA L4", gpu_ram_gb=22.5)
+LOW_RAM = Machine(cpus=16, ram_gb=16.0)
+T4_BOX = Machine(cpus=16, ram_gb=64.0, gpus=1, gpu_name="Tesla T4", gpu_ram_gb=15.0)
+TWO_GPUS = Machine(cpus=32, ram_gb=128.0, gpus=2, gpu_name="NVIDIA L4", gpu_ram_gb=22.5)
 
 # ---------------------------------------------------------------------------
-# 1. Profile matching
+# One row per kind of hardware. To add a rule to the YAML, add a row here.
+#   machine, rules that match, then the settings that must come out.
 # ---------------------------------------------------------------------------
+
+HARDWARE_TABLE = [
+    pytest.param(
+        REFERENCE,
+        ("cpu-stages", "gpu"),
+        {
+            "transformer": {
+                "num_transformer_actors": 3,
+                "num_gpus": 0.33,
+                "transformer_cpus": 4.0,
+                "num_agg_actors": 0,
+                "override_num_blocks": 16,
+                "gpu_batch_size": 64,
+                "batch_size": 512,
+            },
+            "recognizer": {"num_actors": 14, "num_cpus": 0, "worker_num_cpus": 1.0, "override_num_blocks": 32},
+            "anonymizer": {"num_actors": 14, "num_cpus": 0, "worker_num_cpus": 1.0, "override_num_blocks": 32},
+            "runner": {"no_progress_timeout_s": 600},
+        },
+        id="reference-L4-16cpu",
+    ),
+    pytest.param(
+        CPU_ONLY,
+        ("cpu-stages", "cpu-only", "cpu-only-slow-start"),
+        {
+            "transformer": {
+                "num_transformer_actors": 4,
+                "num_gpus": 0.0,
+                "num_agg_actors": 4,
+                "override_num_blocks": 16,
+            },
+            "recognizer": {"num_actors": 14},
+            "runner": {"no_progress_timeout_s": 1200},
+        },
+        id="cpu-only-16cpu",
+    ),
+    pytest.param(
+        LARGE_CPU,
+        ("cpu-stages", "many-cores", "cpu-only"),
+        {
+            "transformer": {"num_transformer_actors": 32, "num_agg_actors": 38},
+            "recognizer": {"num_actors": 126},
+            "runner": {"no_progress_timeout_s": 600},
+        },
+        id="large-cpu-128cpu",
+    ),
+    pytest.param(
+        GPU_SERVER,
+        ("cpu-stages", "many-cores", "gpu"),
+        {"transformer": {"num_transformer_actors": 3}, "recognizer": {"num_actors": 62}},
+        id="gpu-server-64cpu",
+    ),
+    pytest.param(
+        T4_BOX,
+        ("cpu-stages", "gpu"),
+        {"transformer": {"num_transformer_actors": 2, "num_gpus": 0.5}},
+        id="T4-16cpu-fewer-actors-for-15GB",
+    ),
+    pytest.param(
+        TWO_GPUS,
+        ("cpu-stages", "gpu"),
+        {"transformer": {"num_transformer_actors": 6, "num_gpus": 0.33}},
+        id="two-L4",
+    ),
+    pytest.param(
+        LOW_RAM,
+        ("cpu-stages", "cpu-only", "cpu-only-slow-start", "low-ram"),
+        {"recognizer": {"num_actors": 8}, "anonymizer": {"num_actors": 8}},
+        id="16cpu-16GB-ram-fewer-actors",
+    ),
+    pytest.param(
+        TINY_CPU,
+        ("low-ram", "tiny"),
+        {
+            "transformer": {
+                "num_transformer_actors": 1,
+                "num_gpus": 0,
+                "transformer_cpus": 0.25,
+                "read_cpus": 0.25,
+                "write_cpus": 0.25,
+                "agg_num_cpus": 0.5,
+                "num_agg_actors": 1,
+                "enable_checkpoint": False,
+            },
+            "recognizer": {
+                "num_actors": 1,
+                "worker_num_cpus": 0.5,
+                "read_cpus": 0.25,
+                "write_cpus": 0.25,
+                "enable_checkpoint": False,
+            },
+            "anonymizer": {"num_actors": 1, "worker_num_cpus": 0.5, "enable_checkpoint": False},
+            "runner": {"no_progress_timeout_s": 1200},
+        },
+        id="tiny-2cpu",
+    ),
+    pytest.param(
+        TINY_GPU,
+        ("low-ram", "tiny"),
+        {"transformer": {"num_gpus": 1, "num_transformer_actors": 1}, "runner": {"no_progress_timeout_s": 1200}},
+        id="tiny-2cpu-T4",
+    ),
+]
+
+
+@pytest.mark.parametrize(("machine", "rule_names", "expected"), HARDWARE_TABLE)
+def test_hardware_table(machine, rule_names, expected):
+    settings = recommend(machine, MODEL)
+
+    assert settings.rules == rule_names
+    for stage, knobs in expected.items():
+        for knob, value in knobs.items():
+            assert getattr(settings, stage)[knob] == value, f"{stage}.{knob}"
 
 
 @pytest.mark.parametrize(
-    ("cpu_count", "gpu_count", "expected_profile"),
+    ("cpus", "gpus", "rule_names"),
     [
-        # Small-box boundary, at most four CPUs
-        (4.0, 0.0, "small-box-cpu"),
-        (4.0, 1.0, "small-box-gpu"),
-        # Mid-size boundary, above four and below sixty-four CPUs
-        (5.0, 0.0, "cpu-only"),
-        (5.0, 1.0, "gpu-workstation"),
-        (16.0, 0.0, "cpu-only"),
-        (16.0, 1.0, "gpu-workstation"),
-        (63.0, 0.0, "cpu-only"),
-        (63.0, 1.0, "gpu-workstation"),
-        # Large boundary, sixty-four CPUs or more
-        (64.0, 0.0, "large-cpu"),
-        (64.0, 1.0, "gpu-server"),
-        (128.0, 0.0, "large-cpu"),
-        (128.0, 2.0, "gpu-server"),
+        (4, 0, ("tiny",)),
+        (5, 0, ("cpu-stages", "cpu-only", "cpu-only-slow-start")),
+        (63, 0, ("cpu-stages", "cpu-only", "cpu-only-slow-start")),
+        (64, 0, ("cpu-stages", "many-cores", "cpu-only")),
+        (4, 1, ("tiny",)),
+        (5, 1, ("cpu-stages", "gpu")),
     ],
 )
-def test_profile_matching_boundaries(cpu_count, gpu_count, expected_profile):
-    """Classify profiles along both (gpu_present, cpu_class) axes across all boundaries."""
-    node = NodeShape(
-        cpu_count=cpu_count,
-        gpu_count=gpu_count,
-        gpu_name="NVIDIA L4" if gpu_count > 0 else None,
-        vram_gb=24.0 if gpu_count > 0 else None,
-        ram_gb=64.0,
-    )
-    assert classify_profile(node, homogeneous=True) == expected_profile
+def test_rule_boundaries(cpus, gpus, rule_names):
+    machine = Machine(cpus=cpus, ram_gb=64.0, gpus=gpus, gpu_name="NVIDIA L4" if gpus else None, gpu_ram_gb=22.5 * gpus)
+    assert recommend(machine).rules == rule_names
 
 
-def test_profile_matching_v2_ordering_fixes():
-    """Verify the two critical cases that 1-D ordered lists misclassified."""
-    # 64 CPU + GPU must match gpu-server, NOT large-cpu
-    node_64_gpu = NodeShape(cpu_count=64.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0, ram_gb=128.0)
-    assert classify_profile(node_64_gpu, homogeneous=True) == "gpu-server"
+def test_without_rules_a_machine_gets_the_safe_defaults():
+    settings = recommend(REFERENCE, use_rules=False)
 
-    # 4 CPU + GPU must match small-box-gpu, NOT cpu-only or small-box-cpu
-    node_4_gpu = NodeShape(cpu_count=4.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0, ram_gb=16.0)
-    assert classify_profile(node_4_gpu, homogeneous=True) == "small-box-gpu"
+    assert settings.rules == ()
+    assert settings.recognizer["num_actors"] == 8
+    assert settings.transformer["num_transformer_actors"] == 1
+    assert settings.transformer["num_gpus"] == 1
+    assert settings.transformer["num_agg_actors"] == 0
+    assert settings.runner == {"no_progress_timeout_s": 600}
+    assert set(settings.sources.values()) == {"default"}
 
 
-def test_profile_matching_unknown():
-    """Heterogeneous clusters or missing nodes yield unknown profile."""
-    assert classify_profile(None, homogeneous=True) == "unknown"
-    node = NodeShape(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0, ram_gb=64.0)
-    assert classify_profile(node, homogeneous=False) == "unknown"
+def test_defaults_without_a_gpu_run_on_cpu():
+    settings = recommend(CPU_ONLY, use_rules=False)
+
+    assert settings.transformer["num_gpus"] == 0
+    assert settings.transformer["num_agg_actors"] == 1
 
 
 # ---------------------------------------------------------------------------
-# 2. Cluster vs node
+# A user can add hardware with a file of their own
 # ---------------------------------------------------------------------------
 
-
-def test_cluster_vs_node_scaling():
-    """Multi-node cluster matches on node shape; counts scale with cluster CPUs."""
-    # 14 nodes of 16 CPUs with 1 L4 GPU each (production-style topology, 224 CPUs total)
-    single_node = NodeShape(
-        cpu_count=16.0,
-        gpu_count=1.0,
-        gpu_name="NVIDIA L4",
-        vram_gb=24.0,
-        ram_gb=64.0,
-    )
-    nodes = tuple(single_node for _ in range(14))
-    hw = HardwareFacts(
-        cluster_cpu=224.0,
-        cluster_gpu=14.0,
-        nodes=nodes,
-        homogeneous=True,
-        node=single_node,
-        profile=classify_profile(single_node, homogeneous=True),
-    )
-
-    # Must match gpu-workstation based on the 16-CPU node, NOT large-cpu based on 224 cluster CPUs
-    assert hw.profile == "gpu-workstation"
-
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    # Autotuning is restricted to single-node, single-GPU; multi-node recommendations are withheld
-    assert rec.transformer == {}
-    assert rec.recognizer == {}
-    assert rec.anonymizer == {}
-    assert rec.runner == {}
+CUSTOM_RULES = """
+gpu_families: [L4]
+defaults:
+  transformer: {num_transformer_actors: 1, num_gpus: gpus, num_agg_actors: 0}
+  cpu_stages: {num_actors: 2}
+rules:
+  - name: my-big-gpu
+    when: {min_gpu_ram_gb: 40}
+    let: {per_gpu: "gpu_ram_gb // 10"}
+    transformer: {num_transformer_actors: "gpus * per_gpu"}
+"""
 
 
-def test_multi_gpu_single_node_withholds_recommendations():
-    """Multi-GPU single-node setup withholds recommendations."""
-    hw = make_facts(cpu_count=128.0, gpu_count=2.0, gpu_name="NVIDIA L4", vram_gb=24.0)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    assert rec.transformer == {}
-    assert rec.recognizer == {}
-    assert rec.anonymizer == {}
-    assert rec.runner == {}
+def test_a_rules_file_of_your_own_adds_hardware(tmp_path):
+    path = tmp_path / "rules.yaml"
+    path.write_text(CUSTOM_RULES)
+    big = Machine(cpus=32, ram_gb=256.0, gpus=1, gpu_name="NVIDIA H100", gpu_ram_gb=80.0)
+
+    custom = recommend(big, rules_path=str(path))
+    packaged = recommend(big)
+
+    assert custom.rules == ("my-big-gpu",)
+    assert custom.transformer["num_transformer_actors"] == 8
+    assert packaged.transformer["num_transformer_actors"] == 3
 
 
-def test_ray_uninitialized_guard():
-    """detect_hardware does not auto-initialize Ray when Ray is stopped."""
-    import ray
+def test_the_environment_variable_selects_the_rules_file(tmp_path, monkeypatch):
+    path = tmp_path / "rules.yaml"
+    path.write_text(CUSTOM_RULES)
+    monkeypatch.setenv(hardware.RULES_ENV_VAR, str(path))
 
-    if ray.is_initialized():
-        ray.shutdown()
-
-    hw = detect_hardware()
-    assert not ray.is_initialized()
-    assert hw.node is not None
+    assert recommend(REFERENCE).rules == ()
+    assert recommend(REFERENCE).recognizer["num_actors"] == 2
 
 
-def test_multi_node_ray_shapes_withhold_gpu_model():
-    """_shapes_from_ray_nodes withholds gpu_name and vram_gb on multi-node clusters."""
-    from tide2.runner.hardware import _shapes_from_ray_nodes
-
-    fake_nodes = [
-        {"Alive": True, "Resources": {"CPU": 16.0, "GPU": 1.0, "memory": 64 * 1024**3}},
-        {"Alive": True, "Resources": {"CPU": 16.0, "GPU": 1.0, "memory": 64 * 1024**3}},
-    ]
-    shapes = _shapes_from_ray_nodes(fake_nodes)
-    assert len(shapes) == 2
-    for s in shapes:
-        assert s.gpu_name is None
-        assert s.vram_gb is None
+VALID_DEFAULTS = "defaults: {transformer: {num_gpus: 0, num_transformer_actors: 1, num_agg_actors: 1}, cpu_stages: {num_actors: 1}}\n"
 
 
-def test_heterogeneous_cluster_yields_empty_recommendations():
-    """Heterogeneous cluster produces profile='unknown' and empty recommendations."""
-    node1 = NodeShape(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0, ram_gb=64.0)
-    node2 = NodeShape(cpu_count=8.0, gpu_count=0.0, gpu_name=None, vram_gb=None, ram_gb=32.0)
-    hw = HardwareFacts(
-        cluster_cpu=24.0,
-        cluster_gpu=1.0,
-        nodes=(node1, node2),
-        homogeneous=False,
-        node=None,
-        profile="unknown",
-    )
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("rulez: []\n", "unknown key"),
+        (VALID_DEFAULTS + "rules: [{name: a, whenn: {}}]\n", "unknown key"),
+        (VALID_DEFAULTS + "rules: [{name: a, when: {min_cpu: 1}}]\n", "unknown key"),
+        ("defaults: {transformer: {num_gpus: 1}}\n", "must set"),
+    ],
+)
+def test_a_misspelled_or_incomplete_rules_file_fails_loudly(tmp_path, text, message):
+    path = tmp_path / "bad.yaml"
+    path.write_text(text)
 
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    assert rec.profile == "unknown"
-    assert rec.transformer == {}
-    assert rec.recognizer == {}
-    assert rec.anonymizer == {}
-    assert rec.runner == {}
+    with pytest.raises(ValueError, match=message):
+        load_rules(str(path))
+
+
+@pytest.mark.parametrize(
+    "formula",
+    ["__import__('os').system('true')", "cpus.__class__", "open('x')", "[1, 2]", "unknown_name + 1", "cpus if"],
+)
+def test_formulas_cannot_run_code(formula):
+    with pytest.raises((ValueError, SyntaxError)):
+        hardware._evaluate(formula, {"cpus": 4})
+
+
+@pytest.mark.parametrize(
+    ("formula", "expected"),
+    [
+        ("max(1, cpus // 2)", 2),
+        ("round(cpus * 0.875)", 4),
+        ("0 if cpus > 8 else 1", 1),
+        ("-cpus + 10", 6),
+        ("1 < cpus <= 4", True),
+    ],
+)
+def test_formulas_evaluate(formula, expected):
+    assert hardware._evaluate(formula, {"cpus": 4}) == expected
 
 
 # ---------------------------------------------------------------------------
-# 3. Precedence: user-supplied knobs always win
+# The packaged rules only name settings that the stage jobs accept
 # ---------------------------------------------------------------------------
 
+
+def test_every_knob_in_the_packaged_rules_is_a_parameter_of_its_stage():
+    """A misspelled knob would otherwise fail only on the hardware that matches its rule."""
+    accepted = {
+        "transformer": set(inspect.signature(LocalJobRunner.run_transformer).parameters),
+        "recognizer": set(inspect.signature(LocalJobRunner.run_recognition).parameters),
+        "anonymizer": set(inspect.signature(LocalJobRunner.run_anonymization).parameters),
+    }
+    rules = load_rules()
+    layers = [rules["defaults"], *rules["rules"], *({"transformer": r["transformer"]} for r in rules["model_rules"])]
+    for layer in layers:
+        for stage in ("transformer", "recognizer", "anonymizer"):
+            knobs = set(layer.get(stage) or {})
+            if stage != "transformer":
+                knobs |= set(layer.get("cpu_stages") or {})
+            assert knobs <= accepted[stage], (
+                f"{layer.get('name', 'defaults')}: {stage} {sorted(knobs - accepted[stage])}"
+            )
+
+
+def test_every_machine_in_the_table_resolves_every_formula():
+    for machine in (REFERENCE, CPU_ONLY, TINY_CPU, TINY_GPU, LARGE_CPU, GPU_SERVER, LOW_RAM, T4_BOX, TWO_GPUS):
+        assert recommend(machine, MODEL).recognizer["num_actors"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# Precedence: a value the caller passed always wins
+# ---------------------------------------------------------------------------
 
 ALL_KNOBS = [
     ("transformer", "num_transformer_actors", 99),
@@ -230,451 +315,208 @@ ALL_KNOBS = [
     ("transformer", "batch_size", 1024),
     ("transformer", "num_agg_actors", 4),
     ("transformer", "override_num_blocks", 64),
-    ("transformer", "enable_checkpoint", False),
+    ("transformer", "enable_checkpoint", True),
     ("recognizer", "num_actors", 25),
     ("recognizer", "worker_num_cpus", 2.0),
     ("recognizer", "override_num_blocks", 64),
-    ("recognizer", "enable_checkpoint", False),
+    ("recognizer", "enable_checkpoint", True),
     ("recognizer", "read_cpus", 0.5),
-    ("recognizer", "write_cpus", 2.0),
     ("anonymizer", "num_actors", 25),
     ("anonymizer", "worker_num_cpus", 2.0),
-    ("anonymizer", "override_num_blocks", 64),
-    ("anonymizer", "enable_checkpoint", False),
-    ("anonymizer", "read_cpus", 0.5),
     ("anonymizer", "write_cpus", 2.0),
     ("runner", "no_progress_timeout_s", 999),
-    ("runner", "object_store_gb", 50.0),
 ]
 
 
 @pytest.mark.parametrize(("stage", "knob", "user_value"), ALL_KNOBS)
-@pytest.mark.parametrize("profile", ["gpu-workstation", "small-box-cpu", "cpu-only", "large-cpu"])
-def test_precedence_user_value_wins_exhaustively(stage, knob, user_value, profile):
-    """Any knob passed by user must be preserved with source='USER' across all profiles."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0, profile_override=profile)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
+@pytest.mark.parametrize("machine", [REFERENCE, TINY_CPU, CPU_ONLY, LARGE_CPU], ids=["gpu", "tiny", "cpu", "large"])
+def test_a_value_the_caller_passed_wins(stage, knob, user_value, machine):
+    kwargs = {"transformer": {}, "recognizer": {}, "anonymizer": {}, "runner": {}}
+    kwargs[stage][knob] = user_value
 
-    stage_kwargs = {
-        "transformer": {},
-        "recognizer": {},
-        "anonymizer": {},
-        "runner": {},
-    }
-    stage_kwargs[stage][knob] = user_value
+    entries = apply_settings(recommend(machine, MODEL), **kwargs)
 
-    applied = apply_recommendations(
-        rec,
-        transformer=stage_kwargs["transformer"],
-        recognizer=stage_kwargs["recognizer"],
-        anonymizer=stage_kwargs["anonymizer"],
-        runner=stage_kwargs["runner"],
-    )
+    assert kwargs[stage][knob] == user_value
+    entry = next(e for e in entries if e.stage == stage and e.knob == knob)
+    assert (entry.value, entry.source) == (user_value, "USER")
 
-    target_dict = getattr(applied, stage)
-    assert target_dict[knob] == user_value
 
-    entry = next(e for e in applied.entries if e.stage == stage and e.knob == knob)
-    assert entry.value == user_value
-    assert entry.source == "USER"
+def test_none_counts_as_unset():
+    kwargs = {"transformer": {"num_gpus": None}, "recognizer": {"num_actors": None}, "anonymizer": {}, "runner": {}}
+
+    apply_settings(recommend(REFERENCE), **kwargs)
+
+    assert kwargs["transformer"]["num_gpus"] == 0.33
+    assert kwargs["recognizer"]["num_actors"] == 14
+
+
+def test_every_entry_names_where_it_came_from():
+    kwargs = {"transformer": {"gpu_batch_size": 32}, "recognizer": {}, "anonymizer": {}, "runner": {}}
+    settings = recommend(REFERENCE, MODEL)
+
+    entries = {(e.stage, e.knob): e.source for e in apply_settings(settings, **kwargs)}
+
+    assert entries[("transformer", "gpu_batch_size")] == "USER"
+    assert entries[("transformer", "num_transformer_actors")] == "gpu"
+    assert entries[("recognizer", "num_actors")] == "cpu-stages"
+    assert entries[("recognizer", "worker_num_cpus")] == "default"
+    assert entries[("transformer", "batch_size")] == "measured L4"
+
+
+def test_render_settings():
+    kwargs = {"transformer": {"gpu_batch_size": 64}, "recognizer": {}, "anonymizer": {}, "runner": {}}
+    settings = recommend(REFERENCE, MODEL)
+
+    table = render_settings(settings, apply_settings(settings, **kwargs))
+
+    assert "Detected: 16 CPU | 64 GB RAM | 1× NVIDIA L4 (22.5 GB)" in table
+    assert f"Rules:    cpu-stages, gpu   Model: {MODEL} (measured, L4)" in table
+    assert "num_transformer_actors" in table
+    assert "USER" in table
+    assert re.search(r"\bnum_cpus\b", table) is None
 
 
 # ---------------------------------------------------------------------------
-# 4. Model gating
+# Measured models
 # ---------------------------------------------------------------------------
 
 
-def test_model_gating_unmeasured_model():
-    """Unmeasured model yields no gpu_batch_size and no transformer batch_size."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0)
-    rec = recommend_settings(hw, model_name="StanfordAIMI/stanford-deidentifier-v2")
+def test_an_unmeasured_model_gets_no_batch_size():
+    settings = recommend(REFERENCE, "StanfordAIMI/stanford-deidentifier-v2")
 
-    assert "gpu_batch_size" not in rec.transformer
-    assert "batch_size" not in rec.transformer
-    assert rec.model_status == "(unmeasured)"
+    assert "gpu_batch_size" not in settings.transformer
+    assert "batch_size" not in settings.transformer
+    assert settings.model_status == "(unmeasured)"
 
 
-def test_model_gating_insufficient_vram():
-    """Measured model on insufficient VRAM yields no batch size recommendations."""
-    # Measured peak VRAM is 6.77 GB; 6.0 GB is below min_vram_gb (7.77 GB)
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=6.0)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
+def test_a_measured_model_without_enough_gpu_memory_gets_no_batch_size():
+    settings = recommend(Machine(cpus=16, ram_gb=64.0, gpus=1, gpu_name="NVIDIA L4", gpu_ram_gb=6.0), MODEL)
 
-    assert "gpu_batch_size" not in rec.transformer
-    assert "batch_size" not in rec.transformer
-    assert rec.model_status == "(insufficient VRAM)"
+    assert "gpu_batch_size" not in settings.transformer
+    assert settings.model_status == "(insufficient VRAM)"
 
 
-def test_model_gating_non_matching_gpu_family():
-    """Measured model on a non-matching GPU family yields no batch size recommendations."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA T4", vram_gb=16.0)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
+def test_a_measured_model_on_another_gpu_family_gets_no_batch_size():
+    settings = recommend(T4_BOX, MODEL)
 
-    assert "gpu_batch_size" not in rec.transformer
-    assert "batch_size" not in rec.transformer
-    assert "unmeasured" in rec.model_status
+    assert "gpu_batch_size" not in settings.transformer
+    assert settings.model_status == "(unmeasured for T4)"
 
 
-def test_model_gating_matching_l4():
-    """Measured model on matching L4 with sufficient VRAM yields recommended batch sizes."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
+def test_a_measured_model_on_the_measured_gpu_gets_its_batch_sizes():
+    settings = recommend(REFERENCE, MODEL)
 
-    assert rec.transformer["gpu_batch_size"] == 64
-    assert rec.transformer["batch_size"] == 512
-    assert rec.model_status == "(measured, L4)"
+    assert (settings.transformer["gpu_batch_size"], settings.transformer["batch_size"]) == (64, 512)
+    assert settings.model_status == "(measured, L4)"
+
+
+def test_the_deprecated_model_name_gets_the_same_batch_sizes():
+    with pytest.deprecated_call(match="20260211_debertav3_finetuned.*deprecated"):
+        deprecated = recommend(REFERENCE, DEPRECATED_MODEL_NAME)
+
+    assert deprecated.transformer == recommend(REFERENCE, MODEL).transformer
+
+
+def test_resolving_the_deprecated_model_key_keeps_its_own_explanation():
+    with pytest.deprecated_call(match="20260211_debertav3_finetuned.*deprecated"):
+        deprecated = load_model_config(DEPRECATED_MODEL_NAME)
+    canonical = load_model_config(MODEL)
+
+    assert {k for k in canonical if deprecated[k] != canonical[k]} == {"DEFAULT_EXPLANATION"}
 
 
 @pytest.mark.parametrize(
-    ("gpu_name", "expected_family"),
+    ("gpu_name", "family"),
     [
         ("NVIDIA L4", "L4"),
         ("Tesla T4", "T4"),
         ("NVIDIA A100-SXM4-80GB", "A100"),
-        ("NVIDIA A100 80GB PCIe", "A100"),
         ("NVIDIA A10G", "A10G"),
-        ("Tesla V100-PCIE-32GB", "V100"),
         ("NVIDIA H100 80GB HBM3", "H100"),
         ("NVIDIA L40", None),
         ("NVIDIA L40S", None),
-        ("L40S", None),
         ("RTX 4090", None),
         (None, None),
     ],
 )
-def test_extract_gpu_family_exact_tokens(gpu_name, expected_family):
-    """Ensure extract_gpu_family matches whole tokens so L40/L40S are not misclassified as L4."""
-    if extract_gpu_family(gpu_name) != expected_family:
-        raise ValueError(f"extract_gpu_family({gpu_name!r}) != {expected_family!r}")
-
-
-def test_model_gating_deprecated_model_alias():
-    """Deprecated key yields identical recommendation as canonical key with DeprecationWarning."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0)
-
-    with pytest.deprecated_call(match="20260211_debertav3_finetuned.*deprecated"):
-        rec_deprecated = recommend_settings(hw, model_name=DEPRECATED_MODEL)
-
-    rec_canonical = recommend_settings(hw, model_name=CANONICAL_MODEL)
-
-    assert rec_deprecated.transformer["gpu_batch_size"] == rec_canonical.transformer["gpu_batch_size"]
-    assert rec_deprecated.transformer["batch_size"] == rec_canonical.transformer["batch_size"]
-    assert rec_deprecated.transformer == rec_canonical.transformer
+def test_gpu_family_matches_whole_words(gpu_name, family):
+    assert extract_gpu_family(gpu_name, load_rules()["gpu_families"]) == family
 
 
 # ---------------------------------------------------------------------------
-# 5. Deprecation is non-destructive
+# Detection reads only this machine
 # ---------------------------------------------------------------------------
 
 
-def test_deprecation_is_non_destructive():
-    """Resolving the deprecated model key preserves its own DEFAULT_EXPLANATION."""
-    with pytest.deprecated_call(match="20260211_debertav3_finetuned.*deprecated"):
-        deprecated_cfg = load_model_config(DEPRECATED_MODEL)
+def test_detect_machine_does_not_start_ray():
+    import ray
 
-    canonical_cfg = load_model_config(CANONICAL_MODEL)
+    if ray.is_initialized():
+        ray.shutdown()
+    detect_machine.cache_clear()
 
-    # Explanation text MUST differ between the two keys
-    assert deprecated_cfg["DEFAULT_EXPLANATION"] != canonical_cfg["DEFAULT_EXPLANATION"]
-    assert deprecated_cfg["DEFAULT_EXPLANATION"] == "Identified as {} by finetuned microsoft/deberta-v3-base model"
-    assert (
-        canonical_cfg["DEFAULT_EXPLANATION"]
-        == "Identified as {} by the stanford-med-hdr/tide2-sentry-clinical-ner NER model"
-    )
+    machine = detect_machine()
 
-    # DEFAULT_EXPLANATION is the *only* difference: the alias in §6 of the plan is a
-    # confirmed same-checkpoint rename, not a name-similarity guess.
-    assert set(deprecated_cfg) == set(canonical_cfg)
-    differing = {k for k in canonical_cfg if deprecated_cfg[k] != canonical_cfg[k]}
-    assert differing == {"DEFAULT_EXPLANATION"}
+    assert not ray.is_initialized()
+    assert machine.cpus >= 1
+    assert machine.gpus >= 0
 
 
-# ---------------------------------------------------------------------------
-# 6. Reference-box parity (the gate)
-# ---------------------------------------------------------------------------
+def _fake_nvidia_smi(monkeypatch, output):
+    def run(*_args, **_kwargs):
+        if output is None:
+            raise FileNotFoundError("nvidia-smi")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=output)
+
+    monkeypatch.setattr(hardware.subprocess, "run", run)
 
 
-def test_reference_box_parity():
-    """Resolved settings on reference hardware match hard-coded literals exactly."""
-    # 16 vCPU, 1x NVIDIA L4 (24GB), 64GB RAM
-    node = NodeShape(
-        cpu_count=16.0,
-        gpu_count=1.0,
-        gpu_name="NVIDIA L4",
-        vram_gb=24.0,
-        ram_gb=64.0,
-    )
-    hw = HardwareFacts(
-        cluster_cpu=16.0,
-        cluster_gpu=1.0,
-        nodes=(node,),
-        homogeneous=True,
-        node=node,
-        profile="gpu-workstation",
-    )
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    applied = apply_recommendations(
-        rec,
-        transformer={},
-        recognizer={},
-        anonymizer={},
-        runner={},
-    )
+def test_gpus_are_read_from_nvidia_smi(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    _fake_nvidia_smi(monkeypatch, "NVIDIA L4, 23034\nNVIDIA L4, 23034\n")
 
-    # Exact parity with local_runner.py reference literals
-    assert applied.transformer["num_transformer_actors"] == 3
-    assert applied.transformer["num_gpus"] == 0.33
-    assert applied.transformer["transformer_cpus"] == 4.0
-    assert applied.transformer["batch_size"] == 512
-    assert applied.transformer["gpu_batch_size"] == 64
-    assert applied.transformer["override_num_blocks"] == 16
-    assert applied.transformer["num_agg_actors"] == 0
+    assert hardware._detect_gpus() == (2, "NVIDIA L4", 22.5)
 
-    assert applied.recognizer["num_actors"] == 14
-    assert applied.recognizer["num_cpus"] == 0
-    assert applied.recognizer["worker_num_cpus"] == 1.0
-    assert applied.recognizer["override_num_blocks"] == 32
 
-    assert applied.anonymizer["num_actors"] == 14
-    assert applied.anonymizer["num_cpus"] == 0
-    assert applied.anonymizer["worker_num_cpus"] == 1.0
-    assert applied.anonymizer["override_num_blocks"] == 32
+def test_cuda_visible_devices_limits_the_gpus(monkeypatch):
+    _fake_nvidia_smi(monkeypatch, "NVIDIA L4, 23034\nNVIDIA L4, 23034\n")
 
-    assert applied.runner["no_progress_timeout_s"] == 600
-    assert "object_store_gb" not in applied.runner
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    assert hardware._detect_gpus()[0] == 1
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    assert hardware._detect_gpus() == (0, None, 0.0)
+
+
+def test_no_nvidia_smi_means_no_gpu(monkeypatch):
+    _fake_nvidia_smi(monkeypatch, None)
+
+    assert hardware._detect_gpus() == (0, None, 0.0)
 
 
 # ---------------------------------------------------------------------------
-# 7. Opt-out
+# The runner uses the detected machine, with its own overrides on top
 # ---------------------------------------------------------------------------
 
 
-def test_hardware_autotune_opt_out():
-    """hardware_autotune=False leaves user kwargs unchanged by recommendations."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=24.0)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
+def test_runner_overrides_win_over_detection(monkeypatch):
+    import tide2.runner.local_runner as lr
 
-    t_kw: dict = {}
-    r_kw: dict = {}
-    a_kw: dict = {}
-    run_kw: dict = {}
+    monkeypatch.setattr(lr, "detect_machine", lambda: REFERENCE)
 
-    applied = apply_recommendations(
-        rec,
-        transformer=t_kw,
-        recognizer=r_kw,
-        anonymizer=a_kw,
-        runner=run_kw,
-        hardware_autotune=False,
-    )
-
-    # All applied settings must have source="default", none with source="auto"
-    for entry in applied.entries:
-        assert entry.source in ("default", "USER")
-
-    # Table rendering still works cleanly
-    table = render_settings_table(applied)
-    assert "default" in table
-    assert "auto" not in table
+    assert LocalJobRunner()._machine() == REFERENCE
+    assert LocalJobRunner(num_cpus=4)._machine().cpus == 4
+    assert LocalJobRunner(num_gpus=0.33)._machine().gpus == 1
+    assert LocalJobRunner(num_gpus=0)._machine().gpus == 0
 
 
-# ---------------------------------------------------------------------------
-# 8. Small-box pairing
-# ---------------------------------------------------------------------------
+def test_runner_without_autotune_uses_only_the_safe_defaults(monkeypatch):
+    import tide2.runner.local_runner as lr
 
+    monkeypatch.setattr(lr, "detect_machine", lambda: REFERENCE)
 
-@pytest.mark.parametrize("gpu_count", [0.0, 1.0])
-def test_small_box_fractional_cpus_and_checkpoint_disabled_pairing(gpu_count):
-    """small-box profiles emit fractional CPUs AND enable_checkpoint=False together."""
-    hw = make_facts(
-        cpu_count=2.0,
-        gpu_count=gpu_count,
-        gpu_name="NVIDIA T4" if gpu_count > 0 else None,
-        vram_gb=16.0 if gpu_count > 0 else None,
-        ram_gb=8.0,
-    )
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-
-    assert rec.profile in ("small-box-cpu", "small-box-gpu")
-
-    # Assert enable_checkpoint is False across stages
-    assert rec.transformer["enable_checkpoint"] is False
-    assert rec.recognizer["enable_checkpoint"] is False
-    assert rec.anonymizer["enable_checkpoint"] is False
-    assert rec.runner["enable_checkpoint"] is False
-
-    # Assert fractional CPUs are emitted across stages
-    assert rec.transformer["read_cpus"] < 1.0
-    assert rec.transformer["write_cpus"] < 1.0
-    assert rec.recognizer["worker_num_cpus"] < 1.0
-    assert rec.recognizer["read_cpus"] < 1.0
-    assert rec.anonymizer["worker_num_cpus"] < 1.0
-    assert rec.anonymizer["read_cpus"] < 1.0
-
-    # Extended hang guard timeout
-    assert rec.runner["no_progress_timeout_s"] == 1200
-
-
-def test_small_box_recommended_keys_are_accepted_by_stage_methods():
-    """Every recommended knob must be a real parameter of the stage it targets.
-
-    small-box-* emits the widest key set (fractional CPUs across every operator),
-    so an unknown key here would surface as a TypeError only on a 2-CPU host.
-    """
-    hw = make_facts(cpu_count=2.0, gpu_count=1.0, gpu_name="NVIDIA T4", vram_gb=16.0, ram_gb=8.0)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    applied = apply_recommendations(rec, transformer={}, recognizer={}, anonymizer={})
-
-    stage_methods = {
-        "transformer": LocalJobRunner.run_transformer,
-        "recognizer": LocalJobRunner.run_recognition,
-        "anonymizer": LocalJobRunner.run_anonymization,
-    }
-    for stage, method in stage_methods.items():
-        accepted = set(inspect.signature(method).parameters)
-        emitted = set(getattr(applied, stage))
-        assert emitted <= accepted, f"{stage} recommends unknown kwargs: {sorted(emitted - accepted)}"
-
-
-# ---------------------------------------------------------------------------
-# Runner plumbing: the resolved timeout must survive per-stage reconfiguration
-# ---------------------------------------------------------------------------
-
-
-def test_no_progress_timeout_is_sticky_across_stages():
-    """Stages re-apply the runner's timeout instead of resetting it to the default."""
-    runner = LocalJobRunner(no_progress_timeout_s=1200)
-    assert runner._data_context_kwargs(verbose_progress=True) == {
-        "verbose_progress": True,
-        "no_progress_timeout_s": 1200,
-    }
-
-
-def test_no_progress_timeout_unset_leaves_library_default():
-    """With no timeout resolved, stage kwargs are untouched."""
-    runner = LocalJobRunner()
-    assert runner._data_context_kwargs(verbose_progress=True) == {"verbose_progress": True}
-
-
-# ---------------------------------------------------------------------------
-# CLI / YAML resolution of the opt-out flag
-# ---------------------------------------------------------------------------
-
-
-def _parse_run_args(monkeypatch, argv: list[str]) -> argparse.Namespace:
-    """Run the CLI parser (and YAML merge) without executing the job."""
-    captured: dict[str, argparse.Namespace] = {}
-
-    def fake_cmd_run(args: argparse.Namespace) -> None:
-        captured["args"] = args
-
-    monkeypatch.setattr(cli, "cmd_run", fake_cmd_run)
-    monkeypatch.setattr(sys, "argv", ["tide2-runner", *argv])
-    cli.main()
-    return captured["args"]
-
-
-@pytest.mark.parametrize(
-    ("argv", "expected"),
-    [
-        ([], None),
-        (["--no-hardware-autotune"], False),
-    ],
-)
-def test_cli_hardware_autotune_flag(monkeypatch, argv, expected):
-    """Unset stays None so YAML can still speak; the flag turns autotune off."""
-    args = _parse_run_args(monkeypatch, ["run", "pipeline", "-i", "in.parquet", "-o", "out", *argv])
-    assert args.hardware_autotune is expected
-    # cmd_run's resolution: only an explicit False disables autotuning.
-    assert (args.hardware_autotune is not False) is (expected is not False)
-
-
-@pytest.mark.parametrize("yaml_value", [True, False])
-def test_yaml_hardware_autotune_is_honoured(monkeypatch, tmp_path, yaml_value):
-    """A YAML `hardware_autotune: false` must reach cmd_run.
-
-    Regression guard: with argparse defaulting the flag to True, `_apply_config`
-    would refuse to backfill and the YAML key would be silently ignored.
-    """
-    config = tmp_path / "runner.yaml"
-    config.write_text(f"hardware_autotune: {str(yaml_value).lower()}\n")
-
-    args = _parse_run_args(
-        monkeypatch,
-        ["run", "pipeline", "-i", "in.parquet", "-o", "out", "--config", str(config)],
-    )
-    assert args.hardware_autotune is yaml_value
-
-
-def test_cli_flag_beats_yaml(monkeypatch, tmp_path):
-    """An explicit CLI flag is never overwritten by the config file."""
-    config = tmp_path / "runner.yaml"
-    config.write_text("hardware_autotune: true\n")
-
-    args = _parse_run_args(
-        monkeypatch,
-        ["run", "pipeline", "-i", "in.parquet", "-o", "out", "--config", str(config), "--no-hardware-autotune"],
-    )
-    assert args.hardware_autotune is False
-
-
-# ---------------------------------------------------------------------------
-# Table rendering and helpers
-# ---------------------------------------------------------------------------
-
-
-def test_render_settings_table_output():
-    """render_settings_table formats the expected human-readable output."""
-    hw = make_facts(cpu_count=16.0, gpu_count=1.0, gpu_name="NVIDIA L4", vram_gb=22.5, ram_gb=62.7)
-    rec = recommend_settings(hw, model_name=CANONICAL_MODEL)
-    applied = apply_recommendations(
-        rec,
-        transformer={"gpu_batch_size": 64},
-        recognizer={},
-        anonymizer={},
-        runner={},
-    )
-    table = render_settings_table(applied)
-
-    assert "Detected: 16 CPU | 1× NVIDIA L4 (22.5 GB) | 62.7 GB RAM | 1 node (homogeneous)" in table
-    assert "Profile:  gpu-workstation   Model: stanford-med-hdr/tide2-sentry-clinical-ner (measured, L4)" in table
-    assert "num_transformer_actors" in table
-    assert "gpu_batch_size" in table
-    assert "USER" in table
-    assert "auto" in table
-
-
-def test_detect_hardware_local_fallback():
-    """detect_hardware returns valid HardwareFacts even without an active Ray cluster."""
-    hw = detect_hardware()
-    assert isinstance(hw, HardwareFacts)
-    assert hw.cluster_cpu > 0
-    assert len(hw.nodes) >= 1
-    assert hw.profile in (
-        "gpu-workstation",
-        "small-box-cpu",
-        "small-box-gpu",
-        "cpu-only",
-        "large-cpu",
-        "gpu-server",
-        "unknown",
-    )
-
-
-def test_recommend_object_store_gb():
-    """recommend_object_store_gb correctly computes ~30% of RAM."""
-    hw = make_facts(cpu_count=16.0, gpu_count=0.0, ram_gb=64.0)
-    assert recommend_object_store_gb(hw) == 19.2
-
-    hw_no_node = HardwareFacts(
-        cluster_cpu=16.0,
-        cluster_gpu=0.0,
-        nodes=(),
-        homogeneous=False,
-        node=None,
-        profile="unknown",
-    )
-    assert recommend_object_store_gb(hw_no_node) is None
+    assert LocalJobRunner(hardware_autotune=True)._settings().rules == ("cpu-stages", "gpu")
+    assert LocalJobRunner(hardware_autotune=False)._settings().rules == ()
+    assert LocalJobRunner(hardware_autotune=False)._auto_num_actors() == 8
 
 
 @pytest.mark.parametrize("hardware_autotune", [True, False])
@@ -703,3 +545,69 @@ def test_init_ray_applies_an_explicit_object_store_gb(monkeypatch):
     LocalJobRunner(object_store_gb=2)._init_ray()
 
     assert captured["object_store_memory"] == 2 * 1024**3
+
+
+def test_no_progress_timeout_is_sticky_across_stages():
+    """Stages re-apply the runner's timeout instead of resetting it to the default."""
+    runner = LocalJobRunner(no_progress_timeout_s=1200)
+    assert runner._data_context_kwargs(verbose_progress=True) == {
+        "verbose_progress": True,
+        "no_progress_timeout_s": 1200,
+    }
+
+
+def test_no_progress_timeout_unset_leaves_library_default():
+    runner = LocalJobRunner()
+    assert runner._data_context_kwargs(verbose_progress=True) == {"verbose_progress": True}
+
+
+# ---------------------------------------------------------------------------
+# CLI / YAML resolution of the opt-out flag
+# ---------------------------------------------------------------------------
+
+
+def _parse_run_args(monkeypatch, argv: list[str]) -> argparse.Namespace:
+    """Run the CLI parser (and YAML merge) without executing the job."""
+    captured: dict[str, argparse.Namespace] = {}
+
+    def fake_cmd_run(args: argparse.Namespace) -> None:
+        captured["args"] = args
+
+    monkeypatch.setattr(cli, "cmd_run", fake_cmd_run)
+    monkeypatch.setattr(sys, "argv", ["tide2-runner", *argv])
+    cli.main()
+    return captured["args"]
+
+
+@pytest.mark.parametrize(("argv", "expected"), [([], None), (["--no-hardware-autotune"], False)])
+def test_cli_hardware_autotune_flag(monkeypatch, argv, expected):
+    """Unset stays None so YAML can still speak; the flag turns autotune off."""
+    args = _parse_run_args(monkeypatch, ["run", "pipeline", "-i", "in.parquet", "-o", "out", *argv])
+    assert args.hardware_autotune is expected
+
+
+@pytest.mark.parametrize("yaml_value", [True, False])
+def test_yaml_hardware_autotune_is_honoured(monkeypatch, tmp_path, yaml_value):
+    """A YAML `hardware_autotune: false` must reach cmd_run."""
+    config = tmp_path / "runner.yaml"
+    config.write_text(f"hardware_autotune: {str(yaml_value).lower()}\n")
+
+    args = _parse_run_args(monkeypatch, ["run", "pipeline", "-i", "in.parquet", "-o", "out", "--config", str(config)])
+    assert args.hardware_autotune is yaml_value
+
+
+def test_cli_flag_beats_yaml(monkeypatch, tmp_path):
+    config = tmp_path / "runner.yaml"
+    config.write_text("hardware_autotune: true\n")
+
+    args = _parse_run_args(
+        monkeypatch,
+        ["run", "pipeline", "-i", "in.parquet", "-o", "out", "--config", str(config), "--no-hardware-autotune"],
+    )
+    assert args.hardware_autotune is False
+
+
+def test_the_test_table_covers_every_packaged_rule():
+    """Adding a rule to the YAML without a row in HARDWARE_TABLE leaves it untested."""
+    covered = {name for param in HARDWARE_TABLE for name in param.values[1]}
+    assert covered >= {rule["name"] for rule in load_rules()["rules"]}

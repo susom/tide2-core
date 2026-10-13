@@ -22,17 +22,13 @@ from .fault_tolerance import chunked
 from .fault_tolerance import configure_data_context
 from .fault_tolerance import get_ray_remote_args_cpu
 from .fault_tolerance import get_ray_remote_args_gpu
-from .hardware import Applied
-from .hardware import HardwareFacts
-from .hardware import NodeShape
-from .hardware import Recommendations
+from .hardware import Machine
 from .hardware import SettingEntry
-from .hardware import apply_recommendations
-from .hardware import classify_profile
-from .hardware import detect_hardware
-from .hardware import recommend_object_store_gb
-from .hardware import recommend_settings
-from .hardware import render_settings_table
+from .hardware import Settings
+from .hardware import apply_settings
+from .hardware import detect_machine
+from .hardware import recommend
+from .hardware import render_settings
 from .local_runner import LocalJobRunner
 from .local_runner import run_anonymization_simple
 from .local_runner import run_pipeline_simple
@@ -46,26 +42,22 @@ from .utils import resolve_input_files
 
 __all__ = [
     "DEFAULT_DASHBOARD_HOST",
-    "Applied",
     "GracefulShutdown",
-    "HardwareFacts",
     "LocalJobRunner",
-    "NodeShape",
-    "Recommendations",
+    "Machine",
     "SettingEntry",
-    "apply_recommendations",
+    "Settings",
+    "apply_settings",
     "chunked",
-    "classify_profile",
     "configure_data_context",
     "detect_columns",
-    "detect_hardware",
+    "detect_machine",
     "get_ray_remote_args_cpu",
     "get_ray_remote_args_gpu",
     "init_ray_local",
     "log_ray_cluster_info",
-    "recommend_object_store_gb",
-    "recommend_settings",
-    "render_settings_table",
+    "recommend",
+    "render_settings",
     "resolve_input_files",
     "run_anonymization_simple",
     "run_pipeline_simple",

@@ -11,8 +11,9 @@
 mode: vm
 input: /mnt/gcs/standalone_anonymizer/input
 output: /mnt/gcs/standalone_anonymizer/output
-# Size unset knobs from the detected hardware profile (default: true). Values set
-# anywhere in this file always win. Set to false to run the pre-autotune defaults —
+# Size unset knobs from this machine's CPUs, RAM and GPUs, using the rules in
+# resources/hardware_rules.yaml (default: true). Values set anywhere in this file
+# always win. Set to false to use only the safe defaults of that file —
 # benchmarks should, so their settings do not change with the host.
 hardware_autotune: true
 

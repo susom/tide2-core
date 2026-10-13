@@ -16,6 +16,7 @@ import pytest
 import ray
 
 import tide2.runner.local_runner as lr
+from tide2.runner.hardware import Machine
 from tide2.runner.local_runner import ANONYMIZER_STAGE_COLUMNS
 from tide2.runner.local_runner import LLM_RECOGNIZER_STAGE_COLUMNS
 from tide2.runner.local_runner import RECOGNIZER_STAGE_COLUMNS
@@ -108,9 +109,8 @@ def streamed_env(monkeypatch, tmp_path):
         "get_current",
         staticmethod(lambda: MagicMock(checkpoint_config="leftover")),
     )
-    monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [16.0])
+    monkeypatch.setattr(lr, "detect_machine", lambda: Machine(cpus=16, ram_gb=64.0))
     monkeypatch.setattr(lr.LocalJobRunner, "_init_ray", lambda _self: None)
-    monkeypatch.setattr(lr.LocalJobRunner, "_apply_pipeline_recommendations", lambda *_a, **_k: None)
 
     transformer_actor = MagicMock(name="TransformerActor")
     monkeypatch.setattr(
@@ -235,39 +235,29 @@ class TestColumnContracts:
 
 
 class TestAdmissionCheck:
-    def test_accepts_a_fitting_plan(self, monkeypatch):
-        monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [16.0])
-        assert check_streamed_admission({"read": 0.25, "transformer": 1.0, "recognizer": 2.0}) == 16.0
+    def test_accepts_a_fitting_plan(self):
+        assert check_streamed_admission({"read": 0.25, "transformer": 1.0, "recognizer": 2.0}, 16) == 16
 
-    def test_raises_naming_the_operators_when_oversubscribed(self, monkeypatch):
-        monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [16.0])
+    def test_raises_naming_the_operators_when_oversubscribed(self):
         with pytest.raises(ValueError, match=r"recognizer=14\.0.*transformer=12\.0") as exc:
-            check_streamed_admission({"transformer": 12.0, "recognizer": 14.0, "anonymizer": 14.0})
+            check_streamed_admission({"transformer": 12.0, "recognizer": 14.0, "anonymizer": 14.0}, 16)
         assert "discrete" in str(exc.value)
 
-    def test_refuses_small_boxes(self, monkeypatch):
-        monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [4.0])
-        with pytest.raises(ValueError, match="small boxes deadlock"):
-            check_streamed_admission({"read": 0.25})
+    def test_refuses_small_boxes(self):
+        with pytest.raises(ValueError, match="small box"):
+            check_streamed_admission({"read": 0.25}, 4)
 
-    def test_refuses_multi_node(self, monkeypatch):
-        monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [16.0, 16.0])
-        with pytest.raises(ValueError, match="single-node only"):
-            check_streamed_admission({"read": 0.25})
-
-    def test_uses_largest_node_not_cluster_total(self, monkeypatch):
-        """Cluster totals sum across machines; actor placement is per node."""
-        monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [8.0])
+    def test_keeps_one_cpu_free(self):
         with pytest.raises(ValueError, match=r"usable budget 7\.0"):
-            check_streamed_admission({"a": 4.0, "b": 4.0})
+            check_streamed_admission({"a": 4.0, "b": 4.0}, 8)
 
     def test_aggregation_pool_multiplies_num_agg_actors(self, monkeypatch, streamed_env, df):
         """Admission check reserves num_agg_actors * agg_num_cpus for bio_aggregation."""
         captured_minimums = {}
 
-        def fake_admission(pool_minimums):
+        def fake_admission(pool_minimums, cpus):
             captured_minimums.update(pool_minimums)
-            return 64.0
+            return cpus
 
         monkeypatch.setattr(lr, "check_streamed_admission", fake_admission)
         monkeypatch.setattr(
@@ -408,7 +398,7 @@ class TestPlanShape:
         assert "ds" not in streamed_env
 
     def test_over_subscribed_node_raises_instead_of_hanging(self, streamed_env, df, monkeypatch):
-        monkeypatch.setattr(lr, "_alive_node_cpus", lambda: [6.0])
+        monkeypatch.setattr(lr, "detect_machine", lambda: Machine(cpus=6, ram_gb=64.0))
         with pytest.raises(ValueError, match="reserves a minimum"):
             run_streamed(
                 lr.LocalJobRunner(),
