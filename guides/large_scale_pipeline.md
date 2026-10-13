@@ -106,7 +106,7 @@ runner.run_transformer(
 | Type | Columns | Notes |
 |---|---|---|
 | **Required Input** | `note_text` | Only required column in source data. |
-| **Optional Passthrough** | `row_id`, `text_hash`, `patient_id`, `patient_identifiers`, `jitter`, `processing_status`, `stage_status_json` | Derived automatically if absent. Passed through to output unchanged. Numeric `patient_id` converts to string. |
+| **Optional Passthrough** | `row_id`, `text_hash`, `patient_id`, `patient_identifiers`, `jitter`, `processing_status`, `stage_status_json` | `row_id` and `text_hash` are derived if absent. `patient_id` (converted to string), `patient_identifiers`, and `jitter` pass through if present. `processing_status` and `stage_status_json` are updated for each note. |
 | **Output Columns** | `text_hash`, `note_text`, `patient_id`, `row_id`, `recognizer_results_json`, `processing_status`, `stage_status_json` | `recognizer_results_json` contains deep-learning entity spans in Presidio format. |
 
 ---
@@ -143,7 +143,7 @@ runner.run_recognition(
 | Type | Columns | Notes |
 |---|---|---|
 | **Required Input** | `note_text` | Only required column. |
-| **Optional Passthrough** | `recognizer_results_json`, `patient_identifiers`, `patient_id`, `row_id`, `text_hash`, `jitter`, `processing_status`, `stage_status_json` | Existing transformer detections in `recognizer_results_json` are merged with regex detections. `patient_identifiers` provides structured PHI for dictionary matching. |
+| **Optional Passthrough** | `recognizer_results_json`, `patient_identifiers`, `patient_id`, `row_id`, `text_hash`, `jitter`, `processing_status`, `stage_status_json` | Existing transformer spans in `recognizer_results_json` merge with regex and dictionary detections. `patient_id` and `jitter` pass through if present. `processing_status` and `stage_status_json` are updated. |
 | **Output Columns** | `text_hash`, `note_text`, `patient_id`, `row_id`, `recognizer_results_json`, `entity_count`, `processing_timestamp`, `processing_status`, `stage_status_json` | `recognizer_results_json` contains all merged detections. `entity_count` contains total detection count. |
 
 ---
@@ -184,7 +184,7 @@ runner.run_llm_recognition(
 | Type | Columns | Notes |
 |---|---|---|
 | **Required Input** | `note_text` | Only required column. |
-| **Optional Passthrough** | `patient_identifiers`, `patient_id`, `jitter`, `row_id`, `text_hash`, `processing_status`, `stage_status_json` | Passed through to output. |
+| **Optional Passthrough** | `patient_identifiers`, `patient_id`, `jitter`, `row_id`, `text_hash`, `processing_status`, `stage_status_json` | Passed through to output if present. `processing_status` and `stage_status_json` are updated. |
 | **Output Columns** | `text_hash`, `note_text`, `patient_id`, `row_id`, `recognizer_results_json`, `entity_count`, `processing_timestamp`, `processing_status`, `stage_status_json` | Contains LLM-extracted entity spans. |
 
 ---
@@ -222,15 +222,15 @@ runner.run_anonymization(
 - Checkpoint directory: `<output_path>_ray_checkpoint` (sibling directory).
 
 #### Key Material Requirements
-The anonymizer requires key material. Provide one of these pairs:
-1. File paths: `--salt <path>` and `--key <path>` (Python: `salt_path` and `key_path`).
-2. Hex strings: `--salt-hex <hex>` and `--key-hex <hex>` (Python: `salt_hex` and `key_hex`).
+The anonymizer requires key material:
+- **CLI (`tide2-runner run anonymizer`)**: Requires file paths `--salt <path>` and `--key <path>`. (The flags `--salt-hex` and `--key-hex` are accepted only by pipeline jobs: `tide2-runner run pipeline`).
+- **Python API (`runner.run_anonymization`)**: Accepts either file paths (`salt_path` and `key_path`) or hex strings (`salt_hex` and `key_hex`).
 
 #### Column Contract (`ANONYMIZER_STAGE_COLUMNS` and `FINAL_OUTPUT_COLUMNS`)
 | Type | Columns | Notes |
 |---|---|---|
 | **Required Input** | `note_text`, `recognizer_results_json` | `recognizer_results_json` is produced by upstream recognizer stages. |
-| **Optional Passthrough** | `patient_id`, `jitter`, `row_id`, `text_hash`, `processing_status`, `stage_status_json` | Used to compute dates and accession number hashes. |
+| **Optional Passthrough** | `patient_id`, `jitter`, `row_id`, `text_hash`, `processing_status`, `stage_status_json` | Used to compute dates and accession number hashes. Passed through if present. |
 | **Output Columns** | `text_hash`, `patient_id`, `row_id`, `anonymized_note_text`, `anonymizer_results_json`, `entity_count`, `jitter`, `processing_timestamp`, `processing_status`, `stage_status_json` | **CRITICAL SECURITY INVARIANT**: Raw `note_text` is deleted. The output contains only `anonymized_note_text`. |
 
 ---
@@ -254,13 +254,13 @@ Generate a unique `row_id` for each input row in your upstream ETL pipeline befo
 
 ```python
 import pyarrow as pa
-from tide2.runner.local_runner import add_row_id
+import uuid
+from tide2.runner.local_runner import normalize_source_batch
 
-# Option A: Use the tide2 helper (derives sha256(text_hash:patient_id))
-table_with_ids = add_row_id(source_table)
+# Option A: Use the tide2 normalization helper (computes text_hash if absent, then derives row_id)
+table_with_ids = normalize_source_batch(source_table)
 
 # Option B: Add a unique UUID string per row (RECOMMENDED for repeating notes)
-import uuid
 row_ids = [str(uuid.uuid4()) for _ in range(len(source_table))]
 table_with_ids = source_table.append_column("row_id", pa.array(row_ids, type=pa.string()))
 ```

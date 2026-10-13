@@ -265,11 +265,11 @@ reads the folder the previous stage wrote.
 > **Example deduplication before merge mode:**
 > ```python
 > import pyarrow as pa
-> from tide2.runner.local_runner import add_row_id
+> from tide2.runner.local_runner import normalize_source_batch
 >
 > # Deduplicate on row_id to prevent Cartesian join expansion in merge mode
 > table = pa.parquet.read_table("notes.parquet")
-> table = add_row_id(table)  # ensures sha256(text_hash:patient_id) is present
+> table = normalize_source_batch(table)  # computes text_hash if absent, then derives row_id
 > unique_df = table.to_pandas().drop_duplicates(subset=["row_id"])
 > deduplicated_table = pa.Table.from_pandas(unique_df)
 > pa.parquet.write_table(deduplicated_table, "deduplicated_notes.parquet")
