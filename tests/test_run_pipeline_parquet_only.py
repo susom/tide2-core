@@ -565,6 +565,16 @@ def test_run_anonymization_takes_the_keys_as_files_or_as_hex(tmp_path):
     with pytest.raises(ValueError, match="32 bytes"):
         runner.run_anonymization(str(source), str(tmp_path / "d"), salt_hex="00", key_hex="11" * 32, dry_run=True)
 
+    mixed = [
+        {"salt_path": str(salt_file), "key_path": str(key_file), "salt_hex": "00" * 32},
+        {"salt_path": str(salt_file), "key_path": str(key_file), "key_hex": "11" * 32},
+        {"salt_path": str(salt_file), "key_hex": "11" * 32},
+        {},
+    ]
+    for keys in mixed:
+        with pytest.raises(ValueError, match="nothing from the other pair"):
+            runner.run_anonymization(str(source), str(tmp_path / "e"), dry_run=True, **keys)
+
 
 def test_stage_jobs_accept_a_raw_file_without_text_hash(tmp_path):
     """Every stage job derives text_hash in the read, so only note_text (and the recognizer results) are required."""

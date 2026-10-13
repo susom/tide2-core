@@ -1512,9 +1512,11 @@ class LocalJobRunner:
 
         start_time = time.time()
 
-        # Load keys: both as files or both as hex strings
-        if (salt_path is not None and key_path is not None) == (salt_hex is not None and key_hex is not None):
-            raise ValueError("Pass salt_path and key_path, or salt_hex and key_hex.")
+        # Load keys: exactly one complete pair, both as files or both as hex strings
+        files_given = (salt_path is not None, key_path is not None)
+        hex_given = (salt_hex is not None, key_hex is not None)
+        if not (all(files_given) and not any(hex_given)) and not (all(hex_given) and not any(files_given)):
+            raise ValueError("Pass salt_path and key_path, or salt_hex and key_hex, and nothing from the other pair.")
         salt = self._load_key(salt_path) if salt_hex is None else self._decode_key(salt_hex)
         key = self._load_key(key_path) if key_hex is None else self._decode_key(key_hex)
 
