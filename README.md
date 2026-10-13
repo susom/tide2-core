@@ -522,9 +522,13 @@ original text of the anonymizer output.
 
 **What to do.** `success` and `degraded` rows are complete. A `failed` row with
 anonymized text has masked entities and can be used. A `failed` row with null
-text must be processed again: select `processing_status = 'failed'`, write those
-rows as a new input, and run with a new `<run_id>`. Failed rows are committed to
-the checkpoint like any other row, so resuming a run does not retry them.
+text must be processed again. The output has no original `note_text`, so take the
+failed `row_id` values from the output and select those rows from your original
+input. Write them as a new input and run with a new `<run_id>`. Do not copy the
+`processing_status` or `stage_status_json` columns from the output into the new
+input: a stage passes a row marked `failed` through unchanged, so the row would
+stay failed. Failed rows are committed to the checkpoint like any other row, so
+resuming a run does not retry them.
 
 **Jitter column.** The anonymizer output has a `jitter` column: the date shift in
 days that was applied, taken from the input or derived. It is null when dates were
