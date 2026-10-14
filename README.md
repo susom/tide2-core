@@ -703,8 +703,8 @@ make docker-push             # build and push (set DOCKER_REGISTRY and DOCKER_IM
 ## Dependency Groups
 
 - **`llm`**: LLM provider SDKs for the optional LLM-based recognizer (`anthropic`, `openai`, `google-genai`, `google-cloud-aiplatform`)
-- **`dev`**: Development tools (`pytest`, `pytest-cov`, `ty`, `ruff`, `pre-commit`), Jupyter, and the `evaluation` libraries (`scikit-learn`, `scipy`, `tqdm`)
-- **`evaluation`**: Evaluation/analysis libraries (`scikit-learn`, `scipy`, `tqdm`)
+- **`dev`**: Development tools (`pytest`, `pytest-cov`, `ty`, `ruff`, `pre-commit`), Jupyter, and the `evaluation` libraries (`pandas`, `scikit-learn`, `scipy`, `tqdm`)
+- **`evaluation`**: Evaluation/analysis libraries (`pandas`, `scikit-learn`, `scipy`, `tqdm`)
 - **`test`**: Minimal test dependencies (`pytest`, `pytest-cov`)
 - **`docs`**: API documentation generation (`pdoc`)
 
