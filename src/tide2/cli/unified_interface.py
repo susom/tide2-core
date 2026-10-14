@@ -622,6 +622,38 @@ def _load_pipeline_recognizer_stage(
     return rec_results, rec_hash_map
 
 
+def _build_anonymizer_filter(
+    anonymizer_dir: Path,
+    rec_results: dict[str, dict[str, Any]],
+    rec_hash_map: dict[str, str],
+) -> Any:
+    """Build pushdown filter for anonymizer parquet scan using available schema join columns."""
+    if not rec_results:
+        return None
+
+    try:
+        ds = pads.dataset(anonymizer_dir)
+        schema_names = set(ds.schema.names)
+    except Exception:
+        return None
+
+    row_id_pred = None
+    if "row_id" in schema_names:
+        row_ids = [str(k) for k in rec_results]
+        with contextlib.suppress(Exception):
+            row_id_pred = pads.field("row_id").isin(row_ids)
+
+    hash_pred = None
+    if "text_hash" in schema_names and rec_hash_map:
+        text_hashes = list(rec_hash_map.keys())
+        with contextlib.suppress(Exception):
+            hash_pred = pads.field("text_hash").isin(text_hashes)
+
+    if row_id_pred is not None and hash_pred is not None:
+        return row_id_pred | hash_pred
+    return row_id_pred or hash_pred
+
+
 def _load_pipeline_anonymizer_stage(
     anonymizer_dir: Path,
     rec_hash_map: dict[str, str],
@@ -629,11 +661,7 @@ def _load_pipeline_anonymizer_stage(
     max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load anonymizer parquet output and align with recognizer sample IDs."""
-    filter_expr = None
-    if rec_results:
-        row_ids = [str(k) for k in rec_results]
-        with contextlib.suppress(Exception):
-            filter_expr = pads.field("row_id").isin(row_ids)
+    filter_expr = _build_anonymizer_filter(anonymizer_dir, rec_results, rec_hash_map)
 
     anon_df = _scan_dataset_to_pandas(anonymizer_dir, ANONYMIZER_COLUMNS, max_notes=max_notes, filter_expr=filter_expr)
 

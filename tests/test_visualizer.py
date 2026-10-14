@@ -218,6 +218,42 @@ def test_load_data_pipeline_output_dir(tmp_path: Path):
     assert len(results["p1"]["modified_phi"]) == 1
 
 
+def test_load_pipeline_anonymizer_hash_only_fallback(tmp_path: Path):
+    """Verify that anonymizer stage with only text_hash joins correctly when row_id is absent."""
+    out_dir = tmp_path / "pipeline_run_hash_only"
+    out_dir.mkdir()
+
+    rec_dir = out_dir / "recognizer_output"
+    rec_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "row_id": "r10",
+                "text_hash": "th_fallback",
+                "note_text": "Sample text",
+                "recognizer_results_json": "[]",
+            }
+        ]
+    ).to_parquet(rec_dir / "part-0.parquet")
+
+    anon_dir = out_dir / "anonymizer_output"
+    anon_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "text_hash": "th_fallback",
+                "anonymized_note_text": "Anonymized sample",
+                "anonymizer_results_json": "[]",
+            }
+        ]
+    ).to_parquet(anon_dir / "part-0.parquet")
+
+    results = load_pipeline_output_dir(out_dir)
+    assert "r10" in results
+    assert results["r10"]["original_text"] == "Sample text"
+    assert results["r10"]["modified_text"] == "Anonymized sample"
+
+
 def test_load_pipeline_output_recovers_text_from_transformer_partial_null(tmp_path: Path):
     """Verify that note_text is recovered per-row from transformer when recognizer has mixed populated/null text."""
     out_dir = tmp_path / "pipeline_run_partial"
