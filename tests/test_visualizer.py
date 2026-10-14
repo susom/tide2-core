@@ -346,6 +346,28 @@ def test_load_data_preserves_text_hash(tmp_path: Path):
     assert results["row_123"]["text_hash"] == "hash_abc"
 
 
+def test_load_anonymizer_only_parquet_disambiguation(tmp_path: Path):
+    """Verify an anonymizer-only Parquet file with text/items assigns text to modified_text."""
+    df = pd.DataFrame(
+        [
+            {
+                "row_id": "anon_1",
+                "text": "Anonymized text content",
+                "items": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 10}]),
+            }
+        ]
+    )
+    p_file = tmp_path / "anon_only.parquet"
+    df.to_parquet(p_file)
+
+    results, _ = load_data(p_file)
+    assert "anon_1" in results
+    sample = results["anon_1"]
+    assert sample["original_text"] == ""
+    assert sample["modified_text"] == "Anonymized text content"
+    assert len(sample["modified_phi"]) == 1
+
+
 def test_load_data_max_notes_cap(tmp_path: Path):
     """Verify max_notes bounds the number of loaded records."""
     df = pd.DataFrame([{"row_id": f"r_{i}", "note_text": f"Note {i}"} for i in range(10)])

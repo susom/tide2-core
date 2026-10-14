@@ -684,7 +684,7 @@ tide2-visualizer ./data/output/anonymizer_output/part-0.parquet
 tide2-visualizer
 ```
 
-The visualizer auto-detects both **Parquet pipeline stages** (`merged_recognizer_output`, `recognizer_output`, `anonymizer_output`) and **JSON directories** (`cli_recognizer_json/`, `cli_anonymizer_json/`).
+The visualizer auto-detects both **Parquet pipeline stages** (`merged_recognizer_output`, `llm_recognizer_output`, `recognizer_output`, `anonymizer_output`, and `transformer_output` for note text recovery) and **JSON directories** (`cli_recognizer_json/`, `cli_anonymizer_json/`).
 
 If you prefer to inspect human-readable JSON files, you can generate them from a finished pipeline run:
 

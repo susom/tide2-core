@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as pads
 import pyarrow.parquet as pq
 import streamlit as st
 from spacy import displacy
@@ -362,6 +364,43 @@ def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str,
     return results
 
 
+def _resolve_text_columns(df: pd.DataFrame) -> tuple[str | None, str | None, str | None, str | None]:
+    """Determine recognizer/anonymizer text and entity columns without ambiguous assignment.
+
+    Returns:
+        Tuple of (orig_text_col, rec_phi_col, anon_text_col, anon_phi_col).
+    """
+    rec_phi_col = next(
+        (c for c in ("recognizer_results_json", "recognizer_results", "entities") if c in df.columns),
+        None,
+    )
+    anon_phi_col = next(
+        (c for c in ("anonymizer_results_json", "items", "anonymizer_results", "operators") if c in df.columns),
+        None,
+    )
+
+    has_rec = rec_phi_col is not None
+    has_anon = anon_phi_col is not None
+
+    orig_text_candidates = ("original_note_text", "phi_note_text", "value")
+    anon_text_candidates = ("anonymized_note_text", "deid_note_text", "anonymized_text", "modified_text")
+
+    explicit_orig = next((c for c in orig_text_candidates if c in df.columns), None)
+    explicit_anon = next((c for c in anon_text_candidates if c in df.columns), None)
+
+    ambiguous_text = next((c for c in ("note_text", "text") if c in df.columns), None)
+
+    orig_text_col = explicit_orig
+    anon_text_col = explicit_anon
+
+    if not has_rec and has_anon and not explicit_anon and ambiguous_text:
+        anon_text_col = ambiguous_text
+    elif explicit_orig is None and ambiguous_text:
+        orig_text_col = ambiguous_text
+
+    return orig_text_col, rec_phi_col, anon_text_col, anon_phi_col
+
+
 def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None) -> dict[str, dict[str, Any]]:
     """Parse unified sample records from a pandas DataFrame.
 
@@ -379,30 +418,7 @@ def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None)
         df = df.iloc[:max_notes]
 
     id_col = next((c for c in ("row_id", "text_hash", "sample_id", "id", "key") if c in df.columns), None)
-    orig_text_col = next(
-        (c for c in ("note_text", "original_note_text", "phi_note_text", "text", "value") if c in df.columns),
-        None,
-    )
-    rec_phi_col = next(
-        (c for c in ("recognizer_results_json", "recognizer_results", "entities") if c in df.columns),
-        None,
-    )
-    anon_text_col = next(
-        (
-            c
-            for c in ("anonymized_note_text", "deid_note_text", "anonymized_text", "note_text", "modified_text")
-            if c in df.columns and c != orig_text_col
-        ),
-        None,
-    )
-    anon_phi_col = next(
-        (
-            c
-            for c in ("anonymizer_results_json", "items", "anonymizer_results", "operators")
-            if c in df.columns and c != rec_phi_col
-        ),
-        None,
-    )
+    orig_text_col, rec_phi_col, anon_text_col, anon_phi_col = _resolve_text_columns(df)
 
     results: dict[str, dict[str, Any]] = {}
     for idx, row in df.iterrows():
@@ -436,6 +452,47 @@ def _get_parquet_columns(file_or_dir: Path, target_cols: set[str]) -> list[str] 
     return None
 
 
+def _scan_dataset_to_pandas(
+    path: Path,
+    target_cols: set[str],
+    max_notes: int | None = None,
+    filter_expr: Any = None,
+) -> pd.DataFrame:
+    """Scan a parquet file or dataset directory bounded by max_notes and column projection.
+
+    Reads only batches until max_notes rows are reached to avoid memory exhaustion on large runs.
+    """
+    try:
+        ds = pads.dataset(path)
+    except Exception:
+        cols = _get_parquet_columns(path, target_cols)
+        df = pd.read_parquet(path, columns=cols)
+        return df.iloc[:max_notes] if max_notes else df
+
+    schema_names = set(ds.schema.names)
+    cols = [c for c in schema_names if c in target_cols]
+    if not cols:
+        return pd.DataFrame()
+
+    scanner = ds.scanner(columns=cols, filter=filter_expr)
+    batches = []
+    collected = 0
+
+    for batch in scanner.to_batches():
+        if max_notes is not None and collected + len(batch) > max_notes:
+            remaining = max_notes - collected
+            if remaining > 0:
+                batches.append(batch.slice(0, remaining))
+            break
+        batches.append(batch)
+        collected += len(batch)
+
+    if not batches:
+        return pd.DataFrame()
+
+    return pa.Table.from_batches(batches).to_pandas()
+
+
 def load_from_parquet_file(
     file_or_dir: str | os.PathLike[str], max_notes: int | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -452,14 +509,13 @@ def load_from_parquet_file(
         FileNotFoundError: If the path does not exist or directory contains no Parquet files.
     """
     path = Path(file_or_dir)
-    cols = _get_parquet_columns(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS)
     if path.is_file():
-        df = pd.read_parquet(path, columns=cols)
+        df = _scan_dataset_to_pandas(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     elif path.is_dir():
         parquet_files = sorted(path.glob("**/*.parquet"))
         if not parquet_files:
             raise FileNotFoundError(f"No parquet files found in {path}")
-        df = pd.read_parquet(path, columns=cols)
+        df = _scan_dataset_to_pandas(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     else:
         raise FileNotFoundError(f"Parquet path not found: {path}")
 
@@ -494,10 +550,7 @@ def _load_pipeline_recognizer_stage(
     max_notes: int | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     """Load recognizer parquet output and optional transformer backfill."""
-    cols = _get_parquet_columns(recognizer_dir, RECOGNIZER_COLUMNS)
-    rec_df = pd.read_parquet(recognizer_dir, columns=cols)
-    if max_notes and len(rec_df) > max_notes:
-        rec_df = rec_df.iloc[:max_notes]
+    rec_df = _scan_dataset_to_pandas(recognizer_dir, RECOGNIZER_COLUMNS, max_notes=max_notes)
 
     text_col = next((c for c in ("note_text", "original_note_text", "text", "value") if c in rec_df.columns), None)
     has_text = text_col is not None and rec_df[text_col].dropna().any()
@@ -505,8 +558,7 @@ def _load_pipeline_recognizer_stage(
     text_map_hash: dict[str, str] = {}
     text_map_id: dict[str, str] = {}
     if not has_text and transformer_dir:
-        t_cols = _get_parquet_columns(transformer_dir, TRANSFORMER_COLUMNS)
-        trans_df = pd.read_parquet(transformer_dir, columns=t_cols)
+        trans_df = _scan_dataset_to_pandas(transformer_dir, TRANSFORMER_COLUMNS, max_notes=max_notes)
         t_col = next((c for c in ("note_text", "text", "value") if c in trans_df.columns), None)
         if t_col:
             if "text_hash" in trans_df.columns:
@@ -561,10 +613,13 @@ def _load_pipeline_anonymizer_stage(
     max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load anonymizer parquet output and align with recognizer sample IDs."""
-    cols = _get_parquet_columns(anonymizer_dir, ANONYMIZER_COLUMNS)
-    anon_df = pd.read_parquet(anonymizer_dir, columns=cols)
-    if max_notes and len(anon_df) > max_notes:
-        anon_df = anon_df.iloc[:max_notes]
+    filter_expr = None
+    if rec_results:
+        row_ids = [str(k) for k in rec_results]
+        with contextlib.suppress(Exception):
+            filter_expr = pads.field("row_id").isin(row_ids)
+
+    anon_df = _scan_dataset_to_pandas(anonymizer_dir, ANONYMIZER_COLUMNS, max_notes=max_notes, filter_expr=filter_expr)
 
     text_col = next(
         (
@@ -780,6 +835,19 @@ def _load_data_dir(p: Path, max_notes: int | None = None) -> tuple[dict[str, dic
     raise ValueError(f"No recognizable Parquet stages or JSON files found in {p}")
 
 
+def _resolve_data_path(user_input: str) -> Path:
+    """Normalize and resolve user-supplied path to prevent path traversal issues.
+
+    Args:
+        user_input: Raw string path from user input or CLI.
+
+    Returns:
+        Resolved Path object.
+    """
+    clean_path = os.path.normpath(user_input.strip())
+    return Path(clean_path).resolve()
+
+
 def load_data(path: str | os.PathLike[str], max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
     """Unified data loader with automatic format detection.
 
@@ -805,7 +873,7 @@ def load_data(path: str | os.PathLike[str], max_notes: int | None = None) -> tup
     if not path:
         return {}, "No path provided"
 
-    p = Path(path)
+    p = _resolve_data_path(str(path))
     if not p.exists():
         raise FileNotFoundError(f"Path does not exist: {p}")
 
