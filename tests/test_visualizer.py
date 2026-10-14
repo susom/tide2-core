@@ -307,6 +307,55 @@ def test_load_data_single_json_file(tmp_path: Path):
     assert results["single_sample"]["original_text"] == "Original note"
 
 
+def test_load_data_single_json_anonymizer_disambiguation(tmp_path: Path):
+    """Verify loading a single anonymizer JSON populates only modified_text and modified_phi."""
+    data = {
+        "text": "Patient [PERSON] visited on [DATE].",
+        "items": [{"entity_type": "PERSON", "start": 8, "end": 16}],
+    }
+    file_path = tmp_path / "anon_single.json"
+    file_path.write_text(json.dumps(data), encoding="utf-8")
+
+    results, desc = load_data(file_path)
+    assert desc == "Single JSON File"
+    assert "anon_single" in results
+    sample = results["anon_single"]
+    assert sample["original_text"] == ""
+    assert sample["original_phi"] == []
+    assert sample["modified_text"] == "Patient [PERSON] visited on [DATE]."
+    assert len(sample["modified_phi"]) == 1
+
+
+def test_load_data_preserves_text_hash(tmp_path: Path):
+    """Verify text_hash is preserved in pipeline and single parquet loads."""
+    df = pd.DataFrame(
+        [
+            {
+                "row_id": "row_123",
+                "text_hash": "hash_abc",
+                "note_text": "Sample text",
+                "recognizer_results_json": "[]",
+            }
+        ]
+    )
+    p_file = tmp_path / "test.parquet"
+    df.to_parquet(p_file)
+
+    results, _ = load_data(p_file)
+    assert "row_123" in results
+    assert results["row_123"]["text_hash"] == "hash_abc"
+
+
+def test_load_data_max_notes_cap(tmp_path: Path):
+    """Verify max_notes bounds the number of loaded records."""
+    df = pd.DataFrame([{"row_id": f"r_{i}", "note_text": f"Note {i}"} for i in range(10)])
+    p_file = tmp_path / "multi.parquet"
+    df.to_parquet(p_file)
+
+    results, _ = load_data(p_file, max_notes=3)
+    assert len(results) == 3
+
+
 def test_load_data_errors(tmp_path: Path):
     """Verify error handling on invalid or empty paths."""
     # Empty path

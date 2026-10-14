@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow.parquet as pq
 import streamlit as st
 from spacy import displacy
 
@@ -54,6 +55,42 @@ COLORS = {
     "CITY": "#FFE0B2",
     "STATE": "#FFCCBC",
     "COUNTRY": "#D7CCC8",
+}
+
+RECOGNIZER_COLUMNS = {
+    "row_id",
+    "text_hash",
+    "note_text",
+    "original_note_text",
+    "phi_note_text",
+    "text",
+    "value",
+    "recognizer_results_json",
+    "recognizer_results",
+    "entities",
+}
+
+ANONYMIZER_COLUMNS = {
+    "row_id",
+    "text_hash",
+    "anonymized_note_text",
+    "deid_note_text",
+    "anonymized_text",
+    "note_text",
+    "modified_text",
+    "text",
+    "anonymizer_results_json",
+    "items",
+    "anonymizer_results",
+    "operators",
+}
+
+TRANSFORMER_COLUMNS = {
+    "row_id",
+    "text_hash",
+    "note_text",
+    "text",
+    "value",
 }
 
 
@@ -273,9 +310,12 @@ def load_analyzer_results(analyzer_dir: str | os.PathLike[str]) -> dict[str, dic
             with file_path.open(encoding="utf-8") as file:
                 data = json.load(file)
             sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or file_path.stem)
+            text_hash = str(data["text_hash"]) if data.get("text_hash") else None
             orig_text = str(data.get("value") or data.get("text") or data.get("original_text") or "")
             orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
             results[sample_id] = {
+                "sample_id": sample_id,
+                "text_hash": text_hash,
                 "original_text": orig_text,
                 "original_phi": orig_phi,
             }
@@ -307,11 +347,14 @@ def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str,
             with file_path.open(encoding="utf-8") as file:
                 data = json.load(file)
             sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or file_path.stem)
+            text_hash = str(data["text_hash"]) if data.get("text_hash") else None
             mod_text = str(data.get("text") or data.get("modified_text") or data.get("anonymized_note_text") or "")
             mod_phi = parse_entities(
                 data.get("items") or data.get("modified_phi") or data.get("anonymizer_results") or []
             )
             results[sample_id] = {
+                "sample_id": sample_id,
+                "text_hash": text_hash,
                 "modified_text": mod_text,
                 "modified_phi": mod_phi,
             }
@@ -319,17 +362,21 @@ def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str,
     return results
 
 
-def _load_results_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None) -> dict[str, dict[str, Any]]:
     """Parse unified sample records from a pandas DataFrame.
 
     Args:
         df: DataFrame containing recognizer and/or anonymizer columns.
+        max_notes: Optional maximum number of rows to load.
 
     Returns:
         Dictionary mapping sample IDs to sample data dictionaries.
     """
     if df.empty:
         return {}
+
+    if max_notes and len(df) > max_notes:
+        df = df.iloc[:max_notes]
 
     id_col = next((c for c in ("row_id", "text_hash", "sample_id", "id", "key") if c in df.columns), None)
     orig_text_col = next(
@@ -360,6 +407,7 @@ def _load_results_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     results: dict[str, dict[str, Any]] = {}
     for idx, row in df.iterrows():
         sample_id = str(row[id_col]) if id_col and pd.notna(row[id_col]) else f"sample_{idx}"
+        th_val = str(row["text_hash"]) if "text_hash" in df.columns and pd.notna(row["text_hash"]) else None
         orig_text = str(row[orig_text_col]) if orig_text_col and pd.notna(row[orig_text_col]) else ""
         orig_phi = parse_entities(row[rec_phi_col]) if rec_phi_col else []
         anon_text = str(row[anon_text_col]) if anon_text_col and pd.notna(row[anon_text_col]) else ""
@@ -367,6 +415,7 @@ def _load_results_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
 
         results[sample_id] = {
             "sample_id": sample_id,
+            "text_hash": th_val,
             "original_text": orig_text,
             "original_phi": orig_phi,
             "modified_text": anon_text,
@@ -376,11 +425,25 @@ def _load_results_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     return results
 
 
-def load_from_parquet_file(file_or_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+def _get_parquet_columns(file_or_dir: Path, target_cols: set[str]) -> list[str] | None:
+    """Return available columns matching target_cols from a parquet file or directory."""
+    with contextlib.suppress(Exception):
+        sample_file = file_or_dir if file_or_dir.is_file() else next(file_or_dir.glob("**/*.parquet"), None)
+        if sample_file:
+            names = set(pq.read_schema(sample_file).names)
+            selected = [c for c in names if c in target_cols]
+            return selected or None
+    return None
+
+
+def load_from_parquet_file(
+    file_or_dir: str | os.PathLike[str], max_notes: int | None = None
+) -> dict[str, dict[str, Any]]:
     """Load sample records from a Parquet file or directory of Parquet files.
 
     Args:
         file_or_dir: Path to a ``.parquet`` file or a directory containing Parquet files.
+        max_notes: Optional maximum number of rows to load.
 
     Returns:
         Dictionary mapping sample IDs to sample data dictionaries.
@@ -389,17 +452,18 @@ def load_from_parquet_file(file_or_dir: str | os.PathLike[str]) -> dict[str, dic
         FileNotFoundError: If the path does not exist or directory contains no Parquet files.
     """
     path = Path(file_or_dir)
+    cols = _get_parquet_columns(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS)
     if path.is_file():
-        df = pd.read_parquet(path)
+        df = pd.read_parquet(path, columns=cols)
     elif path.is_dir():
         parquet_files = sorted(path.glob("**/*.parquet"))
         if not parquet_files:
             raise FileNotFoundError(f"No parquet files found in {path}")
-        df = pd.read_parquet(path)
+        df = pd.read_parquet(path, columns=cols)
     else:
         raise FileNotFoundError(f"Parquet path not found: {path}")
 
-    return _load_results_from_dataframe(df)
+    return _load_results_from_dataframe(df, max_notes=max_notes)
 
 
 def _find_pipeline_stage_dirs(root: Path) -> tuple[Path | None, Path | None, Path | None]:
@@ -427,16 +491,22 @@ def _find_pipeline_stage_dirs(root: Path) -> tuple[Path | None, Path | None, Pat
 def _load_pipeline_recognizer_stage(
     recognizer_dir: Path,
     transformer_dir: Path | None,
+    max_notes: int | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     """Load recognizer parquet output and optional transformer backfill."""
-    rec_df = pd.read_parquet(recognizer_dir)
+    cols = _get_parquet_columns(recognizer_dir, RECOGNIZER_COLUMNS)
+    rec_df = pd.read_parquet(recognizer_dir, columns=cols)
+    if max_notes and len(rec_df) > max_notes:
+        rec_df = rec_df.iloc[:max_notes]
+
     text_col = next((c for c in ("note_text", "original_note_text", "text", "value") if c in rec_df.columns), None)
     has_text = text_col is not None and rec_df[text_col].dropna().any()
 
     text_map_hash: dict[str, str] = {}
     text_map_id: dict[str, str] = {}
     if not has_text and transformer_dir:
-        trans_df = pd.read_parquet(transformer_dir)
+        t_cols = _get_parquet_columns(transformer_dir, TRANSFORMER_COLUMNS)
+        trans_df = pd.read_parquet(transformer_dir, columns=t_cols)
         t_col = next((c for c in ("note_text", "text", "value") if c in trans_df.columns), None)
         if t_col:
             if "text_hash" in trans_df.columns:
@@ -488,9 +558,14 @@ def _load_pipeline_anonymizer_stage(
     anonymizer_dir: Path,
     rec_hash_map: dict[str, str],
     rec_results: dict[str, dict[str, Any]],
+    max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load anonymizer parquet output and align with recognizer sample IDs."""
-    anon_df = pd.read_parquet(anonymizer_dir)
+    cols = _get_parquet_columns(anonymizer_dir, ANONYMIZER_COLUMNS)
+    anon_df = pd.read_parquet(anonymizer_dir, columns=cols)
+    if max_notes and len(anon_df) > max_notes:
+        anon_df = anon_df.iloc[:max_notes]
+
     text_col = next(
         (
             c
@@ -530,7 +605,9 @@ def _load_pipeline_anonymizer_stage(
     return anon_results
 
 
-def load_pipeline_output_dir(output_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+def load_pipeline_output_dir(
+    output_dir: str | os.PathLike[str], max_notes: int | None = None
+) -> dict[str, dict[str, Any]]:
     """Load and join recognizer and anonymizer Parquet stages from a pipeline run.
 
     Discovers:
@@ -544,6 +621,7 @@ def load_pipeline_output_dir(output_dir: str | os.PathLike[str]) -> dict[str, di
 
     Args:
         output_dir: Directory containing pipeline output stage folders.
+        max_notes: Optional maximum number of rows to load.
 
     Returns:
         Dictionary mapping sample IDs to merged sample records.
@@ -560,11 +638,11 @@ def load_pipeline_output_dir(output_dir: str | os.PathLike[str]) -> dict[str, di
     rec_results: dict[str, dict[str, Any]] = {}
     rec_hash_map: dict[str, str] = {}
     if rec_dir:
-        rec_results, rec_hash_map = _load_pipeline_recognizer_stage(rec_dir, trans_dir)
+        rec_results, rec_hash_map = _load_pipeline_recognizer_stage(rec_dir, trans_dir, max_notes=max_notes)
 
     anon_results: dict[str, dict[str, Any]] = {}
     if anon_dir:
-        anon_results = _load_pipeline_anonymizer_stage(anon_dir, rec_hash_map, rec_results)
+        anon_results = _load_pipeline_anonymizer_stage(anon_dir, rec_hash_map, rec_results, max_notes=max_notes)
 
     results: dict[str, dict[str, Any]] = {}
     all_keys = list(rec_results.keys())
@@ -575,8 +653,10 @@ def load_pipeline_output_dir(output_dir: str | os.PathLike[str]) -> dict[str, di
     for k in all_keys:
         rec = rec_results.get(k, {})
         anon = anon_results.get(k, {})
+        th = rec.get("text_hash") or anon.get("text_hash")
         results[k] = {
             "sample_id": k,
+            "text_hash": th,
             "original_text": rec.get("original_text", ""),
             "original_phi": rec.get("original_phi", []),
             "modified_text": anon.get("modified_text", ""),
@@ -586,10 +666,10 @@ def load_pipeline_output_dir(output_dir: str | os.PathLike[str]) -> dict[str, di
     return results
 
 
-def _load_data_file(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
+def _load_data_file(p: Path, max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
     """Load data from a single Parquet or JSON file."""
     if p.suffix.lower() == ".parquet":
-        return load_from_parquet_file(p), "Single Parquet File"
+        return load_from_parquet_file(p, max_notes=max_notes), "Single Parquet File"
     if p.suffix.lower() == ".json":
         try:
             with p.open(encoding="utf-8") as f:
@@ -598,13 +678,31 @@ def _load_data_file(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
             raise ValueError(f"Could not load JSON file {p}: {e}") from e
 
         sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or p.stem)
-        orig_text = str(data.get("value") or data.get("original_text") or data.get("text") or "")
-        orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
-        mod_text = str(data.get("modified_text") or (data.get("text") if "items" in data else ""))
-        mod_phi = parse_entities(data.get("items") or data.get("modified_phi") or [])
+        th_val = str(data["text_hash"]) if data.get("text_hash") else None
+
+        has_rec = "recognizer_results" in data or "value" in data or "original_text" in data
+        has_anon = "items" in data or "modified_text" in data or "anonymized_note_text" in data
+
+        orig_text = ""
+        orig_phi: list[dict[str, Any]] = []
+        if has_rec:
+            orig_text = str(
+                data.get("value") or data.get("original_text") or (data.get("text") if not has_anon else "") or ""
+            )
+            orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
+
+        mod_text = ""
+        mod_phi: list[dict[str, Any]] = []
+        if has_anon:
+            mod_text = str(data.get("modified_text") or data.get("anonymized_note_text") or data.get("text") or "")
+            mod_phi = parse_entities(data.get("items") or data.get("modified_phi") or [])
+        elif not has_rec and "text" in data:
+            orig_text = str(data.get("text", ""))
+
         return {
             sample_id: {
                 "sample_id": sample_id,
+                "text_hash": th_val,
                 "original_text": orig_text,
                 "original_phi": orig_phi,
                 "modified_text": mod_text,
@@ -615,11 +713,11 @@ def _load_data_file(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
     raise ValueError(f"Unsupported file format '{p.suffix}'. Expected .parquet or .json")
 
 
-def _load_data_dir(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
+def _load_data_dir(p: Path, max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
     """Load data from a directory by auto-detecting layout."""
     for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output", "anonymizer_output"):
         if (p / stage).is_dir() and any((p / stage).glob("**/*.parquet")):
-            return load_pipeline_output_dir(p), "Pipeline Output Directory (Parquet)"
+            return load_pipeline_output_dir(p, max_notes=max_notes), "Pipeline Output Directory (Parquet)"
 
     rec_json_dir = p / "cli_recognizer_json"
     anon_json_dir = p / "cli_anonymizer_json"
@@ -630,12 +728,16 @@ def _load_data_dir(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
         for k in anon_res:
             if k not in rec_res:
                 all_ids.append(k)
+        if max_notes and len(all_ids) > max_notes:
+            all_ids = all_ids[:max_notes]
+
         combined: dict[str, dict[str, Any]] = {}
         for sid in all_ids:
             r = rec_res.get(sid, {})
             a = anon_res.get(sid, {})
             combined[sid] = {
                 "sample_id": sid,
+                "text_hash": r.get("text_hash") or a.get("text_hash"),
                 "original_text": r.get("original_text", ""),
                 "original_phi": r.get("original_phi", []),
                 "modified_text": a.get("modified_text", ""),
@@ -644,19 +746,23 @@ def _load_data_dir(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
         return combined, "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
 
     if any(p.glob("*.parquet")):
-        return load_from_parquet_file(p), "Parquet Directory"
+        return load_from_parquet_file(p, max_notes=max_notes), "Parquet Directory"
 
     json_files = list(p.glob("*.json"))
     if json_files:
+        if max_notes and len(json_files) > max_notes:
+            json_files = json_files[:max_notes]
         combined = {}
         for jf in json_files:
             with contextlib.suppress(Exception):
                 with jf.open(encoding="utf-8") as f:
                     data = json.load(f)
                 sid = str(data.get("key") or data.get("row_id") or data.get("text_hash") or jf.stem)
+                th_val = str(data["text_hash"]) if data.get("text_hash") else None
                 if sid not in combined:
                     combined[sid] = {
                         "sample_id": sid,
+                        "text_hash": th_val,
                         "original_text": "",
                         "original_phi": [],
                         "modified_text": "",
@@ -674,7 +780,7 @@ def _load_data_dir(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
     raise ValueError(f"No recognizable Parquet stages or JSON files found in {p}")
 
 
-def load_data(path: str | os.PathLike[str]) -> tuple[dict[str, dict[str, Any]], str]:
+def load_data(path: str | os.PathLike[str], max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
     """Unified data loader with automatic format detection.
 
     Auto-detects:
@@ -687,6 +793,7 @@ def load_data(path: str | os.PathLike[str]) -> tuple[dict[str, dict[str, Any]], 
 
     Args:
         path: Path to file or folder to load.
+        max_notes: Optional maximum number of notes to load to conserve memory.
 
     Returns:
         Tuple of (results_dict, format_description_str).
@@ -703,9 +810,9 @@ def load_data(path: str | os.PathLike[str]) -> tuple[dict[str, dict[str, Any]], 
         raise FileNotFoundError(f"Path does not exist: {p}")
 
     if p.is_file():
-        return _load_data_file(p)
+        return _load_data_file(p, max_notes=max_notes)
 
-    return _load_data_dir(p)
+    return _load_data_dir(p, max_notes=max_notes)
 
 
 def parse_cli_args(args: list[str] | None = None) -> str:
@@ -738,16 +845,26 @@ def _render_sidebar_data_location() -> None:
             help="Path to pipeline output folder, JSON results folder, or Parquet file",
             key="data_path_widget",
         )
+        row_limit = st.number_input(
+            "Max notes to load:",
+            min_value=10,
+            max_value=100000,
+            value=st.session_state.get("row_limit", 2000),
+            step=500,
+            help="Cap the number of notes loaded to conserve memory on large pipeline runs",
+            key="row_limit_widget",
+        )
         load_clicked = st.button("Load Data", use_container_width=True)
 
         if load_clicked or st.session_state.get("needs_initial_load", False):
             st.session_state["needs_initial_load"] = False
             target_path = data_path_input.strip()
+            st.session_state["row_limit"] = int(row_limit)
             if target_path:
                 st.session_state["data_path"] = target_path
                 try:
                     with st.spinner("Loading data..."):
-                        results, format_desc = load_data(target_path)
+                        results, format_desc = load_data(target_path, max_notes=int(row_limit))
                     st.session_state["results"] = results
                     st.session_state["format_desc"] = format_desc
                     st.session_state["load_error"] = None
@@ -766,8 +883,8 @@ def _render_sidebar_data_location() -> None:
         st.divider()
 
 
-def _render_sidebar_navigation(results: dict[str, dict[str, Any]]) -> str:
-    """Render sidebar navigation controls and return selected sample ID."""
+def _render_sidebar_navigation(results: dict[str, dict[str, Any]]) -> tuple[str, int]:
+    """Render sidebar navigation controls and return (selected_sample_id, total_navigable_samples)."""
     all_sample_ids = list(results.keys())
 
     with st.sidebar:
@@ -812,10 +929,11 @@ def _render_sidebar_navigation(results: dict[str, dict[str, Any]]) -> str:
             st.session_state.current_index = max(0, min(int(st.session_state.jump_input) - 1, total_samples - 1))
 
         def on_search(samples: list[str]):
-            query = st.session_state.search_input.strip()
+            query = st.session_state.search_input.strip().lower()
             if query:
                 for idx, sid in enumerate(samples):
-                    if query.lower() in sid.lower():
+                    th = str(results[sid].get("text_hash") or "").lower()
+                    if query in sid.lower() or (th and query in th):
                         st.session_state.current_index = idx
                         st.session_state.jump_input = idx + 1
                         return
@@ -850,7 +968,7 @@ def _render_sidebar_navigation(results: dict[str, dict[str, Any]]) -> str:
         st.caption(f"**Current Note ID:** `{selected_sample}`")
         st.divider()
 
-    return selected_sample
+    return selected_sample, total_samples
 
 
 def _render_sidebar_filters(
@@ -1006,7 +1124,7 @@ def main() -> None:
         st.info("Please enter a valid path to pipeline output or JSON results in the sidebar and click **Load Data**.")
         return
 
-    selected_sample = _render_sidebar_navigation(results)
+    selected_sample, total_samples = _render_sidebar_navigation(results)
     filtered_orig_phi, filtered_mod_phi = _render_sidebar_filters(results, selected_sample)
 
     sample_data = results[selected_sample]
@@ -1015,7 +1133,7 @@ def main() -> None:
     mod_text = sample_data.get("modified_text", "")
 
     st.caption(
-        f"Viewing note **{st.session_state.current_index + 1} of {len(results)}** | Note ID: `{selected_sample}`"
+        f"Viewing note **{st.session_state.current_index + 1} of {total_samples}** | Note ID: `{selected_sample}`"
     )
 
     _render_comparison_view(orig_text, mod_text, filtered_orig_phi, filtered_mod_phi)
