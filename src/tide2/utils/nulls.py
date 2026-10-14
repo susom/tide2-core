@@ -8,10 +8,10 @@ being reimplemented per actor.
 
 import contextlib
 import math
+import sys
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 
 def is_null(value: Any) -> bool:
@@ -30,9 +30,13 @@ def is_null(value: Any) -> bool:
     if value is None:
         return True
     with contextlib.suppress(Exception):
-        res = pd.isna(value)
-        if isinstance(res, (bool, np.bool_)):
-            return bool(res)
+        pd = sys.modules.get("pandas")
+        if pd is not None:
+            res = pd.isna(value)
+            if isinstance(res, (bool, np.bool_)):
+                return bool(res)
+    if str(value) == "<NA>":
+        return True
     with contextlib.suppress(TypeError, ValueError):
         if isinstance(value, float) and math.isnan(value):
             return True

@@ -62,7 +62,6 @@ dependencies = [
     "numpy>=2,<3", # ABI-coupled to torch/spacy/pyarrow
     "intervaltree>=3.1,<4",
     "orjson>=3.10,<4",
-    "pandas>=2.3,<3",
     "pyarrow>=14,<25",
     # Cryptography and anonymization
     "faker>=40.19,<41",
@@ -99,6 +98,7 @@ llm = [
 ]
 
 evaluation = [
+    "pandas>=2.3,<3",
     "scikit-learn>=1.8,<2",
     "scipy>=1.12,<2",
     "tqdm>=4.67,<5",
@@ -109,6 +109,7 @@ dev = [
     "ty>=0.0.28",
     "pre-commit>=3.5.0",
     "ruff>=0.1.0",
+    "pandas>=2.3,<3",
     "pandas-stubs>=2.3.2.250926",
     "types-tqdm>=4.67.0.20250809",
     "cython",
@@ -273,6 +274,19 @@ force-single-line = true
 "src/tide2/runner/cli.py" = [
     "PLR0915", # Too many statements — CLI dispatch and argparse setup are inherently verbose
 ]
+"src/tide2/string_parsers/address_parsers.py" = [
+    "RUF012",
+    "PLR2004",
+    "PLR0915",
+    "PLR1714",
+    "PLC0206",
+]
+"src/tide2/utils/span_metrics.py" = [
+    "PTH123",
+    "ERA001",
+    "B007",
+    "SIM108",
+]
 "scripts/**/*.py" = [
     "S603", # subprocess call — ops scripts shell out to gcloud/docker/git by design
     "S607", # partial executable path — gcloud/docker/git resolved from PATH on purpose
@@ -329,6 +343,7 @@ llm = [
     "openai>=2.38,<3",
 ]
 evaluation = [
+    "pandas>=2.3,<3",
     "scikit-learn>=1.8,<2",
     "scipy>=1.12,<2",
     "tqdm>=4.67,<5",

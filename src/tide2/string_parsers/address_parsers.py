@@ -4,13 +4,14 @@ Wraps the ``usaddress`` library to parse free-text addresses into structured
 components (street, city, state, ZIP) and reformat them.
 """
 
+import csv
+from pathlib import Path
 from typing import ClassVar
 
-import pandas as pd
 import usaddress
 
-from ..utils.resource_utils import CITIES_FILE
-from ..utils.resource_utils import get_resource_path
+from tide2.utils.resource_utils import CITIES_FILE
+from tide2.utils.resource_utils import get_resource_path
 
 
 class AddressParser:
@@ -111,8 +112,11 @@ class AddressParser:
     def _load_cities(cls) -> set:
         """Load cities data from CSV file (only once per class)."""
         if cls._cities_cache is None:
-            cities_df = pd.read_csv(get_resource_path(CITIES_FILE), sep="\t", dtype={"city": str, "state": str})
-            cls._cities_cache = set(cities_df["city"].dropna().unique().tolist())
+            cities_path = Path(get_resource_path(CITIES_FILE))
+            with cities_path.open(encoding="utf-8", newline="") as f:
+                reader = csv.reader(f, delimiter="\t")
+                next(reader, None)
+                cls._cities_cache = {row[0] for row in reader if row and row[0]}
         return cls._cities_cache
 
     def __init__(self) -> None:

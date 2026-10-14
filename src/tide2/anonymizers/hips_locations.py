@@ -4,12 +4,12 @@ Replaces location entities (cities, states, addresses) with deterministic
 substitutes selected via HMAC-based secure string selection from census data.
 """
 
+import csv
 import re
 import string
 from pathlib import Path
 from typing import ClassVar
 
-import pandas as pd
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
@@ -27,6 +27,41 @@ from tide2.utils.resource_utils import get_resource_path
 TINY_HOSPITAL_MAX_LEN = 5
 SHORT_HOSPITAL_MAX_LEN = 15
 MEDIUM_HOSPITAL_MAX_LEN = 30
+
+
+def _read_tsv_column(path: str, col_idx: int = 0) -> list[str]:
+    with Path(path).open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        next(reader, None)
+        return [row[col_idx] for row in reader if row and len(row) > col_idx]
+
+
+def _read_tsv_columns(path: str, idx1: int, idx2: int) -> tuple[list[str], list[str]]:
+    with Path(path).open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        next(reader, None)
+        rows = [row for row in reader if row and len(row) > max(idx1, idx2)]
+        return [row[idx1] for row in rows], [row[idx2] for row in rows]
+
+
+def _read_cities(path: str) -> tuple[list[str], list[str], dict[str, str]]:
+    cities_dict: dict[str, None] = {}
+    states_dict: dict[str, None] = {}
+    state2city: dict[str, str] = {}
+    with Path(path).open(encoding="utf-8", newline="") as f:
+        reader = csv.reader(f, delimiter="\t")
+        next(reader, None)
+        for row in reader:
+            try:
+                city, state = row[0], row[1]
+            except IndexError:
+                continue
+            if city:
+                cities_dict[city] = None
+            if state:
+                states_dict[state] = None
+                state2city[state] = city
+    return list(cities_dict.keys()), list(states_dict.keys()), state2city
 
 
 class HipsLocationAnonymizer(Operator):
@@ -56,37 +91,19 @@ class HipsLocationAnonymizer(Operator):
     def _load_location_data(cls):
         """Load location data from CSV files (only once per class)."""
         if cls._street_names is None:
-            # load the list for street names
-            street_names_df = pd.read_csv(get_resource_path(STREET_NAMES_FILE), sep="\t", engine="pyarrow")
-            cls._street_names = street_names_df["street_name"].to_numpy().tolist()
+            cls._street_names = _read_tsv_column(get_resource_path(STREET_NAMES_FILE))
 
         if cls._zipcodes is None:
-            # load the list for zipcodes
-            zipcodes_df = pd.read_csv(get_resource_path(ZIPCODES_FILE), sep="\t", dtype={"zipcode": str})
-            cls._zipcodes = zipcodes_df["zipcode"].to_numpy().tolist()
+            cls._zipcodes = _read_tsv_column(get_resource_path(ZIPCODES_FILE))
 
         if cls._cities is None:
-            # load the lists for cities
-            cities_df = pd.read_csv(get_resource_path(CITIES_FILE), sep="\t", dtype={"city": str, "state": str})
-            cls._cities = cities_df["city"].dropna().unique().tolist()
-            cls._states = cities_df["state"].dropna().unique().tolist()
-            cls._state2city = cities_df.set_index("state")["city"].to_dict()
+            cls._cities, cls._states, cls._state2city = _read_cities(get_resource_path(CITIES_FILE))
 
         if cls._states_full is None:
-            # load the list for states
-            states_df = pd.read_csv(
-                get_resource_path(STATES_FILE), sep="\t", dtype={"full_name": str, "abbreviation": str}
-            )
-            cls._states_full = states_df["full_name"].to_numpy().tolist()
-            cls._states_abbr = states_df["abbreviation"].to_numpy().tolist()
+            cls._states_full, cls._states_abbr = _read_tsv_columns(get_resource_path(STATES_FILE), 0, 1)
 
         if cls._countries is None:
-            # load the list for countries
-            countries_df = pd.read_csv(
-                get_resource_path(COUNTRIES_FILE), sep="\t", dtype={"abbreviation": str, "full_name": str}
-            )
-            cls._countries = countries_df["full_name"].to_numpy().tolist()
-            cls._countries_abbr = countries_df["abbreviation"].to_numpy().tolist()
+            cls._countries, cls._countries_abbr = _read_tsv_columns(get_resource_path(COUNTRIES_FILE), 1, 0)
 
         if cls._street_numbers is None:
             # generate street numbers on the fly

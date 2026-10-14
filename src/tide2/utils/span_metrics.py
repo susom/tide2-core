@@ -6,6 +6,8 @@ and machine learning-generated text spans, as well as efficient O(n log n)
 conflict resolution for overlapping spans.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 from collections import defaultdict
@@ -14,10 +16,14 @@ from typing import TYPE_CHECKING
 from typing import Any
 from typing import Literal
 
-import pandas as pd
-
 if TYPE_CHECKING:
+    import pandas as pd
     from presidio_anonymizer.entities import RecognizerResult
+else:
+    try:
+        import pandas as pd
+    except ImportError:  # pragma: no cover
+        pd = None
 
 logger = logging.getLogger(__name__)
 
@@ -312,12 +318,12 @@ def _resolve_longest_wins(sorted_spans: list[dict[str, Any]]) -> list[dict[str, 
 
 
 def resolve_recognizer_results(
-    results: list["RecognizerResult"],
+    results: list[RecognizerResult],
     strategy: Literal["longest_wins", "merge_contained"] = "longest_wins",
     merge_adjacent_types: set[str] | None = None,
     text: str | None = None,
     max_merge_gap: int = 2,
-) -> list["RecognizerResult"]:
+) -> list[RecognizerResult]:
     """
     O(n log n) conflict resolution for Presidio RecognizerResult objects.
 
@@ -403,11 +409,11 @@ def resolve_recognizer_results(
 
 
 def _merge_adjacent_same_type(
-    results: list["RecognizerResult"],
+    results: list[RecognizerResult],
     text: str,
     entity_types: set[str],
     max_gap: int,
-) -> list["RecognizerResult"]:
+) -> list[RecognizerResult]:
     """Merge adjacent spans of the same entity type separated by at most max_gap whitespace chars.
 
     Only spans whose entity_type is in ``entity_types`` are candidates for
@@ -454,8 +460,8 @@ def _merge_adjacent_same_type(
 
 
 def _resolve_contained_with_refs(
-    sorted_spans: list[tuple[dict[str, Any], "RecognizerResult"]],
-) -> list[tuple[dict[str, Any], "RecognizerResult"]]:
+    sorted_spans: list[tuple[dict[str, Any], RecognizerResult]],
+) -> list[tuple[dict[str, Any], RecognizerResult]]:
     """Remove contained spans, preserving RecognizerResult references."""
     if not sorted_spans:
         return []
@@ -480,8 +486,8 @@ def _resolve_contained_with_refs(
 
 
 def _resolve_longest_wins_with_refs(
-    sorted_spans: list[tuple[dict[str, Any], "RecognizerResult"]],
-) -> list[tuple[dict[str, Any], "RecognizerResult"]]:
+    sorted_spans: list[tuple[dict[str, Any], RecognizerResult]],
+) -> list[tuple[dict[str, Any], RecognizerResult]]:
     """Resolve overlaps keeping longest span, preserving RecognizerResult references.
 
     Input must be sorted by start ascending, then by length descending.

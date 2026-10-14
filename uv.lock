@@ -4066,7 +4066,6 @@ dependencies = [
     { name = "msgpack" },
     { name = "numpy" },
     { name = "orjson" },
-    { name = "pandas" },
     { name = "pillow" },
     { name = "presidio-analyzer" },
     { name = "presidio-anonymizer" },
@@ -4098,6 +4097,7 @@ dev = [
     { name = "keyring" },
     { name = "keyrings-google-artifactregistry-auth" },
     { name = "mistune" },
+    { name = "pandas" },
     { name = "pandas-stubs" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -4114,6 +4114,7 @@ docs = [
     { name = "pdoc" },
 ]
 evaluation = [
+    { name = "pandas" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "tqdm" },
@@ -4136,6 +4137,7 @@ dev = [
     { name = "jupyter" },
     { name = "keyring" },
     { name = "keyrings-google-artifactregistry-auth" },
+    { name = "pandas" },
     { name = "pandas-stubs" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -4152,6 +4154,7 @@ docs = [
     { name = "pdoc" },
 ]
 evaluation = [
+    { name = "pandas" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "tqdm" },
@@ -4197,7 +4200,8 @@ requires-dist = [
     { name = "numpy", specifier = ">=2,<3" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=2.38,<3" },
     { name = "orjson", specifier = ">=3.10,<4" },
-    { name = "pandas", specifier = ">=2.3,<3" },
+    { name = "pandas", marker = "extra == 'dev'", specifier = ">=2.3,<3" },
+    { name = "pandas", marker = "extra == 'evaluation'", specifier = ">=2.3,<3" },
     { name = "pandas-stubs", marker = "extra == 'dev'", specifier = ">=2.3.2.250926" },
     { name = "pdoc", marker = "extra == 'docs'", specifier = ">=14,<17" },
     { name = "pillow", specifier = ">=12.3.0,<13" },
@@ -4243,6 +4247,7 @@ dev = [
     { name = "jupyter" },
     { name = "keyring", specifier = ">=25.6.0" },
     { name = "keyrings-google-artifactregistry-auth", specifier = ">=1.1.2" },
+    { name = "pandas", specifier = ">=2.3,<3" },
     { name = "pandas-stubs", specifier = ">=2.3.2.250926" },
     { name = "pre-commit", specifier = ">=3.5.0" },
     { name = "pytest", specifier = ">=7.4,<10" },
@@ -4257,6 +4262,7 @@ dev = [
 ]
 docs = [{ name = "pdoc", specifier = ">=14,<17" }]
 evaluation = [
+    { name = "pandas", specifier = ">=2.3,<3" },
     { name = "scikit-learn", specifier = ">=1.8,<2" },
     { name = "scipy", specifier = ">=1.12,<2" },
     { name = "tqdm", specifier = ">=4.67,<5" },
