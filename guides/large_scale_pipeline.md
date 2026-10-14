@@ -327,8 +327,8 @@ Every stage supports independent row-level checkpointing for resume capability:
 - **Checkpoint Location**: Ray creates a checkpoint directory sibling to the output directory:
   $$\text{Checkpoint Path} = \langle\text{output\_dir}\rangle\text{\_ray\_checkpoint}$$
 - **Configured Checkpoint Key**: Ray keys the checkpoint directory on the stage's configured ID column:
-  - `run_pipeline` and `run_anonymization` checkpoint on `row_id`.
-  - Standalone `run_transformer`, `run_recognition`, and `run_llm_recognition` default to `text_hash` (pass `_id_column="row_id"` in Python to checkpoint on `row_id`).
+  - All stages (`run_pipeline`, `run_transformer`, `run_recognition`, `run_llm_recognition`, `run_anonymization`) default to `row_id`.
+  - To checkpoint on `text_hash`, supply `--id-column text_hash` via CLI or `_id_column="text_hash"` in Python.
 - **Two-Phase Commit Protocol**:
   1. The task writes a `.pending` checkpoint file.
   2. The task writes the Parquet output data file.
