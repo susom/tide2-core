@@ -302,6 +302,25 @@ def test_load_data_json_directory(tmp_path: Path):
     assert len(load_anonymized_results(anon_json_dir)) == 1
 
 
+def test_load_data_json_directory_max_notes(tmp_path: Path):
+    """Verify max_notes bounds the loading of JSON directory files."""
+    out_dir = tmp_path / "json_run_bounded"
+    out_dir.mkdir()
+    rec_json_dir = out_dir / "cli_recognizer_json"
+    rec_json_dir.mkdir()
+    anon_json_dir = out_dir / "cli_anonymizer_json"
+    anon_json_dir.mkdir()
+
+    for i in range(10):
+        sid = f"sample_{i}"
+        (rec_json_dir / f"{sid}.json").write_text(json.dumps({"key": sid, "value": f"text {i}"}), encoding="utf-8")
+        (anon_json_dir / f"{sid}.json").write_text(json.dumps({"text": f"anon {i}", "items": []}), encoding="utf-8")
+
+    results, desc = load_data(out_dir, max_notes=3)
+    assert desc == "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
+    assert len(results) == 3
+
+
 def test_load_data_loose_json_files(tmp_path: Path):
     """Verify loading directory directly containing JSON files."""
     data = {

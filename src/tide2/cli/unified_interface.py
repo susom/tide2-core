@@ -289,7 +289,9 @@ def build_legend_html(entity_types: set[str]) -> str:
     return legend_html
 
 
-def load_analyzer_results(analyzer_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+def load_analyzer_results(
+    analyzer_dir: str | os.PathLike[str], max_notes: int | None = None
+) -> dict[str, dict[str, Any]]:
     """Load analyzer results from a directory of JSON files.
 
     Each JSON file is expected to have ``key`` (sample ID), ``value`` (original
@@ -297,6 +299,7 @@ def load_analyzer_results(analyzer_dir: str | os.PathLike[str]) -> dict[str, dic
 
     Args:
         analyzer_dir: Path to directory containing analyzer result JSON files.
+        max_notes: Optional maximum number of notes to load.
 
     Returns:
         Dictionary mapping sample IDs to dicts with ``original_text`` and
@@ -308,6 +311,8 @@ def load_analyzer_results(analyzer_dir: str | os.PathLike[str]) -> dict[str, dic
 
     results = {}
     for file_path in sorted(dir_path.glob("*.json")):
+        if max_notes is not None and len(results) >= max_notes:
+            break
         with contextlib.suppress(Exception):
             with file_path.open(encoding="utf-8") as file:
                 data = json.load(file)
@@ -325,7 +330,11 @@ def load_analyzer_results(analyzer_dir: str | os.PathLike[str]) -> dict[str, dic
     return results
 
 
-def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+def load_anonymized_results(
+    anonymizer_dir: str | os.PathLike[str],
+    max_notes: int | None = None,
+    allowed_ids: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Load anonymized results from a directory of JSON files.
 
     Each JSON file is expected to have ``text`` (anonymized text) and ``items``
@@ -334,6 +343,8 @@ def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str,
 
     Args:
         anonymizer_dir: Path to directory containing anonymized result JSON files.
+        max_notes: Optional maximum number of notes to load.
+        allowed_ids: Optional set of sample IDs to restrict loading to.
 
     Returns:
         Dictionary mapping sample IDs to dicts with ``modified_text`` and
@@ -345,10 +356,16 @@ def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str,
 
     results = {}
     for file_path in sorted(dir_path.glob("*.json")):
+        if max_notes is not None and len(results) >= max_notes:
+            break
+        if allowed_ids is not None and file_path.stem not in allowed_ids:
+            continue
         with contextlib.suppress(Exception):
             with file_path.open(encoding="utf-8") as file:
                 data = json.load(file)
             sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or file_path.stem)
+            if allowed_ids is not None and sample_id not in allowed_ids:
+                continue
             text_hash = str(data["text_hash"]) if data.get("text_hash") else None
             mod_text = str(data.get("text") or data.get("modified_text") or data.get("anonymized_note_text") or "")
             mod_phi = parse_entities(
@@ -776,8 +793,13 @@ def _load_data_dir(p: Path, max_notes: int | None = None) -> tuple[dict[str, dic
     rec_json_dir = p / "cli_recognizer_json"
     anon_json_dir = p / "cli_anonymizer_json"
     if rec_json_dir.is_dir() or anon_json_dir.is_dir():
-        rec_res = load_analyzer_results(rec_json_dir) if rec_json_dir.is_dir() else {}
-        anon_res = load_anonymized_results(anon_json_dir) if anon_json_dir.is_dir() else {}
+        rec_res = load_analyzer_results(rec_json_dir, max_notes=max_notes) if rec_json_dir.is_dir() else {}
+        allowed_ids = set(rec_res.keys()) if rec_res else None
+        anon_res = (
+            load_anonymized_results(anon_json_dir, max_notes=max_notes, allowed_ids=allowed_ids)
+            if anon_json_dir.is_dir()
+            else {}
+        )
         all_ids = list(rec_res.keys())
         for k in anon_res:
             if k not in rec_res:
