@@ -354,16 +354,55 @@ class TestInvalidIdColumnRejection:
         with pytest.raises(ValueError, match=r"Invalid _id_column: 'bad_id'"):
             runner.run_pipeline(input_path="in", output_dir="out", model_name="m", _id_column="bad_id")
 
+    def test_run_pipeline_rejects_invalid_stage_override_upfront(self, monkeypatch):
+        runner = _make_runner(monkeypatch)
+        stage_called = False
+
+        def mock_transformer(**_kwargs):
+            nonlocal stage_called
+            stage_called = True
+            return {}
+
+        monkeypatch.setattr(runner, "run_transformer", mock_transformer)
+
+        with pytest.raises(ValueError, match=r"Invalid _id_column: 'bad_stage'"):
+            runner.run_pipeline(
+                input_path="in.parquet",
+                output_dir="out_dir",
+                model_name="m",
+                anonymizer_kwargs={"_id_column": "bad_stage"},
+            )
+        assert not stage_called
+
+        with pytest.raises(ValueError, match=r"Invalid _id_column: None"):
+            runner.run_pipeline(
+                input_path="in.parquet",
+                output_dir="out_dir",
+                model_name="m",
+                transformer_kwargs={"_id_column": None},
+            )
+        assert not stage_called
+
     def test_cli_rejects_unsupported_id_column_choice(self, monkeypatch):
         monkeypatch.setattr(LocalJobRunner, "_init_ray", lambda *_a, **_k: None)
         with pytest.raises(SystemExit) as exc:
             cli.main(["run", "recognizer", "-i", "in.parquet", "-o", "out_dir", "--id-column", "unsupported"])
         assert exc.value.code == 2
 
-    def test_cli_rejects_invalid_id_column_from_config(self, monkeypatch, tmp_path):
+    @pytest.mark.parametrize(
+        "yaml_content",
+        [
+            "id_column: invalid_name\n",
+            "id_column: null\n",
+            "id_column: ''\n",
+            "_id_column: null\n",
+            "_id_column: ''\n",
+        ],
+    )
+    def test_cli_rejects_invalid_id_column_from_config(self, monkeypatch, tmp_path, yaml_content):
         monkeypatch.setattr(LocalJobRunner, "_init_ray", lambda *_a, **_k: None)
         cfg_file = tmp_path / "bad_config.yaml"
-        cfg_file.write_text("id_column: invalid_name\n")
+        cfg_file.write_text(yaml_content)
 
         with pytest.raises(SystemExit) as exc:
             cli.main(["run", "recognizer", "-i", "in.parquet", "-o", "out_dir", "--config", str(cfg_file)])

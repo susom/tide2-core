@@ -1986,9 +1986,10 @@ class LocalJobRunner:
         for development, benchmarks, and single-box batches. Trade-offs:
 
         - **Resume only at the sink.** With ``enable_checkpoint`` on (the default),
-          the final sink is checkpointed on ``row_id``: a rerun of the same input
-          into the same ``output_dir`` skips rows already written and processes
-          the rest through all stages. Stages are not checkpointed, so a failed
+          the final sink is checkpointed on ``row_id`` (or ``text_hash`` when configured
+          via ``_id_column`` or overridden by ``anonymizer_kwargs["_id_column"]``):
+          a rerun of the same input into the same ``output_dir`` skips rows already written
+          and processes the rest through all stages. Stages are not checkpointed, so a failed
           run re-runs GPU inference for every unfinished row. Long-running or
           unattended jobs should stay on discrete.
         - Only ``anonymizer_output`` is written; the other stage folders are not.
@@ -2073,7 +2074,9 @@ class LocalJobRunner:
                 e.g. project_id, model_name, provider_type, context_length,
                 max_tokens, num_actors, batch_size.
             execution_mode: "discrete" (default) or "streamed" — see above.
-            _id_column: Primary key column for stage checkpointing (default: "row_id").
+            _id_column: Primary key column for stage checkpointing ("row_id" or "text_hash",
+                default: "row_id"). In streamed mode, controls the anonymizer sink checkpoint
+                key unless overridden by anonymizer_kwargs["_id_column"].
 
         Returns:
             Dictionary with per-stage statistics and output paths in discrete
@@ -2082,6 +2085,9 @@ class LocalJobRunner:
             "operator_stats"}``. Both carry ``execution_mode``.
         """
         _validate_id_column(_id_column)
+        for stage_kwargs in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, llm_recognizer_kwargs):
+            if stage_kwargs and "_id_column" in stage_kwargs:
+                _validate_id_column(stage_kwargs["_id_column"])
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)

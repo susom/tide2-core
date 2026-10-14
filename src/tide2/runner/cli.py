@@ -56,10 +56,13 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     dry_run = getattr(args, "dry_run", False)
 
-    id_col = getattr(args, "id_column", None) or getattr(args, "_id_column", "row_id")
+    # Determine the configured id_column without letting falsey YAML values fall back silently
+    id_col = args._id_column if hasattr(args, "_id_column") else getattr(args, "id_column", "row_id")
+
     if id_col not in ("row_id", "text_hash"):
         print(f"Error: --id-column must be 'row_id' or 'text_hash' (got {id_col!r})")
         sys.exit(1)
+    args.id_column = id_col
 
     if no_prog is not None:
         configure_data_context(no_progress_timeout_s=no_prog)
