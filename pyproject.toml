@@ -42,8 +42,6 @@ classifiers = [
 ]
 dependencies = [
     # Google Cloud services
-    "db-dtypes>=1.6,<2", # implicit: required by bigquery.to_dataframe() for pandas dtype mapping
-    "google-cloud-bigquery>=3.41,<4",
     "google-cloud-storage>=3.10,<4",
     "pyasn1>=0.6.4,<0.7", # transitive via google-auth; pinned for security (CVE-2026-59884/59885/59886)
     # NLP and ML-based entity recognition (required: no model runs without these)

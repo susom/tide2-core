@@ -82,6 +82,10 @@ TIDE 2.0 includes a Streamlit visualizer for comparing original and de-identifie
 
 Launch it with:
 ```bash
+# Point directly to a pipeline output directory or single Parquet file
+tide2-visualizer ./data/output
+
+# Or launch with blank interface
 tide2-visualizer
 ```
 
@@ -143,12 +147,11 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Command Line Tools
 - **`tide2-runner`**: Ray-based single-node job runner with five job types: `recognizer`, `anonymizer`, `transformer`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run` for recognizer, anonymizer, and llm-recognizer).
-- **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
+- **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and inspection.
 
 
 ### Cloud Integration
 - **GCS**: input/output I/O and model caching.
-- **BigQuery**: input/output of notes and recognizer/anonymizer results (e.g. via `ARRAY_AGG`-grouped chunk columns) for the runner and visualizer.
 - **Automatic Caching**: Download and cache models from GCS automatically (`$TIDE_CACHE_DIR`).
 
 ## CLI Usage
@@ -668,13 +671,22 @@ Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
 
 ### Interactive Visualizer
 
+TIDE 2.0 includes a Streamlit visualizer for inspecting clinical notes before and after de-identification side by side, with highlighted PHI entities, recognizer/entity filtering, and tabular metadata breakdowns.
+
 ```bash
-# Launch the Streamlit PHI visualizer
+# Launch visualizer pointing directly to a pipeline output directory
+tide2-visualizer ./data/output
+
+# Or launch pointing to an individual Parquet file
+tide2-visualizer ./data/output/anonymizer_output/part-0.parquet
+
+# Or launch with blank interface
 tide2-visualizer
 ```
 
-To load the results of a pipeline run in the visualizer, write the JSON files it
-reads. This is a separate step, run after the pipeline on a local output folder:
+The visualizer auto-detects both **Parquet pipeline stages** (`merged_recognizer_output`, `recognizer_output`, `anonymizer_output`) and **JSON directories** (`cli_recognizer_json/`, `cli_anonymizer_json/`).
+
+If you prefer to inspect human-readable JSON files, you can generate them from a finished pipeline run:
 
 ```bash
 tide2-runner visualizer-json -o ./output
@@ -685,7 +697,7 @@ folder. Each file is named after the note's `row_id` (the `text_hash` when the
 output has no `row_id`), so notes with the same text but different patients get their
 own files. An id that is not a plain token (letters, digits, `_` and `-`, up to 128
 characters) is replaced by its sha256 in the file name. The recognizer JSON keeps the
-original `row_id` and `text_hash` in its own fields. Use `--json-dir` to write them in another folder. After a `streamed` run only
+original `row_id` and `text_hash` in its own fields. Use `--json-dir` to write them in another folder. Pointing `tide2-visualizer ./output` automatically loads both JSON folders. After a `streamed` run only
 the anonymizer JSON is written, because that mode keeps no recognizer folder. In
 Python, call `tide2.runner.utils.write_visualizer_json(output_dir, json_dir=None)`.
 

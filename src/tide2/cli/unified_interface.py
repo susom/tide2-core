@@ -1,42 +1,30 @@
 #!/usr/bin/env python3
 """
-TIDE 2.0 - Simplified PHI Visualizer
+TIDE 2.0 - PHI Inspection Visualizer
 
-A minimal interface for:
-- Selecting samples from analyzer/recognizer results
-- Filtering by specific recognizers
-- Side-by-side comparison of original vs anonymized text with highlighted entities
-- Loading data from JSON files, DataFrames, or BigQuery tables
+An interactive interface for:
+- Inspecting clinical notes before and after de-identification side by side
+- Visualizing detected PHI entities and anonymization replacements
+- Filtering by entity type and recognizer engine
+- Tabular breakdown of detected PHI metadata
+- Auto-detecting and loading pipeline Parquet outputs or JSON directories
 
 Usage:
-    streamlit run unified_interface.py
+    tide2-visualizer [path]
+    # or
+    streamlit run unified_interface.py [-- path]
 """
 
-import glob
+import contextlib
 import json
 import os
-from enum import StrEnum
+import sys
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import streamlit as st
 from spacy import displacy
-
-
-class VisualizationMode(StrEnum):
-    """Visualization mode options."""
-
-    BOTH = "Both (Recognizer + Anonymizer)"
-    RECOGNIZER_ONLY = "Recognizer Only"
-    ANONYMIZER_ONLY = "Anonymizer Only"
-
-
-class DataSource(StrEnum):
-    """Data source options."""
-
-    JSON_FILES = "JSON Files"
-    BIGQUERY = "BigQuery Table"
-    DATAFRAME = "DataFrame (Parquet/CSV)"
-
 
 # Color mapping for entity types
 COLORS = {
@@ -60,12 +48,209 @@ COLORS = {
     "CRYPTO": "#E0E0E0",
     "IP_ADDRESS": "#F0F4F8",
     "ID": "#F8F9FA",
+    "AGE": "#D1C4E9",
+    "HOSPITAL": "#C8E6C9",
+    "ZIP": "#B2EBF2",
+    "CITY": "#FFE0B2",
+    "STATE": "#FFCCBC",
+    "COUNTRY": "#D7CCC8",
 }
 
-TEXT_HASH_COLUMN = "text_hash"
+
+def parse_entities(raw: Any) -> list[dict[str, Any]]:
+    """Parse entities from raw JSON string, list, or dict format.
+
+    Args:
+        raw: Raw entity data, such as a JSON string, a list of dicts, or None.
+
+    Returns:
+        List of entity dictionaries.
+    """
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return []
+
+    data: Any = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
 
 
-def load_analyzer_results(analyzer_dir: str) -> dict:
+def get_recognizer_name(entity: dict[str, Any]) -> str:
+    """Extract recognizer name from an entity dictionary.
+
+    Args:
+        entity: Entity dictionary, optionally containing ``recognition_metadata``.
+
+    Returns:
+        Recognizer name string, or ``"-"`` if not specified.
+    """
+    if "recognition_metadata" in entity and isinstance(entity["recognition_metadata"], dict):
+        rec_name = entity["recognition_metadata"].get("recognizer_name")
+        if rec_name:
+            return str(rec_name)
+    if entity.get("recognizer_name"):
+        return str(entity["recognizer_name"])
+    return "-"
+
+
+def get_recognizers_from_entities(entities: list[dict[str, Any]]) -> list[str]:
+    """Extract unique sorted recognizer names from a list of entity dicts.
+
+    Args:
+        entities: List of entity dictionaries.
+
+    Returns:
+        Sorted list of unique non-empty recognizer name strings.
+    """
+    recognizers = set()
+    for entity in entities:
+        name = get_recognizer_name(entity)
+        if name != "-":
+            recognizers.add(name)
+    return sorted(recognizers)
+
+
+def filter_entities(
+    entities: list[dict[str, Any]],
+    selected_recognizers: list[str] | None = None,
+    selected_entity_types: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Filter entity dicts by recognizers and entity types.
+
+    Args:
+        entities: List of entity dictionaries.
+        selected_recognizers: Recognizer names to keep. If None, empty, or
+            containing ``"All"``, recognizer filtering is skipped.
+        selected_entity_types: Entity types to keep. If None, empty, or
+            containing ``"All"``, entity type filtering is skipped.
+
+    Returns:
+        Filtered list of entity dictionaries matching both criteria.
+    """
+    if not entities:
+        return []
+
+    filter_rec = bool(selected_recognizers and "All" not in selected_recognizers)
+    filter_type = bool(selected_entity_types and "All" not in selected_entity_types)
+
+    if not filter_rec and not filter_type:
+        return entities
+
+    filtered = []
+    for ent in entities:
+        if filter_rec and get_recognizer_name(ent) not in selected_recognizers:
+            continue
+        if filter_type and ent.get("entity_type") not in selected_entity_types:
+            continue
+        filtered.append(ent)
+    return filtered
+
+
+def filter_entities_by_recognizers(
+    entities: list[dict[str, Any]],
+    selected_recognizers: list[str],
+) -> list[dict[str, Any]]:
+    """Filter entities to include only those from the specified recognizers.
+
+    Args:
+        entities: List of entity dictionaries.
+        selected_recognizers: List of recognizer names to keep.
+
+    Returns:
+        Filtered list of entity dictionaries.
+    """
+    return filter_entities(entities, selected_recognizers=selected_recognizers)
+
+
+def convert_to_displacy_format(text: str, entities: list[dict[str, Any]]) -> dict[str, Any]:
+    """Convert text and entity dicts into spaCy displacy manual rendering format.
+
+    Validates entity offsets to ensure they fall within the text bounds.
+
+    Args:
+        text: The source text containing the entities.
+        entities: List of entity dicts, each with ``start``, ``end``, and
+            ``entity_type`` keys.
+
+    Returns:
+        Dictionary with ``text`` and ``ents`` keys suitable for
+        ``displacy.render(..., manual=True)``.
+    """
+    valid_ents = []
+    text_len = len(text)
+    for ent in entities:
+        try:
+            start = int(ent["start"])
+            end = int(ent["end"])
+            label = str(ent.get("entity_type", "ENTITY"))
+            if 0 <= start < end <= text_len:
+                valid_ents.append({"start": start, "end": end, "label": label})
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    return {
+        "text": text,
+        "ents": valid_ents,
+    }
+
+
+def collect_entity_types(
+    original_phi: list[dict[str, Any]],
+    anonymized_phi: list[dict[str, Any]],
+) -> set[str]:
+    """Collect unique entity types from original and anonymized entity lists.
+
+    Args:
+        original_phi: Entities from the recognizer stage.
+        anonymized_phi: Entities or items from the anonymizer stage.
+
+    Returns:
+        Set of unique entity type strings.
+    """
+    entity_types: set[str] = set()
+    for ent in original_phi:
+        if ent.get("entity_type"):
+            entity_types.add(str(ent["entity_type"]))
+    for ent in anonymized_phi:
+        if ent.get("entity_type"):
+            entity_types.add(str(ent["entity_type"]))
+    return entity_types
+
+
+def build_legend_html(entity_types: set[str]) -> str:
+    """Build HTML legend for entity type color chips.
+
+    Args:
+        entity_types: Set of entity type strings to include in the legend.
+
+    Returns:
+        HTML string with colored chips and labels, or empty string if no types.
+    """
+    if not entity_types:
+        return ""
+    legend_html = "<div style='display: flex; flex-wrap: wrap; gap: 8px;'>"
+    for entity_type in sorted(entity_types):
+        color = COLORS.get(entity_type, "#CCCCCC")
+        legend_html += f"""
+            <div style='display: flex; align-items: center; margin: 4px;'>
+                <div style='width: 14px; height: 14px; background-color: {color};
+                           border: 1px solid #bbb; margin-right: 6px; border-radius: 3px;'></div>
+                <span style='font-size: 13px; font-weight: 500;'>{entity_type}</span>
+            </div>
+            """
+    legend_html += "</div>"
+    return legend_html
+
+
+def load_analyzer_results(analyzer_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
     """Load analyzer results from a directory of JSON files.
 
     Each JSON file is expected to have ``key`` (sample ID), ``value`` (original
@@ -78,32 +263,32 @@ def load_analyzer_results(analyzer_dir: str) -> dict:
         Dictionary mapping sample IDs to dicts with ``original_text`` and
         ``original_phi`` keys.
     """
-    if not os.path.isdir(analyzer_dir):
+    dir_path = Path(analyzer_dir)
+    if not dir_path.is_dir():
         return {}
 
-    file_names = glob.glob(os.path.join(analyzer_dir, "*.json"))
     results = {}
-
-    for file_name in file_names:
-        try:
-            with open(file_name) as file:
+    for file_path in sorted(dir_path.glob("*.json")):
+        with contextlib.suppress(Exception):
+            with file_path.open(encoding="utf-8") as file:
                 data = json.load(file)
-                results[data["key"]] = {
-                    "original_text": data["value"],
-                    "original_phi": data["recognizer_results"],
-                }
-        except Exception:
-            continue
+            sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or file_path.stem)
+            orig_text = str(data.get("value") or data.get("text") or data.get("original_text") or "")
+            orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
+            results[sample_id] = {
+                "original_text": orig_text,
+                "original_phi": orig_phi,
+            }
 
     return results
 
 
-def load_anonymized_results(anonymizer_dir: str) -> dict:
+def load_anonymized_results(anonymizer_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
     """Load anonymized results from a directory of JSON files.
 
     Each JSON file is expected to have ``text`` (anonymized text) and ``items``
     (list of anonymization item dicts) fields. The sample ID is derived from
-    the filename (stem before the first dot).
+    the filename stem or a ``key``/``row_id`` field.
 
     Args:
         anonymizer_dir: Path to directory containing anonymized result JSON files.
@@ -112,920 +297,738 @@ def load_anonymized_results(anonymizer_dir: str) -> dict:
         Dictionary mapping sample IDs to dicts with ``modified_text`` and
         ``modified_phi`` keys.
     """
-    if not os.path.isdir(anonymizer_dir):
+    dir_path = Path(anonymizer_dir)
+    if not dir_path.is_dir():
         return {}
 
-    file_names = glob.glob(os.path.join(anonymizer_dir, "*.json"))
     results = {}
-
-    for file_name in file_names:
-        try:
-            id = os.path.basename(file_name).split(".")[0]
-            with open(file_name) as file:
+    for file_path in sorted(dir_path.glob("*.json")):
+        with contextlib.suppress(Exception):
+            with file_path.open(encoding="utf-8") as file:
                 data = json.load(file)
-                results[id] = {
-                    "modified_text": data["text"],
-                    "modified_phi": data["items"],
-                }
-        except Exception:
-            continue
-
-    return results
-
-
-def load_recognizer_results_from_dataframe(df: pd.DataFrame) -> dict:
-    """Load recognizer results from a DataFrame.
-
-    Expected columns:
-    - text_hash: unique identifier (SHA-256 hex digest of the original text)
-    - text: original text
-    - recognizer_results: JSON string or dict with entity results
-    """
-    results = {}
-
-    if TEXT_HASH_COLUMN not in df.columns:
-        raise ValueError(f"DataFrame must have a '{TEXT_HASH_COLUMN}' column")
-
-    # Determine text column
-    text_col = None
-    for col in ["text", "value", "note_text", "phi_note_text", "original_note_text"]:
-        if col in df.columns:
-            text_col = col
-            break
-
-    if text_col is None:
-        raise ValueError(
-            "DataFrame must have a text column (text, value, note_text, phi_note_text, or original_note_text)"
-        )
-
-    # Determine recognizer results column
-    recognizer_col = None
-    for col in ["recognizer_results", "recognizer_results_json", "entities"]:
-        if col in df.columns:
-            recognizer_col = col
-            break
-
-    if recognizer_col is None:
-        raise ValueError("DataFrame must have a recognizer_results column")
-
-    for _, row in df.iterrows():
-        try:
-            sample_id = str(row[TEXT_HASH_COLUMN])
-            text = row[text_col] if pd.notna(row[text_col]) else ""
-
-            # Parse recognizer results
-            recognizer_data = row[recognizer_col]
-            if pd.isna(recognizer_data):
-                entities = []
-            elif isinstance(recognizer_data, str):
-                entities = json.loads(recognizer_data)
-            elif isinstance(recognizer_data, (list, dict)):
-                entities = recognizer_data if isinstance(recognizer_data, list) else [recognizer_data]
-            else:
-                entities = []
-
-            results[sample_id] = {
-                "original_text": text,
-                "original_phi": entities,
-            }
-        except Exception:
-            continue
-
-    return results
-
-
-def load_anonymizer_results_from_dataframe(df: pd.DataFrame) -> dict:
-    """Load anonymizer results from a DataFrame.
-
-    Expected columns:
-    - text_hash: unique identifier (SHA-256 hex digest of the original text)
-    - deid_note_text or anonymized_text: anonymized text
-    - items or anonymizer_results: JSON string or dict with anonymization results
-    """
-    results = {}
-
-    if TEXT_HASH_COLUMN not in df.columns:
-        raise ValueError(f"DataFrame must have a '{TEXT_HASH_COLUMN}' column")
-
-    # Determine text column
-    text_col = None
-    for col in ["anonymized_note_text", "deid_note_text", "anonymized_text", "text", "modified_text"]:
-        if col in df.columns:
-            text_col = col
-            break
-
-    if text_col is None:
-        raise ValueError(
-            "DataFrame must have an anonymized text column "
-            "(deid_note_text, anonymized_text, anonymized_note_text, text, or modified_text)"
-        )
-
-    # Determine items column (optional for anonymizer-only mode)
-    items_col = None
-    for col in ["items", "anonymizer_results", "anonymizer_results_json", "operators"]:
-        if col in df.columns:
-            items_col = col
-            break
-
-    for _, row in df.iterrows():
-        try:
-            sample_id = str(row[TEXT_HASH_COLUMN])
-            text = row[text_col] if pd.notna(row[text_col]) else ""
-
-            # Parse items if available
-            items = []
-            if items_col and pd.notna(row.get(items_col)):
-                items_data = row[items_col]
-                if isinstance(items_data, str):
-                    items = json.loads(items_data)
-                elif isinstance(items_data, list):
-                    items = items_data
-
-            results[sample_id] = {
-                "modified_text": text,
-                "modified_phi": items,
-            }
-        except Exception:
-            continue
-
-    return results
-
-
-def get_table_row_count(table_id: str, only_with_entities: bool = False, entities_column: str = "entity_count") -> int:
-    """Get the total row count for a BigQuery table.
-
-    Args:
-        table_id: Full table ID in format 'project.dataset.table'
-        only_with_entities: If True, count only records with at least one entity
-        entities_column: Column name to check for entity count
-
-    Returns:
-        Total number of rows in the table
-    """
-    try:
-        from google.cloud import bigquery
-
-        client = bigquery.Client()
-
-        # Validate table ID
-        import re
-
-        parts = table_id.strip().split(".")
-        if len(parts) != 3:
-            raise ValueError("Invalid table ID format")
-        if not all(re.match(r"^[A-Za-z0-9_-]+$", part) for part in parts):
-            raise ValueError("Invalid characters in table ID")
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", entities_column):
-            raise ValueError("Invalid entities column name")
-
-        if only_with_entities:
-            query = f"SELECT COUNT(*) as cnt FROM `{table_id}` WHERE {entities_column} > 0"  # noqa: S608
-        else:
-            query = f"SELECT COUNT(*) as cnt FROM `{table_id}`"  # noqa: S608
-
-        result = client.query(query).result()
-        for row in result:
-            return row.cnt
-        return 0
-    except Exception:
-        return 0
-
-
-def load_from_bigquery(
-    table_id: str,
-    limit: int = 1000,
-    only_with_entities: bool = False,
-    entities_column: str = "entity_count",
-    total_rows: int | None = None,
-    filter_column: str | None = None,
-    filter_values: list[str] | None = None,
-) -> pd.DataFrame:
-    """Load data from a BigQuery table using random sampling or ID filtering.
-
-    When *filter_column* and *filter_values* are provided the query fetches
-    only the rows whose *filter_column* value is in *filter_values* (no
-    random sampling).  Otherwise the query uses ``TABLESAMPLE SYSTEM`` for
-    random sampling as before.
-
-    Args:
-        table_id: Full table ID in format 'project.dataset.table'
-        limit: Maximum number of rows to load
-        only_with_entities: If True, only load records with at least one entity
-        entities_column: Column name to check for entity count (default: entity_count)
-        total_rows: Total rows in table (used to calculate sample percentage)
-        filter_column: Column name to filter on (e.g. an ID column shared with
-            another table).
-        filter_values: Values to keep for *filter_column*.
-
-    Returns:
-        DataFrame with the query results
-    """
-    try:
-        from google.cloud import bigquery
-
-        client = bigquery.Client()
-        # Validate table ID format to prevent SQL injection
-        parts = table_id.strip().split(".")
-        if len(parts) != 3:
-            raise ValueError("Invalid table ID format. Expected 'project.dataset.table'")
-
-        # Use parameterized query is not possible for table names, so validate strictly
-        import re
-
-        if not all(re.match(r"^[A-Za-z0-9_-]+$", part) for part in parts):
-            raise ValueError("Invalid characters in table ID")
-
-        # Validate entities_column name
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", entities_column):
-            raise ValueError("Invalid entities column name")
-
-        where_clauses: list[str] = []
-        job_config = None
-
-        if filter_column and filter_values:
-            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", filter_column):
-                raise ValueError("Invalid filter column name")
-            where_clauses.append(f"CAST({filter_column} AS STRING) IN UNNEST(@filter_values)")
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[
-                    bigquery.ArrayQueryParameter("filter_values", "STRING", filter_values),
-                ]
+            sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or file_path.stem)
+            mod_text = str(data.get("text") or data.get("modified_text") or data.get("anonymized_note_text") or "")
+            mod_phi = parse_entities(
+                data.get("items") or data.get("modified_phi") or data.get("anonymizer_results") or []
             )
-            sample_clause = ""
-        else:
-            sample_clause = ""
-            if total_rows and total_rows > 0:
-                target_percentage = (limit * 2 / total_rows) * 100
-                sample_percentage = max(0.1, min(100.0, target_percentage))
-                if sample_percentage < 100.0:
-                    sample_clause = f" TABLESAMPLE SYSTEM ({sample_percentage:.2f} PERCENT)"
+            results[sample_id] = {
+                "modified_text": mod_text,
+                "modified_phi": mod_phi,
+            }
 
-        if only_with_entities:
-            where_clauses.append(f"{entities_column} > 0")
-
-        where_clause = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-
-        # When filtering by a column, deduplicate so that LIMIT counts unique
-        # values rather than being consumed by duplicates.
-        qualify_clause = ""
-        if filter_column and filter_values:
-            qualify_clause = f" QUALIFY ROW_NUMBER() OVER (PARTITION BY {filter_column}) = 1"
-
-        query = f"SELECT * FROM `{table_id}`{sample_clause}{where_clause}{qualify_clause} LIMIT {int(limit)}"  # noqa: S608
-
-        df = client.query(query, job_config=job_config).to_dataframe()
-        return df
-    except ImportError:
-        raise ImportError("google-cloud-bigquery is required. Install with: pip install google-cloud-bigquery")
+    return results
 
 
-def load_dataframe_from_file(file_path: str) -> pd.DataFrame:
-    """Load a pandas DataFrame from a Parquet or CSV file.
+def _load_results_from_dataframe(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """Parse unified sample records from a pandas DataFrame.
 
     Args:
-        file_path: Path to the file. Must end with ``.parquet`` or ``.csv``.
+        df: DataFrame containing recognizer and/or anonymizer columns.
 
     Returns:
-        DataFrame loaded from the file.
+        Dictionary mapping sample IDs to sample data dictionaries.
+    """
+    if df.empty:
+        return {}
+
+    id_col = next((c for c in ("row_id", "text_hash", "sample_id", "id", "key") if c in df.columns), None)
+    orig_text_col = next(
+        (c for c in ("note_text", "original_note_text", "phi_note_text", "text", "value") if c in df.columns),
+        None,
+    )
+    rec_phi_col = next(
+        (c for c in ("recognizer_results_json", "recognizer_results", "entities") if c in df.columns),
+        None,
+    )
+    anon_text_col = next(
+        (
+            c
+            for c in ("anonymized_note_text", "deid_note_text", "anonymized_text", "note_text", "modified_text")
+            if c in df.columns and c != orig_text_col
+        ),
+        None,
+    )
+    anon_phi_col = next(
+        (
+            c
+            for c in ("anonymizer_results_json", "items", "anonymizer_results", "operators")
+            if c in df.columns and c != rec_phi_col
+        ),
+        None,
+    )
+
+    results: dict[str, dict[str, Any]] = {}
+    for idx, row in df.iterrows():
+        sample_id = str(row[id_col]) if id_col and pd.notna(row[id_col]) else f"sample_{idx}"
+        orig_text = str(row[orig_text_col]) if orig_text_col and pd.notna(row[orig_text_col]) else ""
+        orig_phi = parse_entities(row[rec_phi_col]) if rec_phi_col else []
+        anon_text = str(row[anon_text_col]) if anon_text_col and pd.notna(row[anon_text_col]) else ""
+        anon_phi = parse_entities(row[anon_phi_col]) if anon_phi_col else []
+
+        results[sample_id] = {
+            "sample_id": sample_id,
+            "original_text": orig_text,
+            "original_phi": orig_phi,
+            "modified_text": anon_text,
+            "modified_phi": anon_phi,
+        }
+
+    return results
+
+
+def load_from_parquet_file(file_or_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+    """Load sample records from a Parquet file or directory of Parquet files.
+
+    Args:
+        file_or_dir: Path to a ``.parquet`` file or a directory containing Parquet files.
+
+    Returns:
+        Dictionary mapping sample IDs to sample data dictionaries.
 
     Raises:
-        ValueError: If the file extension is not ``.parquet`` or ``.csv``.
+        FileNotFoundError: If the path does not exist or directory contains no Parquet files.
     """
-    if file_path.endswith(".parquet"):
-        return pd.read_parquet(file_path)
-    if file_path.endswith(".csv"):
-        return pd.read_csv(file_path)
-    raise ValueError("Unsupported file format. Use .parquet or .csv")
-
-
-def get_recognizers_from_entities(entities: list[dict]) -> list[str]:
-    """Extract unique recognizer names from a list of entity dicts.
-
-    Looks for the ``recognizer_name`` field inside each entity's
-    ``recognition_metadata`` dict.
-
-    Args:
-        entities: List of entity dicts, each optionally containing a
-            ``recognition_metadata`` dict with a ``recognizer_name`` key.
-
-    Returns:
-        Sorted list of unique recognizer name strings.
-    """
-    recognizers = set()
-    for entity in entities:
-        if "recognition_metadata" in entity and "recognizer_name" in entity["recognition_metadata"]:
-            recognizers.add(entity["recognition_metadata"]["recognizer_name"])
-    return sorted(list(recognizers))
-
-
-def filter_entities_by_recognizers(entities: list[dict], selected_recognizers: list[str]) -> list[dict]:
-    """Filter entities to include only those from the specified recognizers.
-
-    If ``selected_recognizers`` is empty or contains ``"All"``, all entities
-    are returned unfiltered.
-
-    Args:
-        entities: List of entity dicts, each containing ``recognition_metadata``
-            with a ``recognizer_name`` key.
-        selected_recognizers: List of recognizer names to keep. Pass ``["All"]``
-            or an empty list to skip filtering.
-
-    Returns:
-        Filtered list of entity dicts whose recognizer name is in
-        ``selected_recognizers``.
-    """
-    if not selected_recognizers or "All" in selected_recognizers:
-        return entities
-
-    filtered = []
-    for entity in entities:
-        if (
-            "recognition_metadata" in entity
-            and "recognizer_name" in entity["recognition_metadata"]
-            and entity["recognition_metadata"]["recognizer_name"] in selected_recognizers
-        ):
-            filtered.append(entity)
-
-    return filtered
-
-
-def convert_to_displacy_format(text: str, entities: list[dict]) -> dict:
-    """Convert text and entity dicts into spaCy displacy manual rendering format.
-
-    Args:
-        text: The source text containing the entities.
-        entities: List of entity dicts, each with ``start``, ``end``, and
-            ``entity_type`` keys.
-
-    Returns:
-        Dictionary with ``text`` and ``ents`` keys suitable for
-        ``displacy.render(..., manual=True)``.
-    """
-    return {
-        "text": text,
-        "ents": [{"start": ent["start"], "end": ent["end"], "label": ent["entity_type"]} for ent in entities],
-    }
-
-
-def validate_json_paths(
-    viz_mode: VisualizationMode,
-    analyzer_dir: str | None,
-    anonymizer_dir: str | None,
-) -> tuple[dict, dict, str | None]:
-    """Validate JSON directory paths and load data if valid.
-
-    Args:
-        viz_mode: Current visualization mode.
-        analyzer_dir: Path to analyzer results directory (may be None or empty).
-        anonymizer_dir: Path to anonymizer results directory (may be None or empty).
-
-    Returns:
-        Tuple of (analyzer_results, anonymized_results, error_message).
-        If error_message is not None, results should be ignored and the error
-        displayed to the user. Error messages starting with "info:" are
-        informational; others are errors.
-    """
-    if viz_mode == VisualizationMode.RECOGNIZER_ONLY:
-        if not analyzer_dir:
-            return {}, {}, "info:Please specify the recognizer results folder in the sidebar"
-        if not os.path.exists(analyzer_dir):
-            return {}, {}, "Recognizer folder does not exist"
-        return load_analyzer_results(analyzer_dir), {}, None
-
-    if viz_mode == VisualizationMode.ANONYMIZER_ONLY:
-        if not anonymizer_dir:
-            return {}, {}, "info:Please specify the anonymizer results folder in the sidebar"
-        if not os.path.exists(anonymizer_dir):
-            return {}, {}, "Anonymizer folder does not exist"
-        return {}, load_anonymized_results(anonymizer_dir), None
-
-    # BOTH
-    if not analyzer_dir or not anonymizer_dir:
-        return {}, {}, "info:Please specify both analyzer and anonymizer folders in the sidebar"
-    if not os.path.exists(analyzer_dir) or not os.path.exists(anonymizer_dir):
-        return {}, {}, "One or both folders do not exist"
-    return load_analyzer_results(analyzer_dir), load_anonymized_results(anonymizer_dir), None
-
-
-def validate_dataframe_paths(
-    viz_mode: VisualizationMode,
-    recognizer_file: str | None,
-    anonymizer_file: str | None,
-) -> tuple[dict, dict, str | None]:
-    """Validate DataFrame file paths and load data if valid.
-
-    Args:
-        viz_mode: Current visualization mode.
-        recognizer_file: Path to recognizer results file (parquet/csv).
-        anonymizer_file: Path to anonymizer results file (parquet/csv).
-
-    Returns:
-        Tuple of (analyzer_results, anonymized_results, error_message).
-        If error_message is not None, results should be ignored.
-    """
-    analyzer_results = {}
-    anonymized_results = {}
-
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY] and recognizer_file:
-        if os.path.exists(recognizer_file):
-            df = load_dataframe_from_file(recognizer_file)
-            analyzer_results = load_recognizer_results_from_dataframe(df)
-        else:
-            return {}, {}, f"File not found: {recognizer_file}"
-
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY] and anonymizer_file:
-        if os.path.exists(anonymizer_file):
-            df = load_dataframe_from_file(anonymizer_file)
-            anonymized_results = load_anonymizer_results_from_dataframe(df)
-        else:
-            return {}, {}, f"File not found: {anonymizer_file}"
-
-    return analyzer_results, anonymized_results, None
-
-
-def clamp_sample_index(index: int, num_samples: int) -> int:
-    """Clamp a sample index to valid bounds.
-
-    Args:
-        index: Current sample index (may be out of bounds).
-        num_samples: Total number of samples (must be > 0).
-
-    Returns:
-        Clamped index in range [0, num_samples - 1].
-    """
-    if index >= num_samples:
-        return 0
-    if index < 0:
-        return num_samples - 1
-    return index
-
-
-def get_sample_data(
-    viz_mode: VisualizationMode,
-    analyzer_results: dict,
-    anonymized_results: dict,
-    sample_id: str,
-) -> tuple[str, list, str, list]:
-    """Extract sample data for the given sample ID based on visualization mode.
-
-    Args:
-        viz_mode: Current visualization mode.
-        analyzer_results: Dict mapping sample IDs to analyzer result dicts.
-        anonymized_results: Dict mapping sample IDs to anonymized result dicts.
-        sample_id: The sample ID to look up.
-
-    Returns:
-        Tuple of (original_text, original_phi, anonymized_text, anonymized_phi).
-    """
-    original_text = ""
-    original_phi = []
-    anonymized_text = ""
-    anonymized_phi = []
-
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-        current_sample = analyzer_results.get(sample_id, {})
-        original_text = current_sample.get("original_text", "")
-        original_phi = current_sample.get("original_phi", [])
-
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY]:
-        anonymized_data = anonymized_results.get(sample_id, {})
-        anonymized_text = anonymized_data.get("modified_text", "No anonymized text available")
-        anonymized_phi = anonymized_data.get("modified_phi", [])
-
-    return original_text, original_phi, anonymized_text, anonymized_phi
-
-
-def collect_entity_types(
-    viz_mode: VisualizationMode,
-    filtered_original_phi: list[dict],
-    anonymized_phi: list[dict],
-) -> set[str]:
-    """Collect unique entity types from displayed entities based on visualization mode.
-
-    Args:
-        viz_mode: Current visualization mode.
-        filtered_original_phi: Filtered original entities (recognizer side).
-        anonymized_phi: Anonymized entities.
-
-    Returns:
-        Set of entity type strings.
-    """
-    entity_types: set[str] = set()
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-        for ent in filtered_original_phi:
-            entity_types.add(ent["entity_type"])
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY]:
-        for ent in anonymized_phi:
-            entity_types.add(ent["entity_type"])
-    return entity_types
-
-
-def build_legend_html(entity_types: set[str]) -> str:
-    """Build HTML legend for entity type color boxes.
-
-    Args:
-        entity_types: Set of entity type strings to include in the legend.
-
-    Returns:
-        HTML string with colored boxes and labels, or empty string if no types.
-    """
-    if not entity_types:
-        return ""
-    legend_html = "<div style='display: flex; flex-wrap: wrap; gap: 10px;'>"
-    for entity_type in sorted(entity_types):
-        color = COLORS.get(entity_type, "#CCCCCC")
-        legend_html += f"""
-            <div style='display: flex; align-items: center; margin: 5px;'>
-                <div style='width: 15px; height: 15px; background-color: {color};
-                           border: 1px solid #ccc; margin-right: 5px;'></div>
-                <span style='font-size: 12px;'>{entity_type}</span>
-            </div>
-            """
-    legend_html += "</div>"
-    return legend_html
-
-
-def main():
-    """Streamlit main entrypoint for the PHI visualizer."""
-    st.set_page_config(page_title="TIDE 2.0 - Simple PHI Visualizer", layout="wide")
-
-    st.title("TIDE 2.0 - PHI Visualizer")
-    st.markdown("**Compare original and anonymized text with recognizer filtering**")
-    st.divider()
-
-    # Sidebar for configuration
-    with st.sidebar:
-        st.header("Configuration")
-
-        # Visualization mode selection
-        viz_mode = st.radio(
-            "Visualization Mode:",
-            options=[mode.value for mode in VisualizationMode],
-            index=0,
-            help="Choose what to visualize",
-        )
-        viz_mode = VisualizationMode(viz_mode)
-
-        st.divider()
-
-        # Data source selection
-        data_source = st.radio(
-            "Data Source:",
-            options=[source.value for source in DataSource],
-            index=0,
-            help="Choose how to load data",
-        )
-        data_source = DataSource(data_source)
-
-        st.divider()
-
-    # Initialize results
-    analyzer_results = {}
-    anonymized_results = {}
-
-    # Load data based on source type
-    if data_source == DataSource.JSON_FILES:
-        with st.sidebar:
-            st.subheader("JSON Configuration")
-
-            if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-                analyzer_dir = st.text_input(
-                    "Recognizer Results Folder:", help="Path to folder with recognizer JSON files"
-                )
-            else:
-                analyzer_dir = None
-
-            if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY]:
-                anonymizer_dir = st.text_input(
-                    "Anonymizer Results Folder:", help="Path to folder with anonymized JSON files"
-                )
-            else:
-                anonymizer_dir = None
-
-            # Quick folder shortcuts
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Current Dir", key="current"):
-                    st.rerun()
-            with col2:
-                if st.button("Home Dir", key="home"):
-                    st.rerun()
-
-        analyzer_results, anonymized_results, error = validate_json_paths(viz_mode, analyzer_dir, anonymizer_dir)
-        if error is not None:
-            if error.startswith("info:"):
-                st.info(error[5:])
-            else:
-                st.error(error)
-            return
-
-    elif data_source == DataSource.BIGQUERY:
-        with st.sidebar:
-            st.subheader("BigQuery Configuration")
-
-            if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-                recognizer_table = st.text_input(
-                    "Recognizer Table:",
-                    value="",
-                    help="BigQuery table ID (project.dataset.table)",
-                )
-            else:
-                recognizer_table = None
-
-            if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY]:
-                anonymizer_table = st.text_input(
-                    "Anonymizer Table:",
-                    help="BigQuery table ID (project.dataset.table)",
-                )
-            else:
-                anonymizer_table = None
-
-            row_limit = st.number_input("Row Limit:", min_value=10, max_value=10000, value=100, step=10)
-
-            only_with_entities = st.checkbox(
-                "Only records with entities",
-                value=True,
-                help="Filter to only load records that have at least one recognized entity",
-            )
-
-            load_button = st.button("Load from BigQuery")
-
-        if load_button:
-            try:
-                recognizer_df = None
-
-                if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY] and recognizer_table:
-                    with st.spinner("Getting table info..."):
-                        total_rows = get_table_row_count(
-                            recognizer_table,
-                            only_with_entities=only_with_entities,
-                        )
-                        st.session_state["recognizer_total_rows"] = total_rows
-
-                    if total_rows > 0 and row_limit > total_rows:
-                        st.warning(
-                            f"Requested {row_limit} rows but table only has {total_rows} matching rows. "
-                            f"Will return all {total_rows} rows."
-                        )
-
-                    with st.spinner("Loading recognizer results from BigQuery (random sample)..."):
-                        recognizer_df = load_from_bigquery(
-                            recognizer_table,
-                            limit=row_limit,
-                            only_with_entities=only_with_entities,
-                            total_rows=total_rows,
-                        )
-                        analyzer_results = load_recognizer_results_from_dataframe(recognizer_df)
-                        st.session_state["analyzer_results"] = analyzer_results
-                        st.session_state["sample_index"] = 0
-
-                if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY] and anonymizer_table:
-                    if viz_mode == VisualizationMode.BOTH and recognizer_df is not None:
-                        # Filter the anonymizer table to the same text_hash
-                        # values sampled from the recognizer table.
-                        text_hashes = [str(v) for v in recognizer_df[TEXT_HASH_COLUMN].dropna().unique()]
-                        with st.spinner("Loading anonymizer results from BigQuery (matching recognizer sample)..."):
-                            df = load_from_bigquery(
-                                anonymizer_table,
-                                limit=row_limit,
-                                only_with_entities=only_with_entities,
-                                filter_column=TEXT_HASH_COLUMN,
-                                filter_values=text_hashes,
-                            )
-                    else:
-                        with st.spinner("Getting table info..."):
-                            total_rows = get_table_row_count(
-                                anonymizer_table,
-                                only_with_entities=only_with_entities,
-                            )
-                            st.session_state["anonymizer_total_rows"] = total_rows
-
-                        if total_rows > 0 and row_limit > total_rows:
-                            st.warning(
-                                f"Requested {row_limit} rows but table only has {total_rows} matching rows. "
-                                f"Will return all {total_rows} rows."
-                            )
-
-                        with st.spinner("Loading anonymizer results from BigQuery (random sample)..."):
-                            df = load_from_bigquery(
-                                anonymizer_table,
-                                limit=row_limit,
-                                only_with_entities=only_with_entities,
-                                total_rows=total_rows,
-                            )
-
-                    anonymized_results = load_anonymizer_results_from_dataframe(df)
-                    st.session_state["anonymized_results"] = anonymized_results
-                    st.session_state["sample_index"] = 0
-
-            except Exception as e:
-                st.error(f"Error loading from BigQuery: {e}")
-                return
-
-        # Use cached results if available
-        if "analyzer_results" in st.session_state:
-            analyzer_results = st.session_state["analyzer_results"]
-        if "anonymized_results" in st.session_state:
-            anonymized_results = st.session_state["anonymized_results"]
-
-    elif data_source == DataSource.DATAFRAME:
-        with st.sidebar:
-            st.subheader("DataFrame Configuration")
-
-            if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-                recognizer_file = st.text_input(
-                    "Recognizer File:",
-                    key="recognizer_file_path",
-                    help="Path to parquet or CSV file with recognizer results",
-                )
-            else:
-                recognizer_file = None
-
-            if viz_mode in [VisualizationMode.BOTH, VisualizationMode.ANONYMIZER_ONLY]:
-                anonymizer_file = st.text_input(
-                    "Anonymizer File:",
-                    key="anonymizer_file_path",
-                    help="Path to parquet or CSV file with anonymizer results",
-                )
-            else:
-                anonymizer_file = None
-
-            load_button = st.button("Load DataFrame", key="load_dataframe_btn")
-
-        if load_button:
-            try:
-                analyzer_results, anonymized_results, error = validate_dataframe_paths(
-                    viz_mode, recognizer_file, anonymizer_file
-                )
-                if error is not None:
-                    st.error(error)
-                    return
-                if analyzer_results:
-                    st.session_state["analyzer_results"] = analyzer_results
-                if anonymized_results:
-                    st.session_state["anonymized_results"] = anonymized_results
-            except Exception as e:
-                st.error(f"Error loading DataFrame: {e}")
-                return
-
-        # Use cached results if available
-        if "analyzer_results" in st.session_state:
-            analyzer_results = st.session_state["analyzer_results"]
-        if "anonymized_results" in st.session_state:
-            anonymized_results = st.session_state["anonymized_results"]
-
-    # Validate we have data to display
-    if viz_mode == VisualizationMode.RECOGNIZER_ONLY and not analyzer_results:
-        st.info("No recognizer results loaded. Please load data using the sidebar options.")
-        return
-    if viz_mode == VisualizationMode.ANONYMIZER_ONLY and not anonymized_results:
-        st.info("No anonymizer results loaded. Please load data using the sidebar options.")
-        return
-    if viz_mode == VisualizationMode.BOTH and not analyzer_results:
-        st.info("No recognizer results loaded. Please load data using the sidebar options.")
-        return
-
-    # Determine sample IDs based on visualization mode
-    if viz_mode == VisualizationMode.ANONYMIZER_ONLY:
-        sample_ids = list(anonymized_results.keys())
-        sample_count = len(anonymized_results)
+    path = Path(file_or_dir)
+    if path.is_file():
+        df = pd.read_parquet(path)
+    elif path.is_dir():
+        parquet_files = sorted(path.glob("**/*.parquet"))
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        df = pd.read_parquet(path)
     else:
-        sample_ids = list(analyzer_results.keys())
-        sample_count = len(analyzer_results)
+        raise FileNotFoundError(f"Parquet path not found: {path}")
 
-    if not sample_ids:
-        st.error("No samples found in the loaded data")
-        return
+    return _load_results_from_dataframe(df)
 
-    # Initialize sample index in session state
-    if "sample_index" not in st.session_state:
-        st.session_state["sample_index"] = 0
 
-    # Ensure index is within bounds
-    st.session_state["sample_index"] = clamp_sample_index(st.session_state["sample_index"], len(sample_ids))
+def _find_pipeline_stage_dirs(root: Path) -> tuple[Path | None, Path | None, Path | None]:
+    """Locate recognizer, anonymizer, and transformer stage directories."""
+    rec_dir = None
+    for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output"):
+        cand = root / stage
+        if cand.is_dir() and any(cand.glob("**/*.parquet")):
+            rec_dir = cand
+            break
 
-    def on_sample_change():
-        """Callback when sample selector changes."""
-        selected = st.session_state.sample_selector
-        if selected in sample_ids:
-            st.session_state["sample_index"] = sample_ids.index(selected)
+    anon_dir = None
+    cand_anon = root / "anonymizer_output"
+    if cand_anon.is_dir() and any(cand_anon.glob("**/*.parquet")):
+        anon_dir = cand_anon
+
+    trans_dir = None
+    cand_trans = root / "transformer_output"
+    if cand_trans.is_dir() and any(cand_trans.glob("**/*.parquet")):
+        trans_dir = cand_trans
+
+    return rec_dir, anon_dir, trans_dir
+
+
+def _load_pipeline_recognizer_stage(
+    recognizer_dir: Path,
+    transformer_dir: Path | None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Load recognizer parquet output and optional transformer backfill."""
+    rec_df = pd.read_parquet(recognizer_dir)
+    text_col = next((c for c in ("note_text", "original_note_text", "text", "value") if c in rec_df.columns), None)
+    has_text = text_col is not None and rec_df[text_col].dropna().any()
+
+    text_map_hash: dict[str, str] = {}
+    text_map_id: dict[str, str] = {}
+    if not has_text and transformer_dir:
+        trans_df = pd.read_parquet(transformer_dir)
+        t_col = next((c for c in ("note_text", "text", "value") if c in trans_df.columns), None)
+        if t_col:
+            if "text_hash" in trans_df.columns:
+                for _, tr in trans_df[["text_hash", t_col]].dropna().iterrows():
+                    text_map_hash[str(tr["text_hash"])] = str(tr[t_col])
+            if "row_id" in trans_df.columns:
+                for _, tr in trans_df[["row_id", t_col]].dropna().iterrows():
+                    text_map_id[str(tr["row_id"])] = str(tr[t_col])
+
+    rec_phi_col = next(
+        (c for c in ("recognizer_results_json", "recognizer_results", "entities") if c in rec_df.columns), None
+    )
+
+    rec_results: dict[str, dict[str, Any]] = {}
+    rec_hash_map: dict[str, str] = {}
+
+    for idx, row in rec_df.iterrows():
+        if "row_id" in rec_df.columns and pd.notna(row["row_id"]):
+            sample_id = str(row["row_id"])
+        elif "text_hash" in rec_df.columns and pd.notna(row["text_hash"]):
+            sample_id = str(row["text_hash"])
+        else:
+            sample_id = f"sample_{idx}"
+
+        text_val = ""
+        if text_col and pd.notna(row.get(text_col)):
+            text_val = str(row[text_col])
+        elif "row_id" in rec_df.columns and str(row.get("row_id")) in text_map_id:
+            text_val = text_map_id[str(row["row_id"])]
+        elif "text_hash" in rec_df.columns and str(row.get("text_hash")) in text_map_hash:
+            text_val = text_map_hash[str(row["text_hash"])]
+
+        phi_val = parse_entities(row.get(rec_phi_col)) if rec_phi_col else []
+        th_val = str(row["text_hash"]) if "text_hash" in rec_df.columns and pd.notna(row["text_hash"]) else None
+        if th_val:
+            rec_hash_map[th_val] = sample_id
+
+        rec_results[sample_id] = {
+            "sample_id": sample_id,
+            "text_hash": th_val,
+            "original_text": text_val,
+            "original_phi": phi_val,
+        }
+
+    return rec_results, rec_hash_map
+
+
+def _load_pipeline_anonymizer_stage(
+    anonymizer_dir: Path,
+    rec_hash_map: dict[str, str],
+    rec_results: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Load anonymizer parquet output and align with recognizer sample IDs."""
+    anon_df = pd.read_parquet(anonymizer_dir)
+    text_col = next(
+        (
+            c
+            for c in ("anonymized_note_text", "deid_note_text", "anonymized_text", "note_text", "text")
+            if c in anon_df.columns
+        ),
+        None,
+    )
+    phi_col = next(
+        (c for c in ("anonymizer_results_json", "items", "anonymizer_results", "operators") if c in anon_df.columns),
+        None,
+    )
+
+    anon_results: dict[str, dict[str, Any]] = {}
+    for idx, row in anon_df.iterrows():
+        if "row_id" in anon_df.columns and pd.notna(row["row_id"]):
+            sample_id = str(row["row_id"])
+        elif "text_hash" in anon_df.columns and pd.notna(row["text_hash"]):
+            sample_id = str(row["text_hash"])
+        else:
+            sample_id = f"sample_{idx}"
+
+        th_val = str(row["text_hash"]) if "text_hash" in anon_df.columns and pd.notna(row["text_hash"]) else None
+        if sample_id not in rec_results and th_val and th_val in rec_hash_map:
+            sample_id = rec_hash_map[th_val]
+
+        mod_text = str(row[text_col]) if text_col and pd.notna(row.get(text_col)) else ""
+        mod_phi = parse_entities(row.get(phi_col)) if phi_col else []
+
+        anon_results[sample_id] = {
+            "sample_id": sample_id,
+            "text_hash": th_val,
+            "modified_text": mod_text,
+            "modified_phi": mod_phi,
+        }
+
+    return anon_results
+
+
+def load_pipeline_output_dir(output_dir: str | os.PathLike[str]) -> dict[str, dict[str, Any]]:
+    """Load and join recognizer and anonymizer Parquet stages from a pipeline run.
+
+    Discovers:
+    - Recognizer stage: ``merged_recognizer_output/``, else ``llm_recognizer_output/``,
+      else ``recognizer_output/``.
+    - Anonymizer stage: ``anonymizer_output/``.
+    - Transformer stage: ``transformer_output/`` (used to backfill ``note_text``
+      if omitted in the recognizer output).
+
+    Rows are aligned by ``row_id`` (fallback to ``text_hash``).
+
+    Args:
+        output_dir: Directory containing pipeline output stage folders.
+
+    Returns:
+        Dictionary mapping sample IDs to merged sample records.
+
+    Raises:
+        ValueError: If neither recognizer nor anonymizer stage output is found.
+    """
+    root = Path(output_dir)
+    rec_dir, anon_dir, trans_dir = _find_pipeline_stage_dirs(root)
+
+    if not rec_dir and not anon_dir:
+        raise ValueError(f"No pipeline stage parquet files found under {root}")
+
+    rec_results: dict[str, dict[str, Any]] = {}
+    rec_hash_map: dict[str, str] = {}
+    if rec_dir:
+        rec_results, rec_hash_map = _load_pipeline_recognizer_stage(rec_dir, trans_dir)
+
+    anon_results: dict[str, dict[str, Any]] = {}
+    if anon_dir:
+        anon_results = _load_pipeline_anonymizer_stage(anon_dir, rec_hash_map, rec_results)
+
+    results: dict[str, dict[str, Any]] = {}
+    all_keys = list(rec_results.keys())
+    for k in anon_results:
+        if k not in rec_results:
+            all_keys.append(k)
+
+    for k in all_keys:
+        rec = rec_results.get(k, {})
+        anon = anon_results.get(k, {})
+        results[k] = {
+            "sample_id": k,
+            "original_text": rec.get("original_text", ""),
+            "original_phi": rec.get("original_phi", []),
+            "modified_text": anon.get("modified_text", ""),
+            "modified_phi": anon.get("modified_phi", []),
+        }
+
+    return results
+
+
+def _load_data_file(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
+    """Load data from a single Parquet or JSON file."""
+    if p.suffix.lower() == ".parquet":
+        return load_from_parquet_file(p), "Single Parquet File"
+    if p.suffix.lower() == ".json":
+        try:
+            with p.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            raise ValueError(f"Could not load JSON file {p}: {e}") from e
+
+        sample_id = str(data.get("key") or data.get("row_id") or data.get("text_hash") or p.stem)
+        orig_text = str(data.get("value") or data.get("original_text") or data.get("text") or "")
+        orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
+        mod_text = str(data.get("modified_text") or (data.get("text") if "items" in data else ""))
+        mod_phi = parse_entities(data.get("items") or data.get("modified_phi") or [])
+        return {
+            sample_id: {
+                "sample_id": sample_id,
+                "original_text": orig_text,
+                "original_phi": orig_phi,
+                "modified_text": mod_text,
+                "modified_phi": mod_phi,
+            }
+        }, "Single JSON File"
+
+    raise ValueError(f"Unsupported file format '{p.suffix}'. Expected .parquet or .json")
+
+
+def _load_data_dir(p: Path) -> tuple[dict[str, dict[str, Any]], str]:
+    """Load data from a directory by auto-detecting layout."""
+    for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output", "anonymizer_output"):
+        if (p / stage).is_dir() and any((p / stage).glob("**/*.parquet")):
+            return load_pipeline_output_dir(p), "Pipeline Output Directory (Parquet)"
+
+    rec_json_dir = p / "cli_recognizer_json"
+    anon_json_dir = p / "cli_anonymizer_json"
+    if rec_json_dir.is_dir() or anon_json_dir.is_dir():
+        rec_res = load_analyzer_results(rec_json_dir) if rec_json_dir.is_dir() else {}
+        anon_res = load_anonymized_results(anon_json_dir) if anon_json_dir.is_dir() else {}
+        all_ids = list(rec_res.keys())
+        for k in anon_res:
+            if k not in rec_res:
+                all_ids.append(k)
+        combined: dict[str, dict[str, Any]] = {}
+        for sid in all_ids:
+            r = rec_res.get(sid, {})
+            a = anon_res.get(sid, {})
+            combined[sid] = {
+                "sample_id": sid,
+                "original_text": r.get("original_text", ""),
+                "original_phi": r.get("original_phi", []),
+                "modified_text": a.get("modified_text", ""),
+                "modified_phi": a.get("modified_phi", []),
+            }
+        return combined, "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
+
+    if any(p.glob("*.parquet")):
+        return load_from_parquet_file(p), "Parquet Directory"
+
+    json_files = list(p.glob("*.json"))
+    if json_files:
+        combined = {}
+        for jf in json_files:
+            with contextlib.suppress(Exception):
+                with jf.open(encoding="utf-8") as f:
+                    data = json.load(f)
+                sid = str(data.get("key") or data.get("row_id") or data.get("text_hash") or jf.stem)
+                if sid not in combined:
+                    combined[sid] = {
+                        "sample_id": sid,
+                        "original_text": "",
+                        "original_phi": [],
+                        "modified_text": "",
+                        "modified_phi": [],
+                    }
+                if "recognizer_results" in data or "value" in data:
+                    combined[sid]["original_text"] = str(data.get("value", ""))
+                    combined[sid]["original_phi"] = parse_entities(data.get("recognizer_results", []))
+                if "items" in data or ("text" in data and "value" not in data):
+                    combined[sid]["modified_text"] = str(data.get("text", ""))
+                    combined[sid]["modified_phi"] = parse_entities(data.get("items", []))
+        if combined:
+            return combined, "JSON Files Directory"
+
+    raise ValueError(f"No recognizable Parquet stages or JSON files found in {p}")
+
+
+def load_data(path: str | os.PathLike[str]) -> tuple[dict[str, dict[str, Any]], str]:
+    """Unified data loader with automatic format detection.
+
+    Auto-detects:
+    1. Pipeline Parquet output directory (containing stage subdirectories).
+    2. JSON results directory (containing ``cli_recognizer_json/`` and/or ``cli_anonymizer_json/``).
+    3. Directory containing ``*.parquet`` files directly.
+    4. Directory containing ``*.json`` files directly.
+    5. Single ``.parquet`` file.
+    6. Single ``.json`` file.
+
+    Args:
+        path: Path to file or folder to load.
+
+    Returns:
+        Tuple of (results_dict, format_description_str).
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+        ValueError: If format is unsupported or contains no recognizable data.
+    """
+    if not path:
+        return {}, "No path provided"
+
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Path does not exist: {p}")
+
+    if p.is_file():
+        return _load_data_file(p)
+
+    return _load_data_dir(p)
+
+
+def parse_cli_args(args: list[str] | None = None) -> str:
+    """Extract data path from CLI arguments if provided.
+
+    When launched via ``tide2-visualizer [path]`` (which runs
+    ``streamlit run unified_interface.py -- [path]``), the CLI arguments
+    appear in ``sys.argv``.
+
+    Args:
+        args: List of command-line arguments. Defaults to ``sys.argv[1:]``.
+
+    Returns:
+        The first positional path argument, or an empty string if none provided.
+    """
+    raw_args = sys.argv[1:] if args is None else args
+    for arg in raw_args:
+        if not arg.startswith("-"):
+            return arg
+    return ""
+
+
+def _render_sidebar_data_location() -> None:
+    """Render the sidebar path input and loader controls."""
+    with st.sidebar:
+        st.header("Data Location")
+        data_path_input = st.text_input(
+            "Path to Output Folder or File:",
+            value=st.session_state.get("data_path", ""),
+            help="Path to pipeline output folder, JSON results folder, or Parquet file",
+            key="data_path_widget",
+        )
+        load_clicked = st.button("Load Data", use_container_width=True)
+
+        if load_clicked or st.session_state.get("needs_initial_load", False):
+            st.session_state["needs_initial_load"] = False
+            target_path = data_path_input.strip()
+            if target_path:
+                st.session_state["data_path"] = target_path
+                try:
+                    with st.spinner("Loading data..."):
+                        results, format_desc = load_data(target_path)
+                    st.session_state["results"] = results
+                    st.session_state["format_desc"] = format_desc
+                    st.session_state["load_error"] = None
+                    st.session_state["current_index"] = 0
+                    st.session_state["jump_input"] = 1
+                except Exception as e:
+                    st.session_state["load_error"] = str(e)
+                    st.session_state["results"] = {}
+                    st.session_state["format_desc"] = ""
+
+        if st.session_state.get("load_error"):
+            st.error(st.session_state["load_error"])
+        elif st.session_state.get("format_desc"):
+            st.success(f"Format: {st.session_state['format_desc']}")
+
+        st.divider()
+
+
+def _render_sidebar_navigation(results: dict[str, dict[str, Any]]) -> str:
+    """Render sidebar navigation controls and return selected sample ID."""
+    all_sample_ids = list(results.keys())
 
     with st.sidebar:
-        st.header("Sample Selection")
-        st.info(f"Found {sample_count} samples")
+        st.header("Sample Navigation")
 
-        # Navigation buttons
-        col1, col2, col3 = st.columns([1, 1, 1])
+        def on_phi_filter_change():
+            st.session_state.current_index = 0
+            st.session_state.jump_input = 1
+
+        only_with_phi = st.checkbox(
+            "Only notes with PHI",
+            value=False,
+            key="only_with_phi_checkbox",
+            on_change=on_phi_filter_change,
+        )
+
+        if only_with_phi:
+            active_samples = [
+                sid
+                for sid in all_sample_ids
+                if len(results[sid].get("original_phi", [])) > 0 or len(results[sid].get("modified_phi", [])) > 0
+            ]
+        else:
+            active_samples = all_sample_ids
+
+        total_samples = len(active_samples)
+        if total_samples == 0:
+            st.warning("No notes match the 'Only notes with PHI' filter.")
+            st.stop()
+
+        st.session_state.current_index = max(0, min(st.session_state.current_index, total_samples - 1))
+
+        def step_prev(total: int):
+            st.session_state.current_index = (st.session_state.current_index - 1) % total
+            st.session_state.jump_input = st.session_state.current_index + 1
+
+        def step_next(total: int):
+            st.session_state.current_index = (st.session_state.current_index + 1) % total
+            st.session_state.jump_input = st.session_state.current_index + 1
+
+        def on_jump():
+            st.session_state.current_index = max(0, min(int(st.session_state.jump_input) - 1, total_samples - 1))
+
+        def on_search(samples: list[str]):
+            query = st.session_state.search_input.strip()
+            if query:
+                for idx, sid in enumerate(samples):
+                    if query.lower() in sid.lower():
+                        st.session_state.current_index = idx
+                        st.session_state.jump_input = idx + 1
+                        return
+
+        col1, col2, col3 = st.columns([1, 2, 1])
         with col1:
-            if st.button("< Prev", key="nav_prev", use_container_width=True):
-                new_index = (st.session_state["sample_index"] - 1) % len(sample_ids)
-                st.session_state["sample_index"] = new_index
-                st.rerun()
+            st.button("< Prev", on_click=step_prev, args=(total_samples,), use_container_width=True)
         with col2:
             st.markdown(
-                f"<div style='text-align: center; padding-top: 5px;'>{st.session_state['sample_index'] + 1}/{len(sample_ids)}</div>",
+                f"<div style='text-align: center; padding-top: 6px;'><b>Note {st.session_state.current_index + 1} / {total_samples}</b></div>",
                 unsafe_allow_html=True,
             )
         with col3:
-            if st.button("Next >", key="nav_next", use_container_width=True):
-                new_index = (st.session_state["sample_index"] + 1) % len(sample_ids)
-                st.session_state["sample_index"] = new_index
-                st.rerun()
+            st.button("Next >", on_click=step_next, args=(total_samples,), use_container_width=True)
 
-        # Get current sample based on index
-        current_index = st.session_state["sample_index"]
-        selected_sample = sample_ids[current_index]
-
-        # Dropdown to select specific sample - use on_change callback
-        st.selectbox(
-            "Choose a sample:",
-            sample_ids,
-            index=current_index,
-            format_func=lambda x: f"{x}",
-            key="sample_selector",
-            on_change=on_sample_change,
+        st.session_state["jump_input"] = st.session_state.current_index + 1
+        st.number_input(
+            "Jump to note #:",
+            min_value=1,
+            max_value=total_samples,
+            key="jump_input",
+            on_change=on_jump,
+        )
+        st.text_input(
+            "Find by Note ID / Hash:",
+            key="search_input",
+            on_change=on_search,
+            args=(active_samples,),
         )
 
-    # Get current sample data based on mode
-    original_text, original_phi, anonymized_text, anonymized_phi = get_sample_data(
-        viz_mode, analyzer_results, anonymized_results, selected_sample
+        selected_sample = active_samples[st.session_state.current_index]
+        st.caption(f"**Current Note ID:** `{selected_sample}`")
+        st.divider()
+
+    return selected_sample
+
+
+def _render_sidebar_filters(
+    results: dict[str, dict[str, Any]],
+    selected_sample: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Render sidebar filters and return filtered original and modified entities."""
+    with st.sidebar:
+        st.header("PHI Filters")
+        available_entity_types = sorted(
+            {
+                ent["entity_type"]
+                for sample in results.values()
+                for ent in sample.get("original_phi", []) + sample.get("modified_phi", [])
+                if ent.get("entity_type")
+            }
+        )
+        available_recognizers = sorted(
+            {
+                get_recognizer_name(ent)
+                for sample in results.values()
+                for ent in sample.get("original_phi", [])
+                if get_recognizer_name(ent) != "-"
+            }
+        )
+
+        selected_entity_types = ["All"]
+        if available_entity_types:
+            selected_entity_types = st.multiselect(
+                "Entity Types:",
+                options=["All", *available_entity_types],
+                default=["All"],
+                key="filter_entity_types",
+            )
+            if not selected_entity_types:
+                selected_entity_types = ["All"]
+
+        selected_recognizers = ["All"]
+        if available_recognizers:
+            selected_recognizers = st.multiselect(
+                "Recognizers:",
+                options=["All", *available_recognizers],
+                default=["All"],
+                key="filter_recognizers",
+            )
+            if not selected_recognizers:
+                selected_recognizers = ["All"]
+
+    sample_data = results[selected_sample]
+    original_phi = sample_data.get("original_phi", [])
+    modified_phi = sample_data.get("modified_phi", [])
+
+    filtered_original_phi = filter_entities(original_phi, selected_recognizers, selected_entity_types)
+    filtered_modified_phi = filter_entities(modified_phi, None, selected_entity_types)
+
+    with st.sidebar:
+        st.info(f"Showing {len(filtered_original_phi)} of {len(original_phi)} detected entities in active note")
+
+    return filtered_original_phi, filtered_modified_phi
+
+
+def _render_comparison_view(
+    original_text: str,
+    modified_text: str,
+    filtered_original_phi: list[dict[str, Any]],
+    filtered_modified_phi: list[dict[str, Any]],
+) -> None:
+    """Render side-by-side or single stage displacy view."""
+    if original_text and modified_text:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Original Note (Detected PHI)")
+            doc = convert_to_displacy_format(original_text, filtered_original_phi)
+            st.html(displacy.render(doc, style="ent", manual=True, options={"colors": COLORS}))
+        with col2:
+            st.subheader("De-identified / Anonymized Note")
+            doc = convert_to_displacy_format(modified_text, filtered_modified_phi)
+            st.html(displacy.render(doc, style="ent", manual=True, options={"colors": COLORS}))
+    elif original_text:
+        st.subheader("Original Note (Detected PHI)")
+        doc = convert_to_displacy_format(original_text, filtered_original_phi)
+        st.html(displacy.render(doc, style="ent", manual=True, options={"colors": COLORS}))
+    elif modified_text:
+        st.subheader("De-identified / Anonymized Note")
+        doc = convert_to_displacy_format(modified_text, filtered_modified_phi)
+        st.html(displacy.render(doc, style="ent", manual=True, options={"colors": COLORS}))
+    else:
+        st.warning("No text content available for this note.")
+
+
+def _render_phi_table(
+    original_text: str,
+    original_phi: list[dict[str, Any]],
+    filtered_original_phi: list[dict[str, Any]],
+) -> None:
+    """Render tabular breakdown of detected PHI entities."""
+    st.divider()
+    st.subheader("Detected PHI in this Note")
+    if filtered_original_phi:
+        table_rows = []
+        for ent in filtered_original_phi:
+            start = ent.get("start", 0)
+            end = ent.get("end", 0)
+            excerpt = (
+                original_text[start:end]
+                if (isinstance(start, int) and isinstance(end, int) and 0 <= start <= end <= len(original_text))
+                else ent.get("text", "")
+            )
+            rec_name = get_recognizer_name(ent)
+            score = ent.get("score")
+            score_str = f"{score:.2f}" if isinstance(score, (int, float)) else "-"
+            table_rows.append(
+                {
+                    "Entity Type": ent.get("entity_type", ""),
+                    "Found Text": excerpt,
+                    "Range": f"{start}-{end}",
+                    "Recognizer": rec_name,
+                    "Score": score_str,
+                }
+            )
+        st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+    elif not original_phi:
+        st.info("No PHI detected in this note.")
+    else:
+        st.info("No PHI matching the selected filters.")
+
+
+def main() -> None:
+    """Streamlit main entrypoint for the PHI visualizer."""
+    st.set_page_config(page_title="TIDE 2.0 - PHI Visualizer", layout="wide")
+
+    st.title("TIDE 2.0 - PHI Visualizer")
+    st.markdown("**Inspect clinical notes before and after de-identification side by side**")
+    st.divider()
+
+    if "current_index" not in st.session_state:
+        st.session_state["current_index"] = 0
+    if "jump_input" not in st.session_state:
+        st.session_state["jump_input"] = 1
+
+    if "initialized" not in st.session_state:
+        st.session_state["initialized"] = True
+        cli_path = parse_cli_args()
+        initial_path = cli_path or "./data/output"
+        st.session_state["data_path"] = initial_path
+        if initial_path and Path(initial_path).exists():
+            st.session_state["needs_initial_load"] = True
+
+    _render_sidebar_data_location()
+
+    results: dict[str, dict[str, Any]] = st.session_state.get("results", {})
+    if not results:
+        st.info("Please enter a valid path to pipeline output or JSON results in the sidebar and click **Load Data**.")
+        return
+
+    selected_sample = _render_sidebar_navigation(results)
+    filtered_orig_phi, filtered_mod_phi = _render_sidebar_filters(results, selected_sample)
+
+    sample_data = results[selected_sample]
+    orig_text = sample_data.get("original_text", "")
+    orig_phi = sample_data.get("original_phi", [])
+    mod_text = sample_data.get("modified_text", "")
+
+    st.caption(
+        f"Viewing note **{st.session_state.current_index + 1} of {len(results)}** | Note ID: `{selected_sample}`"
     )
 
-    # Get all recognizers from current sample (only for recognizer modes)
-    all_recognizers = []
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY] and original_phi:
-        all_recognizers = get_recognizers_from_entities(original_phi)
+    _render_comparison_view(orig_text, mod_text, filtered_orig_phi, filtered_mod_phi)
+    _render_phi_table(orig_text, orig_phi, filtered_orig_phi)
 
-    # Recognizer selection (only show for recognizer modes)
-    selected_recognizers = ["All"]
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-        with st.sidebar:
-            st.header("Recognizer Filter")
-
-            if all_recognizers:
-                st.info(f"Available: {', '.join(all_recognizers)}")
-
-                recognizer_options = ["All"] + all_recognizers
-                selected_recognizers = st.multiselect("Select recognizers:", recognizer_options, default=["All"])
-
-                if not selected_recognizers:
-                    selected_recognizers = ["All"]
-            else:
-                st.warning("No recognizers found in this sample")
-
-    # Filter entities by selected recognizers (only for original text)
-    filtered_original_phi = filter_entities_by_recognizers(original_phi, selected_recognizers)
-
-    # Display statistics
-    if viz_mode in [VisualizationMode.BOTH, VisualizationMode.RECOGNIZER_ONLY]:
-        with st.sidebar:
-            st.divider()
-            total_entities = len(original_phi)
-            filtered_entities = len(filtered_original_phi)
-
-            if "All" not in selected_recognizers:
-                st.success(f"Showing {filtered_entities} of {total_entities} entities")
-            else:
-                st.success(f"Showing all {total_entities} entities")
-
-    # Main display based on visualization mode
-    if viz_mode == VisualizationMode.BOTH:
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Original Text (Filtered by Recognizer)")
-            original_doc = convert_to_displacy_format(original_text, filtered_original_phi)
-            original_html = displacy.render(original_doc, style="ent", manual=True, options={"colors": COLORS})
-            st.html(original_html)
-
-        with col2:
-            st.subheader("Anonymized Text (All Entities)")
-            anonymized_doc = convert_to_displacy_format(anonymized_text, anonymized_phi)
-            anonymized_html = displacy.render(anonymized_doc, style="ent", manual=True, options={"colors": COLORS})
-            st.html(anonymized_html)
-
-    elif viz_mode == VisualizationMode.RECOGNIZER_ONLY:
-        st.subheader("Original Text with Recognized Entities")
-        original_doc = convert_to_displacy_format(original_text, filtered_original_phi)
-        original_html = displacy.render(original_doc, style="ent", manual=True, options={"colors": COLORS})
-        st.html(original_html)
-
-    elif viz_mode == VisualizationMode.ANONYMIZER_ONLY:
-        st.subheader("Anonymized Text")
-        anonymized_doc = convert_to_displacy_format(anonymized_text, anonymized_phi)
-        anonymized_html = displacy.render(anonymized_doc, style="ent", manual=True, options={"colors": COLORS})
-        st.html(anonymized_html)
-
-    # Simple legend
     st.divider()
     st.subheader("Entity Types Legend")
-
-    all_entity_types = collect_entity_types(viz_mode, filtered_original_phi, anonymized_phi)
+    all_entity_types = collect_entity_types(filtered_orig_phi, filtered_mod_phi)
     legend = build_legend_html(all_entity_types)
     if legend:
         st.html(legend)
     else:
-        st.info("No entities to display")
+        st.caption("No entities present.")
 
 
 if __name__ == "__main__":
