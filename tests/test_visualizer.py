@@ -314,6 +314,8 @@ def test_load_data_json_directory(tmp_path: Path):
     rec_json_dir.mkdir()
     rec_data = {
         "key": "sample_alpha",
+        "row_id": "original/note/123",
+        "text_hash": "hash_xyz",
         "value": "Note with John",
         "recognizer_results": [{"entity_type": "PERSON", "start": 10, "end": 14}],
     }
@@ -322,6 +324,9 @@ def test_load_data_json_directory(tmp_path: Path):
     anon_json_dir = out_dir / "cli_anonymizer_json"
     anon_json_dir.mkdir()
     anon_data = {
+        "key": "sample_alpha",
+        "row_id": "original/note/123",
+        "text_hash": "hash_xyz",
         "text": "Note with [NAME]",
         "items": [{"entity_type": "PERSON", "start": 10, "end": 16}],
     }
@@ -330,6 +335,8 @@ def test_load_data_json_directory(tmp_path: Path):
     results, desc = load_data(out_dir)
     assert desc == "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
     assert "sample_alpha" in results
+    assert results["sample_alpha"]["row_id"] == "original/note/123"
+    assert results["sample_alpha"]["text_hash"] == "hash_xyz"
     assert results["sample_alpha"]["original_text"] == "Note with John"
     assert results["sample_alpha"]["modified_text"] == "Note with [NAME]"
 
@@ -378,7 +385,8 @@ def test_load_data_loose_json_files(tmp_path: Path):
 def test_load_data_single_json_file(tmp_path: Path):
     """Verify loading an individual JSON file."""
     data = {
-        "key": "single_sample",
+        "key": "hashed_key",
+        "row_id": "original/sample/1",
         "value": "Original note",
         "recognizer_results": [{"entity_type": "DATE_TIME", "start": 0, "end": 4}],
     }
@@ -387,8 +395,9 @@ def test_load_data_single_json_file(tmp_path: Path):
 
     results, desc = load_data(file_path)
     assert desc == "Single JSON File"
-    assert "single_sample" in results
-    assert results["single_sample"]["original_text"] == "Original note"
+    assert "original/sample/1" in results
+    assert results["original/sample/1"]["row_id"] == "original/sample/1"
+    assert results["original/sample/1"]["original_text"] == "Original note"
 
 
 def test_load_data_single_json_anonymizer_disambiguation(tmp_path: Path):
