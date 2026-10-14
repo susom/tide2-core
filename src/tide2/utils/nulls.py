@@ -35,8 +35,6 @@ def is_null(value: Any) -> bool:
             res = pd.isna(value)
             if isinstance(res, (bool, np.bool_)):
                 return bool(res)
-    if str(value) == "<NA>":
-        return True
     with contextlib.suppress(TypeError, ValueError):
         if isinstance(value, float) and math.isnan(value):
             return True
