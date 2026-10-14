@@ -2587,13 +2587,18 @@ class LocalJobRunner:
         ctx = ray.data.DataContext.get_current()
         sink_dir = anonymizer_output_path
         sink_dir.mkdir(parents=True, exist_ok=True)
-        # Resolve the single checkpoint id_column for streamed execution and strip _id_column
-        # from all stage kwargs so it does not leak into worker constructors (e.g. LlmRecognizerWorker).
+        # Strip and validate _id_column from every stage kwargs dict so they do not leak
+        # into worker constructors (e.g. LlmRecognizerWorker) and cannot pass invalid names.
         a_id = anonymizer_kwargs.pop("_id_column", None)
         r_id = recognizer_kwargs.pop("_id_column", None)
         t_id = transformer_kwargs.pop("_id_column", None)
         llm_id = llm_recognizer_kwargs.pop("_id_column", None)
-        streamed_id = a_id or r_id or t_id or llm_id or _id_column
+        for stage_val in (a_id, r_id, t_id, llm_id):
+            if stage_val is not None:
+                _validate_id_column(stage_val)
+        # In streamed mode, the anonymizer is the sole checkpointed sink; select the
+        # anonymizer override if supplied, otherwise the pipeline-level _id_column.
+        streamed_id = a_id if a_id is not None else _id_column
         _validate_id_column(streamed_id)
         _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=sink_dir, id_column=streamed_id)
 

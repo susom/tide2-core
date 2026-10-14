@@ -439,6 +439,103 @@ class TestStreamedPipelineIdColumnHandling:
         # Anonymizer override takes precedence for the sink
         assert captured_checkpoint["id_column"] == "text_hash"
 
+    def test_streamed_pipeline_upstream_override_does_not_affect_sink(self, monkeypatch, tmp_path):
+        runner = _make_runner(monkeypatch)
+        monkeypatch.setattr(lr, "configure_data_context", lambda **_kwargs: None)
+        monkeypatch.setattr(lr, "check_streamed_admission", lambda _mins, cpus: cpus)
+        monkeypatch.setattr(lr, "_streamed_source_columns", lambda _contracts: ["note_text", "row_id", "text_hash"])
+
+        fake_ds = MagicMock(name="dataset")
+        fake_ds.map_batches.return_value = fake_ds
+        monkeypatch.setattr(lr, "_read_stage_source", lambda *_a, **_k: fake_ds)
+        monkeypatch.setattr(LocalJobRunner, "build_llm_recognizer_stage", lambda *_a, **_k: fake_ds)
+        monkeypatch.setattr(LocalJobRunner, "build_anonymizer_stage", lambda *_a, **_k: fake_ds)
+        monkeypatch.setattr(lr, "_check_streamed_row_parity", lambda *_a, **_k: None)
+        monkeypatch.setattr(lr, "list_parquet_files", lambda *_a, **_k: [])
+
+        captured_checkpoint: dict = {}
+
+        def fake_configure_checkpoint(ctx, enable, output_dir, id_column):
+            captured_checkpoint["id_column"] = id_column
+
+        monkeypatch.setattr(lr, "_configure_checkpoint", fake_configure_checkpoint)
+
+        info = PipelineInputInfo(
+            columns={"note_text", "row_id", "text_hash"},
+            actual_to_lower={"note_text": "note_text", "row_id": "row_id", "text_hash": "text_hash"},
+            lower_to_actual={"note_text": "note_text", "row_id": "row_id", "text_hash": "text_hash"},
+            num_rows=1,
+            has_row_id=True,
+            has_text_hash=True,
+            has_patient_id=False,
+        )
+
+        recognizer_kw = {"num_actors": 1, "worker_num_cpus": 1.0, "_id_column": "text_hash"}
+        anonymizer_kw = {"num_actors": 1, "worker_num_cpus": 1.0}
+
+        out_dir = tmp_path / "streamed_out2"
+        out_dir.mkdir()
+
+        runner._run_pipeline_streamed(
+            input_files=["in.parquet"],
+            input_info=info,
+            output_path=Path(out_dir),
+            model_name="test-model",
+            salt_hex="00" * 32,
+            key_hex="11" * 32,
+            transformer_kwargs={},
+            recognizer_kwargs=recognizer_kw,
+            anonymizer_kwargs=anonymizer_kw,
+            llm_recognizer_mode="only",
+            llm_recognizer_kwargs={},
+            start_time=0.0,
+            _id_column="row_id",
+        )
+
+        assert "_id_column" not in recognizer_kw
+        # Upstream recognizer override does not override anonymizer sink; row_id from pipeline stands
+        assert captured_checkpoint["id_column"] == "row_id"
+
+    def test_streamed_pipeline_validates_all_stage_overrides(self, monkeypatch, tmp_path):
+        runner = _make_runner(monkeypatch)
+        monkeypatch.setattr(lr, "configure_data_context", lambda **_kwargs: None)
+        monkeypatch.setattr(lr, "check_streamed_admission", lambda _mins, cpus: cpus)
+        monkeypatch.setattr(lr, "_streamed_source_columns", lambda _contracts: ["note_text", "row_id", "text_hash"])
+        fake_ds = MagicMock(name="dataset")
+        monkeypatch.setattr(lr, "_read_stage_source", lambda *_a, **_k: fake_ds)
+        monkeypatch.setattr(LocalJobRunner, "build_llm_recognizer_stage", lambda *_a, **_k: fake_ds)
+        monkeypatch.setattr(LocalJobRunner, "build_anonymizer_stage", lambda *_a, **_k: fake_ds)
+
+        info = PipelineInputInfo(
+            columns={"note_text", "row_id", "text_hash"},
+            actual_to_lower={"note_text": "note_text", "row_id": "row_id", "text_hash": "text_hash"},
+            lower_to_actual={"note_text": "note_text", "row_id": "row_id", "text_hash": "text_hash"},
+            num_rows=1,
+            has_row_id=True,
+            has_text_hash=True,
+            has_patient_id=False,
+        )
+
+        out_dir = tmp_path / "streamed_out3"
+        out_dir.mkdir()
+
+        with pytest.raises(ValueError, match=r"Invalid _id_column: 'bad_stage_id'"):
+            runner._run_pipeline_streamed(
+                input_files=["in.parquet"],
+                input_info=info,
+                output_path=Path(out_dir),
+                model_name="test-model",
+                salt_hex="00" * 32,
+                key_hex="11" * 32,
+                transformer_kwargs={},
+                recognizer_kwargs={"_id_column": "bad_stage_id"},
+                anonymizer_kwargs={"_id_column": "row_id"},
+                llm_recognizer_mode="only",
+                llm_recognizer_kwargs={},
+                start_time=0.0,
+                _id_column="row_id",
+            )
+
 
 class TestSimpleRunnersIdColumn:
     """Simple wrapper functions default to 'row_id' and accept _id_column."""
