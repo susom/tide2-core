@@ -553,11 +553,10 @@ def _load_pipeline_recognizer_stage(
     rec_df = _scan_dataset_to_pandas(recognizer_dir, RECOGNIZER_COLUMNS, max_notes=max_notes)
 
     text_col = next((c for c in ("note_text", "original_note_text", "text", "value") if c in rec_df.columns), None)
-    has_text = text_col is not None and rec_df[text_col].dropna().any()
 
     text_map_hash: dict[str, str] = {}
     text_map_id: dict[str, str] = {}
-    if not has_text and transformer_dir:
+    if transformer_dir:
         trans_df = _scan_dataset_to_pandas(transformer_dir, TRANSFORMER_COLUMNS, max_notes=max_notes)
         t_col = next((c for c in ("note_text", "text", "value") if c in trans_df.columns), None)
         if t_col:
@@ -584,7 +583,7 @@ def _load_pipeline_recognizer_stage(
             sample_id = f"sample_{idx}"
 
         text_val = ""
-        if text_col and pd.notna(row.get(text_col)):
+        if text_col and pd.notna(row.get(text_col)) and str(row.get(text_col)).strip():
             text_val = str(row[text_col])
         elif "row_id" in rec_df.columns and str(row.get("row_id")) in text_map_id:
             text_val = text_map_id[str(row["row_id"])]

@@ -218,6 +218,35 @@ def test_load_data_pipeline_output_dir(tmp_path: Path):
     assert len(results["p1"]["modified_phi"]) == 1
 
 
+def test_load_pipeline_output_recovers_text_from_transformer_partial_null(tmp_path: Path):
+    """Verify that note_text is recovered per-row from transformer when recognizer has mixed populated/null text."""
+    out_dir = tmp_path / "pipeline_run_partial"
+    out_dir.mkdir()
+
+    trans_dir = out_dir / "transformer_output"
+    trans_dir.mkdir()
+    pd.DataFrame(
+        [
+            {"row_id": "r1", "text_hash": "th1", "note_text": "Transformer Text 1"},
+            {"row_id": "r2", "text_hash": "th2", "note_text": "Transformer Text 2"},
+        ]
+    ).to_parquet(trans_dir / "part-0.parquet")
+
+    rec_dir = out_dir / "recognizer_output"
+    rec_dir.mkdir()
+    pd.DataFrame(
+        [
+            {"row_id": "r1", "text_hash": "th1", "note_text": "Recognizer Text 1", "recognizer_results_json": "[]"},
+            {"row_id": "r2", "text_hash": "th2", "note_text": None, "recognizer_results_json": "[]"},
+        ]
+    ).to_parquet(rec_dir / "part-0.parquet")
+
+    results = load_pipeline_output_dir(out_dir)
+    assert "r1" in results and "r2" in results
+    assert results["r1"]["original_text"] == "Recognizer Text 1"
+    assert results["r2"]["original_text"] == "Transformer Text 2"
+
+
 def test_load_pipeline_output_recovers_text_from_transformer(tmp_path: Path):
     """Verify that note_text is recovered from transformer_output if missing in recognizer."""
     out_dir = tmp_path / "pipeline_run_recovering"
