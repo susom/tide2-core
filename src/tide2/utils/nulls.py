@@ -17,9 +17,9 @@ import numpy as np
 def is_null(value: Any) -> bool:
     """Check if a scalar value is null/NaN.
 
-    Handles ``None``, Python and numpy ``nan``, and pandas ``NA``. Non-scalar
-    values (lists, arrays, dicts) are never considered null, so a column of
-    list-valued cells can be passed through safely.
+    Handles ``None``, Python and numpy ``nan``, pandas ``NA``, and literal
+    ``"<NA>"`` strings. Non-scalar values (lists, arrays, dicts) are never
+    considered null, so a column of list-valued cells can be passed through safely.
 
     Args:
         value: The scalar value to test.
@@ -29,6 +29,10 @@ def is_null(value: Any) -> bool:
     """
     if value is None:
         return True
+    if isinstance(value, (list, dict, set, tuple, np.ndarray)):
+        return False
+    if str(value).strip() == "<NA>":
+        return True
     with contextlib.suppress(Exception):
         pd = sys.modules.get("pandas")
         if pd is not None:
@@ -36,9 +40,9 @@ def is_null(value: Any) -> bool:
             if isinstance(res, (bool, np.bool_)):
                 return bool(res)
     with contextlib.suppress(TypeError, ValueError):
-        if isinstance(value, float) and math.isnan(value):
-            return True
-        if isinstance(value, (np.floating, np.integer)) and np.isnan(value):
+        if (isinstance(value, float) and math.isnan(value)) or (
+            isinstance(value, (np.floating, np.integer)) and np.isnan(value)
+        ):
             return True
     return False
 
