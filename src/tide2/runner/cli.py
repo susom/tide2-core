@@ -56,6 +56,11 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     dry_run = getattr(args, "dry_run", False)
 
+    id_col = getattr(args, "id_column", None) or getattr(args, "_id_column", "row_id")
+    if id_col not in ("row_id", "text_hash"):
+        print(f"Error: --id-column must be 'row_id' or 'text_hash' (got {id_col!r})")
+        sys.exit(1)
+
     if no_prog is not None:
         configure_data_context(no_progress_timeout_s=no_prog)
 
@@ -448,7 +453,9 @@ Examples:
     run_p.add_argument(
         "--id-column",
         default="row_id",
-        help="Column to use as primary key for Ray Data row-level checkpointing (default: row_id)",
+        choices=["row_id", "text_hash"],
+        help="Column to use as primary key for Ray Data row-level checkpointing: "
+        "'row_id' or 'text_hash' (default: row_id)",
     )
     run_p.add_argument("--model", help="Model name (required for transformer jobs)")
     run_p.add_argument("--model-path", help="Explicit local path to model (transformer jobs)")

@@ -164,6 +164,7 @@ def _configure_checkpoint(
     fractional-CPU knobs + ``enable=False`` are the validated fix.
     """
     if enable:
+        _validate_id_column(id_column)
         if isinstance(output_dir, Path):
             checkpoint_dir = str(output_dir.parent / (output_dir.name + "_ray_checkpoint"))
         else:
@@ -175,6 +176,15 @@ def _configure_checkpoint(
         )
     else:
         ctx.checkpoint_config = None
+
+
+SUPPORTED_ID_COLUMNS: tuple[str, ...] = ("row_id", "text_hash")
+
+
+def _validate_id_column(id_column: str) -> None:
+    """Validate that id_column is one of the supported checkpoint primary keys."""
+    if id_column not in SUPPORTED_ID_COLUMNS:
+        raise ValueError(f"Invalid _id_column: {id_column!r}. Must be one of {SUPPORTED_ID_COLUMNS}.")
 
 
 DEFAULT_ROW_ID_PATIENT_ID = "None"
@@ -1077,6 +1087,7 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
+        _validate_id_column(_id_column)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1280,6 +1291,7 @@ class LocalJobRunner:
         Returns:
             Processing statistics dictionary
         """
+        _validate_id_column(_id_column)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1504,6 +1516,7 @@ class LocalJobRunner:
         """
         from tide2.actors import create_anonymizer_actor_class
 
+        _validate_id_column(_id_column)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1657,7 +1670,7 @@ class LocalJobRunner:
         finally:
             shutdown.restore_handlers()
 
-    def run_transformer(
+    def run_transformer(  # noqa: PLR0915
         self,
         input_path: str | list[str],
         output_path: str,
@@ -1787,6 +1800,7 @@ class LocalJobRunner:
         from tide2.actors import create_transformer_actor
         from tide2.transformers.config import load_model_config
 
+        _validate_id_column(_id_column)
         self._init_ray()
         start_time = time.time()
 
@@ -2067,6 +2081,7 @@ class LocalJobRunner:
             "input_rows", "output_rows", "dropped_rows", "output_dir",
             "operator_stats"}``. Both carry ``execution_mode``.
         """
+        _validate_id_column(_id_column)
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)
@@ -2572,7 +2587,14 @@ class LocalJobRunner:
         ctx = ray.data.DataContext.get_current()
         sink_dir = anonymizer_output_path
         sink_dir.mkdir(parents=True, exist_ok=True)
-        streamed_id = (anonymizer_kwargs or {}).get("_id_column", _id_column)
+        # Resolve the single checkpoint id_column for streamed execution and strip _id_column
+        # from all stage kwargs so it does not leak into worker constructors (e.g. LlmRecognizerWorker).
+        a_id = anonymizer_kwargs.pop("_id_column", None)
+        r_id = recognizer_kwargs.pop("_id_column", None)
+        t_id = transformer_kwargs.pop("_id_column", None)
+        llm_id = llm_recognizer_kwargs.pop("_id_column", None)
+        streamed_id = a_id or r_id or t_id or llm_id or _id_column
+        _validate_id_column(streamed_id)
         _configure_checkpoint(ctx, enable=enable_checkpoint, output_dir=sink_dir, id_column=streamed_id)
 
         input_rows = input_info.num_rows
