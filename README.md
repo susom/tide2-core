@@ -201,19 +201,8 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --read-cpus 0.25 --write-cpus 0.25 \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 
-# Generate visualizer JSON files from a finished pipeline run
-tide2-runner visualizer-json -o ./data/output
-```
-
-### Visualizer JSON Generation (Python API)
-
-After running the pipeline, generate JSON files for `tide2-visualizer`:
-
-```python
-from tide2.runner.utils import write_visualizer_json
-
-counts = write_visualizer_json(output_dir="./data/output")
-print(f"Generated {counts.get('recognizer_json', 0):,} recognizer and {counts.get('anonymizer_json', 0):,} anonymizer JSON files")
+# Inspect pipeline output interactively in the Streamlit visualizer
+tide2-visualizer ./data/output
 ```
 
 #### Execution modes: `discrete` (default) vs `streamed`
