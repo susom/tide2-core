@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from tide2.cli.main_visualizer import main as visualizer_cli_main
@@ -20,6 +21,7 @@ from tide2.cli.unified_interface import load_data
 from tide2.cli.unified_interface import load_pipeline_output_dir
 from tide2.cli.unified_interface import parse_cli_args
 from tide2.cli.unified_interface import parse_entities
+from tide2.runner.local_runner import add_row_id
 
 
 def test_parse_entities():
@@ -362,6 +364,131 @@ def test_load_pipeline_output_duplicate_hashes_differing_order(tmp_path: Path):
     assert results["patient_B_note"]["modified_text"] == "Anon Patient B"
 
 
+def test_load_pipeline_output_max_notes_pairs_stages_in_differing_order(tmp_path: Path):
+    """Verify max_notes=1 yields one paired comparison when stage row order differs."""
+    out_dir = tmp_path / "pipeline_run_order"
+    out_dir.mkdir()
+    (out_dir / "recognizer_output").mkdir()
+    (out_dir / "anonymizer_output").mkdir()
+    pd.DataFrame(
+        [
+            {"row_id": "A", "text_hash": "ha", "note_text": "Note A", "recognizer_results_json": "[]"},
+            {"row_id": "B", "text_hash": "hb", "note_text": "Note B", "recognizer_results_json": "[]"},
+        ]
+    ).to_parquet(out_dir / "recognizer_output" / "part-0.parquet")
+    pd.DataFrame(
+        [
+            {"row_id": "B", "text_hash": "hb", "anonymized_note_text": "Anon B", "anonymizer_results_json": "[]"},
+            {"row_id": "A", "text_hash": "ha", "anonymized_note_text": "Anon A", "anonymizer_results_json": "[]"},
+        ]
+    ).to_parquet(out_dir / "anonymizer_output" / "part-0.parquet")
+
+    results = load_pipeline_output_dir(out_dir, max_notes=1)
+    assert list(results) == ["A"]
+    assert results["A"]["original_text"] == "Note A"
+    assert results["A"]["modified_text"] == "Anon A"
+
+
+def test_load_pipeline_output_derives_row_id_before_matching(tmp_path: Path):
+    """Verify stages without row_id, or with null row_id values, pair on the derived row_id under max_notes."""
+    out_dir = tmp_path / "pipeline_run_derived"
+    out_dir.mkdir()
+    (out_dir / "recognizer_output").mkdir()
+    (out_dir / "anonymizer_output").mkdir()
+    (out_dir / "transformer_output").mkdir()
+    keys = [("ha", "p1"), ("hb", "p2")]
+    derived = {h: add_row_id(pa.table({"text_hash": [h], "patient_id": [p]}))["row_id"].to_pylist()[0] for h, p in keys}
+
+    pd.DataFrame(
+        [
+            {"text_hash": "ha", "patient_id": "p1", "recognizer_results_json": "[]"},
+            {"text_hash": "hb", "patient_id": "p2", "recognizer_results_json": "[]"},
+        ]
+    ).to_parquet(out_dir / "recognizer_output" / "part-0.parquet")
+    pd.DataFrame(
+        [
+            {"text_hash": "hb", "patient_id": "p2", "note_text": "Note B"},
+            {"text_hash": "ha", "patient_id": "p1", "note_text": "Note A"},
+        ]
+    ).to_parquet(out_dir / "transformer_output" / "part-0.parquet")
+    pd.DataFrame(
+        [
+            {"row_id": None, "text_hash": "hb", "patient_id": "p2", "anonymized_note_text": "Anon B"},
+            {"row_id": None, "text_hash": "ha", "patient_id": "p1", "anonymized_note_text": "Anon A"},
+        ]
+    ).to_parquet(out_dir / "anonymizer_output" / "part-0.parquet")
+
+    results = load_pipeline_output_dir(out_dir, max_notes=1)
+    assert list(results) == [derived["ha"]]
+    assert results[derived["ha"]]["original_text"] == "Note A"
+    assert results[derived["ha"]]["modified_text"] == "Anon A"
+
+
+def test_load_pipeline_output_does_not_merge_patients_sharing_text_hash(tmp_path: Path):
+    """Verify rows with one text_hash but different patients stay separate when row_id must be derived."""
+    out_dir = tmp_path / "pipeline_run_patients"
+    out_dir.mkdir()
+    (out_dir / "recognizer_output").mkdir()
+    (out_dir / "anonymizer_output").mkdir()
+    pd.DataFrame(
+        [
+            {"text_hash": "same", "patient_id": "p1", "note_text": "Same", "recognizer_results_json": "[]"},
+            {"text_hash": "same", "patient_id": "p2", "note_text": "Same", "recognizer_results_json": "[]"},
+        ]
+    ).to_parquet(out_dir / "recognizer_output" / "part-0.parquet")
+    pd.DataFrame(
+        [
+            {"text_hash": "same", "patient_id": "p2", "anonymized_note_text": "Anon p2"},
+            {"text_hash": "same", "patient_id": "p1", "anonymized_note_text": "Anon p1"},
+        ]
+    ).to_parquet(out_dir / "anonymizer_output" / "part-0.parquet")
+
+    results = load_pipeline_output_dir(out_dir)
+    assert sorted(r["modified_text"] for r in results.values()) == ["Anon p1", "Anon p2"]
+    assert len(results) == 2
+
+
+def test_load_data_json_files_keep_filename_identity(tmp_path: Path):
+    """Verify distinct anonymizer/recognizer JSON files with identical content are not merged."""
+    anon_dir = tmp_path / "anon_only" / "cli_anonymizer_json"
+    anon_dir.mkdir(parents=True)
+    for name in ("note_a", "note_b"):
+        (anon_dir / f"{name}.json").write_text(json.dumps({"text": "Same [NAME]", "items": []}), encoding="utf-8")
+    results, _ = load_data(tmp_path / "anon_only")
+    assert sorted(results) == ["note_a", "note_b"]
+
+    rec_dir = tmp_path / "rec_only" / "cli_recognizer_json"
+    rec_dir.mkdir(parents=True)
+    for name in ("note_a", "note_b"):
+        (rec_dir / f"{name}.json").write_text(
+            json.dumps({"key": name, "value": "Same text", "recognizer_results": []}), encoding="utf-8"
+        )
+    results, _ = load_data(tmp_path / "rec_only")
+    assert sorted(results) == ["note_a", "note_b"]
+
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    for name in ("note_a", "note_b"):
+        (loose / f"{name}.json").write_text(json.dumps({"text": "Same [NAME]", "items": []}), encoding="utf-8")
+    results, _ = load_data(loose)
+    assert sorted(results) == ["note_a", "note_b"]
+
+
+def test_load_data_loose_json_text_with_recognizer_results_is_original(tmp_path: Path):
+    """Verify a loose JSON file with text and recognizer_results is shown as original text, not anonymized."""
+    data = {
+        "row_id": "r1",
+        "text": "John visited",
+        "recognizer_results": [{"entity_type": "PERSON", "start": 0, "end": 4}],
+    }
+    (tmp_path / "loose.json").write_text(json.dumps(data), encoding="utf-8")
+
+    results, _ = load_data(tmp_path)
+    assert results["r1"]["original_text"] == "John visited"
+    assert results["r1"]["modified_text"] == ""
+    assert len(results["r1"]["original_phi"]) == 1
+
+
 def test_load_data_json_directory(tmp_path: Path):
     """Verify loading from cli_recognizer_json and cli_anonymizer_json subdirectories."""
     out_dir = tmp_path / "json_run"
@@ -462,7 +589,6 @@ def test_load_data_single_json_file(tmp_path: Path):
 def test_load_data_single_json_anonymizer_disambiguation(tmp_path: Path):
     """Verify loading a single anonymizer JSON populates only modified_text and modified_phi."""
     data = {
-        "row_id": "anon_single",
         "text": "Patient [PERSON] visited on [DATE].",
         "items": [{"entity_type": "PERSON", "start": 8, "end": 16}],
     }

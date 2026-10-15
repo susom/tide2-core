@@ -16,7 +16,6 @@ Usage:
 """
 
 import contextlib
-import hashlib
 import json
 import os
 import sys
@@ -27,12 +26,10 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as pads
-import pyarrow.parquet as pq
 import streamlit as st
 from spacy import displacy
 
 from tide2.runner.local_runner import add_row_id
-from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.text_processing import compute_text_hash
 
 # Color mapping for entity types
@@ -300,18 +297,53 @@ def build_legend_html(entity_types: set[str]) -> str:
     return legend_html
 
 
-def _derive_row_id(
-    supplied_row_id: Any = None,
-    text_hash: str | None = None,
-    patient_id: Any = None,
-    text: str = "",
-) -> str:
-    """Return supplied row_id if present; otherwise derive it using the standard TIDE 2.0 formula."""
-    if supplied_row_id is not None and str(supplied_row_id).strip():
-        return str(supplied_row_id)
-    th = text_hash or compute_text_hash(text)
-    p_part = row_id_patient_part(patient_id)
-    return hashlib.sha256(f"{th}:{p_part}".encode()).hexdigest()
+def _json_row_id(data: dict[str, Any], fallback_id: str) -> str:
+    """Return a JSON record's identity: its non-blank ``row_id``, else the key/filename identity.
+
+    Anonymizer JSON carries only ``text`` and ``items``, and its filename is the note's identity,
+    so an id is never derived from the (replacement) text.
+    """
+    supplied = data.get("row_id")
+    if supplied is not None and str(supplied).strip():
+        return str(supplied)
+    return fallback_id
+
+
+def _parse_json_record(data: dict[str, Any], fallback_id: str) -> dict[str, Any]:
+    """Parse one recognizer and/or anonymizer JSON document into a unified record.
+
+    ``text`` is the anonymized text when the document has anonymizer fields (``items``,
+    ``modified_text``, ``anonymized_note_text``) and the original text otherwise.
+    """
+    has_rec = "recognizer_results" in data or "value" in data or "original_text" in data
+    has_anon = "items" in data or "modified_text" in data or "anonymized_note_text" in data
+
+    orig_text = ""
+    orig_phi: list[dict[str, Any]] = []
+    if has_rec:
+        orig_text = str(
+            data.get("value") or data.get("original_text") or (data.get("text") if not has_anon else "") or ""
+        )
+        orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
+
+    mod_text = ""
+    mod_phi: list[dict[str, Any]] = []
+    if has_anon:
+        mod_text = str(data.get("modified_text") or data.get("anonymized_note_text") or data.get("text") or "")
+        mod_phi = parse_entities(data.get("items") or data.get("modified_phi") or [])
+    elif not has_rec and "text" in data:
+        orig_text = str(data.get("text", ""))
+
+    row_id = _json_row_id(data, str(data.get("key") or data.get("text_hash") or fallback_id))
+    return {
+        "sample_id": row_id,
+        "row_id": row_id,
+        "text_hash": str(data["text_hash"]) if data.get("text_hash") else None,
+        "original_text": orig_text,
+        "original_phi": orig_phi,
+        "modified_text": mod_text,
+        "modified_phi": mod_phi,
+    }
 
 
 def load_analyzer_results(
@@ -344,7 +376,7 @@ def load_analyzer_results(
             sample_id = str(data.get("key") or file_path.stem)
             orig_text = str(data.get("value") or data.get("text") or data.get("original_text") or "")
             text_hash = str(data["text_hash"]) if data.get("text_hash") else None
-            row_id = _derive_row_id(data.get("row_id"), text_hash, data.get("patient_id"), orig_text)
+            row_id = _json_row_id(data, sample_id)
             orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
             results[sample_id] = {
                 "sample_id": sample_id,
@@ -395,7 +427,7 @@ def load_anonymized_results(
                 continue
             mod_text = str(data.get("text") or data.get("modified_text") or data.get("anonymized_note_text") or "")
             text_hash = str(data["text_hash"]) if data.get("text_hash") else None
-            row_id = _derive_row_id(data.get("row_id"), text_hash, data.get("patient_id"), mod_text)
+            row_id = _json_row_id(data, sample_id)
             mod_phi = parse_entities(
                 data.get("items") or data.get("modified_phi") or data.get("anonymizer_results") or []
             )
@@ -447,78 +479,59 @@ def _resolve_text_columns(df: pd.DataFrame) -> tuple[str | None, str | None, str
     return orig_text_col, rec_phi_col, anon_text_col, anon_phi_col
 
 
+_ID_TEXT_COLUMNS = (
+    "note_text",
+    "original_note_text",
+    "phi_note_text",
+    "text",
+    "value",
+    "anonymized_note_text",
+    "deid_note_text",
+    "anonymized_text",
+    "modified_text",
+)
+
+
 def _ensure_table_row_id(table: pa.Table) -> pa.Table:
-    """Ensure an Arrow Table has a non-null row_id column, using add_row_id from local_runner."""
-    if "row_id" in table.column_names and table["row_id"].null_count == 0:
-        return table
+    """Return the table with a complete string ``row_id``, derived with ``add_row_id`` where it is missing.
 
-    if "text_hash" not in table.column_names:
-        text_col = next(
-            (
-                c
-                for c in (
-                    "note_text",
-                    "original_note_text",
-                    "phi_note_text",
-                    "text",
-                    "value",
-                    "anonymized_note_text",
-                    "deid_note_text",
-                    "anonymized_text",
-                    "modified_text",
-                )
-                if c in table.column_names
-            ),
-            None,
-        )
-        if text_col:
-            hashes = [
-                compute_text_hash(str(t)) if t is not None else compute_text_hash("")
-                for t in table[text_col].to_pylist()
-            ]
-        else:
-            hashes = [compute_text_hash("") for _ in range(len(table))]
-        table = table.append_column("text_hash", pa.array(hashes, type=pa.string()))
-    elif table["text_hash"].null_count > 0:
-        text_col = next(
-            (
-                c
-                for c in (
-                    "note_text",
-                    "original_note_text",
-                    "phi_note_text",
-                    "text",
-                    "value",
-                    "anonymized_note_text",
-                    "deid_note_text",
-                    "anonymized_text",
-                    "modified_text",
-                )
-                if c in table.column_names
-            ),
-            None,
-        )
-        supplied_hashes = table["text_hash"].to_pylist()
-        texts = table[text_col].to_pylist() if text_col else [None] * len(table)
-        filled_hashes = [
-            h if h is not None else compute_text_hash(str(t) if t is not None else "")
-            for h, t in zip(supplied_hashes, texts, strict=True)
-        ]
-        table = table.set_column(
-            table.column_names.index("text_hash"), "text_hash", pa.array(filled_hashes, type=pa.string())
-        )
-
-    return add_row_id(table)
+    A missing ``text_hash`` is computed from the note text, as ``normalize_source_batch`` does, so the
+    derived ``row_id`` is the one the pipeline would have written for the same note and patient.
+    """
+    if "row_id" not in table.column_names or table["row_id"].null_count > 0:
+        has_hash = "text_hash" in table.column_names
+        if not has_hash or table["text_hash"].null_count > 0:
+            text_col = next((c for c in _ID_TEXT_COLUMNS if c in table.column_names), None)
+            texts = table[text_col].to_pylist() if text_col else [None] * len(table)
+            supplied = table["text_hash"].to_pylist() if has_hash else [None] * len(table)
+            hashes = pa.array(
+                [
+                    h if h is not None else compute_text_hash(t if t is not None else "")
+                    for h, t in zip(supplied, texts, strict=True)
+                ],
+                type=pa.string(),
+            )
+            if has_hash:
+                table = table.set_column(table.column_names.index("text_hash"), "text_hash", hashes)
+            else:
+                table = table.append_column("text_hash", hashes)
+        table = add_row_id(table)
+    return table.set_column(table.column_names.index("row_id"), "row_id", table["row_id"].cast(pa.string()))
 
 
-def _build_row_id_filter(stage_dir: Path, row_ids: list[str]) -> Any:
-    """Build pushdown filter on row_id if supported by the dataset schema."""
-    if not row_ids:
-        return None
-    with contextlib.suppress(Exception):
-        ds = pads.dataset(stage_dir)
-        if "row_id" in ds.schema.names:
-            return pads.field("row_id").isin(row_ids)
+def _stage_pushdown_filter(schema_names: set[str], target_ids: set[str], target_hashes: set[str]) -> Any:
+    """Build a scan predicate that keeps every row that could resolve to one of ``target_ids``.
+
+    Rows with a null ``row_id`` are kept because their id is derived after the scan, and a stage with
+    no ``row_id`` column is narrowed by ``text_hash`` (part of the derivation). The exact match on the
+    normalized ``row_id`` is applied after the scan.
+    """
+    if "row_id" in schema_names:
+        row_id = pads.field("row_id")
+        return row_id.cast(pa.string()).isin(sorted(target_ids)) | row_id.is_null()
+    if "text_hash" in schema_names and target_hashes:
+        text_hash = pads.field("text_hash")
+        return text_hash.isin(sorted(target_hashes)) | text_hash.is_null()
     return None
 
 
@@ -534,9 +547,6 @@ def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None)
     """
     if df.empty:
         return {}
-
-    if "row_id" not in df.columns or df["row_id"].isna().any():
-        df = _ensure_table_row_id(pa.Table.from_pandas(df)).to_pandas()
 
     if max_notes and len(df) > max_notes:
         df = df.iloc[:max_notes]
@@ -565,61 +575,49 @@ def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None)
     return results
 
 
-def _get_parquet_columns(file_or_dir: Path, target_cols: set[str]) -> list[str] | None:
-    """Return available columns matching target_cols from a parquet file or directory."""
-    with contextlib.suppress(Exception):
-        sample_file = file_or_dir if file_or_dir.is_file() else next(file_or_dir.glob("**/*.parquet"), None)
-        if sample_file:
-            names = set(pq.read_schema(sample_file).names)
-            selected = [c for c in names if c in target_cols]
-            return selected or None
-    return None
-
-
 def _scan_dataset_to_pandas(
     path: Path,
     target_cols: set[str],
     max_notes: int | None = None,
-    filter_expr: Any = None,
+    target_ids: set[str] | None = None,
+    target_hashes: set[str] | None = None,
 ) -> pd.DataFrame:
-    """Scan a parquet file or dataset directory bounded by max_notes and column projection.
+    """Scan a parquet file or dataset directory, one batch at a time, into a frame with a ``row_id`` column.
 
-    Reads only batches until max_notes rows are reached to avoid memory exhaustion on large runs.
+    Each batch gets its ``row_id`` completed (see ``_ensure_table_row_id``) before anything is counted, so
+    ``max_notes`` always limits normalized rows. With ``target_ids`` only rows that resolve to one of those
+    ids are kept (a stage matched to the rows chosen from another stage), and the scan ends once every
+    target has been found; ``target_hashes`` lets a stage without a ``row_id`` column push the match down.
     """
-    try:
-        ds = pads.dataset(path)
-    except Exception:
-        cols = _get_parquet_columns(path, target_cols)
-        df = pd.read_parquet(path, columns=cols)
-        if df.empty:
-            return pd.DataFrame()
-        table = _ensure_table_row_id(pa.Table.from_pandas(df))
-        df_out = table.to_pandas()
-        return df_out.iloc[:max_notes] if max_notes else df_out
-
+    ds = pads.dataset(path)
     schema_names = set(ds.schema.names)
     cols = [c for c in schema_names if c in target_cols]
     if not cols:
         return pd.DataFrame()
 
-    scanner = ds.scanner(columns=cols, filter=filter_expr)
-    batches = []
+    filter_expr = _stage_pushdown_filter(schema_names, target_ids, target_hashes or set()) if target_ids else None
+
+    tables: list[pa.Table] = []
     collected = 0
-
-    for batch in scanner.to_batches():
-        if max_notes is not None and collected + len(batch) > max_notes:
-            remaining = max_notes - collected
-            if remaining > 0:
-                batches.append(batch.slice(0, remaining))
+    found: set[str] = set()
+    for batch in ds.scanner(columns=cols, filter=filter_expr).to_batches():
+        table = _ensure_table_row_id(pa.Table.from_batches([batch]))
+        if target_ids:
+            table = table.filter(pa.array([row_id in target_ids for row_id in table["row_id"].to_pylist()], pa.bool_()))
+        if max_notes is not None:
+            table = table.slice(0, max_notes - collected)
+        if len(table) == 0:
+            continue
+        tables.append(table)
+        collected += len(table)
+        if max_notes is not None and collected >= max_notes:
             break
-        batches.append(batch)
-        collected += len(batch)
+        if target_ids:
+            found.update(table["row_id"].to_pylist())
+            if found >= target_ids:
+                break
 
-    if not batches:
-        return pd.DataFrame()
-
-    table = _ensure_table_row_id(pa.Table.from_batches(batches))
-    return table.to_pandas()
+    return pa.concat_tables(tables).to_pandas() if tables else pd.DataFrame()
 
 
 def load_from_parquet_file(
@@ -705,12 +703,12 @@ def _load_pipeline_recognizer_stage(
             "original_phi": phi_val,
         }
 
-    # Recover missing note_text from transformer stage pushed down to current recognizer keys
-    missing_ids = [rid for rid, item in rec_results.items() if not item["original_text"]]
+    # Recover missing note_text from the transformer stage, matched to the selected recognizer rows
+    missing_ids = {rid for rid, item in rec_results.items() if not item["original_text"]}
     if transformer_dir and missing_ids:
-        trans_filter = _build_row_id_filter(transformer_dir, missing_ids)
+        missing_hashes = {rec_results[rid]["text_hash"] for rid in missing_ids if rec_results[rid]["text_hash"]}
         trans_df = _scan_dataset_to_pandas(
-            transformer_dir, TRANSFORMER_COLUMNS, max_notes=max_notes, filter_expr=trans_filter
+            transformer_dir, TRANSFORMER_COLUMNS, target_ids=missing_ids, target_hashes=missing_hashes
         )
         t_col = next((c for c in ("note_text", "text", "value") if c in trans_df.columns), None)
         if t_col:
@@ -724,12 +722,19 @@ def _load_pipeline_recognizer_stage(
 
 def _load_pipeline_anonymizer_stage(
     anonymizer_dir: Path,
-    target_row_ids: list[str],
+    rec_results: dict[str, dict[str, Any]],
     max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Load anonymizer parquet output and align with recognizer sample IDs."""
-    filter_expr = _build_row_id_filter(anonymizer_dir, target_row_ids)
-    anon_df = _scan_dataset_to_pandas(anonymizer_dir, ANONYMIZER_COLUMNS, max_notes=max_notes, filter_expr=filter_expr)
+    """Load anonymizer parquet output, matched to the recognizer rows when there are any."""
+    target_ids = set(rec_results) or None
+    target_hashes = {item["text_hash"] for item in rec_results.values() if item["text_hash"]}
+    anon_df = _scan_dataset_to_pandas(
+        anonymizer_dir,
+        ANONYMIZER_COLUMNS,
+        max_notes=None if target_ids else max_notes,
+        target_ids=target_ids,
+        target_hashes=target_hashes,
+    )
 
     text_col = next(
         (
@@ -798,8 +803,7 @@ def load_pipeline_output_dir(
 
     anon_results: dict[str, dict[str, Any]] = {}
     if anon_dir:
-        target_ids = list(rec_results.keys())
-        anon_results = _load_pipeline_anonymizer_stage(anon_dir, target_ids, max_notes=max_notes)
+        anon_results = _load_pipeline_anonymizer_stage(anon_dir, rec_results, max_notes=max_notes)
 
     results: dict[str, dict[str, Any]] = {}
     all_keys = list(rec_results.keys())
@@ -835,40 +839,8 @@ def _load_data_file(p: Path, max_notes: int | None = None) -> tuple[dict[str, di
         except Exception as e:
             raise ValueError(f"Could not load JSON file {p}: {e}") from e
 
-        has_rec = "recognizer_results" in data or "value" in data or "original_text" in data
-        has_anon = "items" in data or "modified_text" in data or "anonymized_note_text" in data
-
-        orig_text = ""
-        orig_phi: list[dict[str, Any]] = []
-        if has_rec:
-            orig_text = str(
-                data.get("value") or data.get("original_text") or (data.get("text") if not has_anon else "") or ""
-            )
-            orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
-
-        mod_text = ""
-        mod_phi: list[dict[str, Any]] = []
-        if has_anon:
-            mod_text = str(data.get("modified_text") or data.get("anonymized_note_text") or data.get("text") or "")
-            mod_phi = parse_entities(data.get("items") or data.get("modified_phi") or [])
-        elif not has_rec and "text" in data:
-            orig_text = str(data.get("text", ""))
-
-        th_val = str(data["text_hash"]) if data.get("text_hash") else None
-        text_for_id = orig_text or mod_text
-        row_id = _derive_row_id(data.get("row_id"), th_val, data.get("patient_id"), text_for_id)
-
-        return {
-            row_id: {
-                "sample_id": row_id,
-                "row_id": row_id,
-                "text_hash": th_val,
-                "original_text": orig_text,
-                "original_phi": orig_phi,
-                "modified_text": mod_text,
-                "modified_phi": mod_phi,
-            }
-        }, "Single JSON File"
+        record = _parse_json_record(data, p.stem)
+        return {record["row_id"]: record}, "Single JSON File"
 
     raise ValueError(f"Unsupported file format '{p.suffix}'. Expected .parquet or .json")
 
@@ -924,25 +896,15 @@ def _load_data_dir(p: Path, max_notes: int | None = None) -> tuple[dict[str, dic
             with contextlib.suppress(Exception):
                 with jf.open(encoding="utf-8") as f:
                     data = json.load(f)
-                text = str(data.get("value") or data.get("text") or data.get("original_text") or "")
-                th_val = str(data["text_hash"]) if data.get("text_hash") else None
-                row_id = _derive_row_id(data.get("row_id"), th_val, data.get("patient_id"), text)
-                if row_id not in combined:
-                    combined[row_id] = {
-                        "sample_id": row_id,
-                        "row_id": row_id,
-                        "text_hash": th_val,
-                        "original_text": "",
-                        "original_phi": [],
-                        "modified_text": "",
-                        "modified_phi": [],
-                    }
-                if "recognizer_results" in data or "value" in data:
-                    combined[row_id]["original_text"] = str(data.get("value", ""))
-                    combined[row_id]["original_phi"] = parse_entities(data.get("recognizer_results", []))
-                if "items" in data or ("text" in data and "value" not in data):
-                    combined[row_id]["modified_text"] = str(data.get("text", ""))
-                    combined[row_id]["modified_phi"] = parse_entities(data.get("items", []))
+                record = _parse_json_record(data, jf.stem)
+                existing = combined.get(record["row_id"])
+                if existing is None:
+                    combined[record["row_id"]] = record
+                    continue
+                # A recognizer file and an anonymizer file for one note share an identity: merge their fields.
+                for field, value in record.items():
+                    if value:
+                        existing[field] = value
         if combined:
             return combined, "JSON Files Directory"
 
