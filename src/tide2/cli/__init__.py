@@ -1,21 +1,17 @@
 """
 CLI module for TIDE 2.0.
 
-This module provides a unified command-line interface and application for
-using the TIDE 2.0 anonymization tools.
+This module provides the interactive Streamlit visualizer for inspecting clinical notes
+before and after de-identification.
 
-Available application:
-- Unified Visualizer & Editor: Interactive tool for visualizing, comparing,
-  and editing original and anonymized text with PHI entity highlighting
+To launch the visualizer:
+    tide2-visualizer [path]
 
-To launch the application, use:
-    tide2-visualizer
-
-The application provides:
-- Side-by-side comparison of original and anonymized text
-- Interactive entity editing capabilities
-- Export functionality for modified files
-- Support for both analyzer and recognizer result formats
+The visualizer provides:
+- Side-by-side inspection of original and de-identified notes with displacy entity highlights
+- Tabular breakdown of detected PHI entities, character offsets, recognizers, and scores
+- Filtering by entity type and recognizer engine
+- Automatic detection of pipeline Parquet stage directories and Parquet files
 """
 
 __all__ = []

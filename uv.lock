@@ -730,21 +730,6 @@ wheels = [
 ]
 
 [[package]]
-name = "db-dtypes"
-version = "1.6.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "packaging" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/35/3bedb365a0c42b4f65a8cfb8c4dc392a9f93e22035b862117ef1b2a0d80b/db_dtypes-1.6.0.tar.gz", hash = "sha256:4ba87b15cc972a7cc0aed2b7483e0823c7765eca88128453f52c88c5e0f4ae46", size = 35966, upload-time = "2026-05-07T08:03:38.016Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/02/56cf9e3f231ee6bfab73ead0f08077661c0decaa8e6b7414137b7c3a5d27/db_dtypes-1.6.0-py3-none-any.whl", hash = "sha256:03f0ff5798fa5e407f07e84de2d619cbc363b8dcc40104825a85519793ffee8d", size = 18535, upload-time = "2026-05-07T08:01:59.765Z" },
-]
-
-[[package]]
 name = "debugpy"
 version = "1.8.20"
 source = { registry = "https://pypi.org/simple" }
@@ -4055,11 +4040,9 @@ dependencies = [
     { name = "aiohttp" },
     { name = "anyio" },
     { name = "click" },
-    { name = "db-dtypes" },
     { name = "faker" },
     { name = "ff3" },
     { name = "gitpython" },
-    { name = "google-cloud-bigquery" },
     { name = "google-cloud-storage" },
     { name = "httpx" },
     { name = "intervaltree" },
@@ -4179,12 +4162,10 @@ requires-dist = [
     { name = "bleach", marker = "extra == 'dev'", specifier = ">=6.4.0" },
     { name = "click", specifier = ">=8.3.3,<9" },
     { name = "cython", marker = "extra == 'dev'" },
-    { name = "db-dtypes", specifier = ">=1.6,<2" },
     { name = "faker", specifier = ">=40.19,<41" },
     { name = "ff3", specifier = ">=1.0,<2" },
     { name = "gitpython", specifier = ">=3.1.59,<4" },
     { name = "google-cloud-aiplatform", marker = "extra == 'llm'", specifier = ">=1.154,<2" },
-    { name = "google-cloud-bigquery", specifier = ">=3.41,<4" },
     { name = "google-cloud-storage", specifier = ">=3.10,<4" },
     { name = "google-genai", marker = "extra == 'llm'", specifier = ">=2.7,<3" },
     { name = "httpx", specifier = ">=0.25,<1" },
