@@ -40,6 +40,12 @@ def test_parse_entities():
     assert parse_entities(raw_list) == raw_list
     assert parse_entities(raw_dict) == [raw_dict]
 
+    # NumPy array (e.g. from Parquet list-of-struct columns)
+    import numpy as np
+
+    arr = np.array(raw_list, dtype=object)
+    assert parse_entities(arr) == raw_list
+
 
 def test_get_recognizer_name():
     """Verify recognizer name extraction from entity dictionaries."""
@@ -219,7 +225,7 @@ def test_load_data_pipeline_output_dir(tmp_path: Path):
 
 
 def test_load_pipeline_anonymizer_hash_only_fallback(tmp_path: Path):
-    """Verify that anonymizer stage with only text_hash joins correctly when row_id is absent."""
+    """Verify that when row_id is absent from both stages, row_id is derived using add_row_id and rows align."""
     out_dir = tmp_path / "pipeline_run_hash_only"
     out_dir.mkdir()
 
@@ -228,7 +234,6 @@ def test_load_pipeline_anonymizer_hash_only_fallback(tmp_path: Path):
     pd.DataFrame(
         [
             {
-                "row_id": "r10",
                 "text_hash": "th_fallback",
                 "note_text": "Sample text",
                 "recognizer_results_json": "[]",
@@ -249,9 +254,11 @@ def test_load_pipeline_anonymizer_hash_only_fallback(tmp_path: Path):
     ).to_parquet(anon_dir / "part-0.parquet")
 
     results = load_pipeline_output_dir(out_dir)
-    assert "r10" in results
-    assert results["r10"]["original_text"] == "Sample text"
-    assert results["r10"]["modified_text"] == "Anonymized sample"
+    assert len(results) == 1
+    sample = next(iter(results.values()))
+    assert sample["original_text"] == "Sample text"
+    assert sample["modified_text"] == "Anonymized sample"
+    assert sample["row_id"] is not None
 
 
 def test_load_pipeline_output_recovers_text_from_transformer_partial_null(tmp_path: Path):
@@ -288,10 +295,12 @@ def test_load_pipeline_output_recovers_text_from_transformer(tmp_path: Path):
     out_dir = tmp_path / "pipeline_run_recovering"
     out_dir.mkdir()
 
-    # Transformer stage has note_text and text_hash
+    # Transformer stage has note_text and row_id
     trans_dir = out_dir / "transformer_output"
     trans_dir.mkdir()
-    pd.DataFrame([{"text_hash": "th100", "note_text": "Recovered text"}]).to_parquet(trans_dir / "part-0.parquet")
+    pd.DataFrame([{"row_id": "r100", "text_hash": "th100", "note_text": "Recovered text"}]).to_parquet(
+        trans_dir / "part-0.parquet"
+    )
 
     # Recognizer stage lacks note_text
     rec_dir = out_dir / "recognizer_output"
@@ -303,6 +312,54 @@ def test_load_pipeline_output_recovers_text_from_transformer(tmp_path: Path):
     results = load_pipeline_output_dir(out_dir)
     assert "r100" in results
     assert results["r100"]["original_text"] == "Recovered text"
+
+
+def test_load_pipeline_output_duplicate_hashes_differing_order(tmp_path: Path):
+    """Verify rows with identical text_hash but distinct row_ids align correctly despite differing stage order."""
+    out_dir = tmp_path / "pipeline_run_dup_hash"
+    out_dir.mkdir()
+
+    rec_dir = out_dir / "recognizer_output"
+    rec_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "row_id": "patient_A_note",
+                "text_hash": "shared_hash",
+                "note_text": "Common note text",
+                "recognizer_results_json": "[]",
+            },
+            {
+                "row_id": "patient_B_note",
+                "text_hash": "shared_hash",
+                "note_text": "Common note text",
+                "recognizer_results_json": "[]",
+            },
+        ]
+    ).to_parquet(rec_dir / "part-0.parquet")
+
+    anon_dir = out_dir / "anonymizer_output"
+    anon_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "row_id": "patient_B_note",
+                "text_hash": "shared_hash",
+                "anonymized_note_text": "Anon Patient B",
+                "anonymizer_results_json": "[]",
+            },
+            {
+                "row_id": "patient_A_note",
+                "text_hash": "shared_hash",
+                "anonymized_note_text": "Anon Patient A",
+                "anonymizer_results_json": "[]",
+            },
+        ]
+    ).to_parquet(anon_dir / "part-0.parquet")
+
+    results = load_pipeline_output_dir(out_dir)
+    assert results["patient_A_note"]["modified_text"] == "Anon Patient A"
+    assert results["patient_B_note"]["modified_text"] == "Anon Patient B"
 
 
 def test_load_data_json_directory(tmp_path: Path):
@@ -334,11 +391,11 @@ def test_load_data_json_directory(tmp_path: Path):
 
     results, desc = load_data(out_dir)
     assert desc == "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
-    assert "sample_alpha" in results
-    assert results["sample_alpha"]["row_id"] == "original/note/123"
-    assert results["sample_alpha"]["text_hash"] == "hash_xyz"
-    assert results["sample_alpha"]["original_text"] == "Note with John"
-    assert results["sample_alpha"]["modified_text"] == "Note with [NAME]"
+    assert "original/note/123" in results
+    assert results["original/note/123"]["row_id"] == "original/note/123"
+    assert results["original/note/123"]["text_hash"] == "hash_xyz"
+    assert results["original/note/123"]["original_text"] == "Note with John"
+    assert results["original/note/123"]["modified_text"] == "Note with [NAME]"
 
     # Test backward-compatible helper loaders
     assert len(load_analyzer_results(rec_json_dir)) == 1
@@ -356,7 +413,9 @@ def test_load_data_json_directory_max_notes(tmp_path: Path):
 
     for i in range(10):
         sid = f"sample_{i}"
-        (rec_json_dir / f"{sid}.json").write_text(json.dumps({"key": sid, "value": f"text {i}"}), encoding="utf-8")
+        (rec_json_dir / f"{sid}.json").write_text(
+            json.dumps({"key": sid, "row_id": sid, "value": f"text {i}"}), encoding="utf-8"
+        )
         (anon_json_dir / f"{sid}.json").write_text(json.dumps({"text": f"anon {i}", "items": []}), encoding="utf-8")
 
     results, desc = load_data(out_dir, max_notes=3)
@@ -367,7 +426,7 @@ def test_load_data_json_directory_max_notes(tmp_path: Path):
 def test_load_data_loose_json_files(tmp_path: Path):
     """Verify loading directory directly containing JSON files."""
     data = {
-        "key": "sample_loose",
+        "row_id": "sample_loose",
         "value": "Original",
         "recognizer_results": [],
         "text": "Anonymized",
@@ -403,6 +462,7 @@ def test_load_data_single_json_file(tmp_path: Path):
 def test_load_data_single_json_anonymizer_disambiguation(tmp_path: Path):
     """Verify loading a single anonymizer JSON populates only modified_text and modified_phi."""
     data = {
+        "row_id": "anon_single",
         "text": "Patient [PERSON] visited on [DATE].",
         "items": [{"entity_type": "PERSON", "start": 8, "end": 16}],
     }
