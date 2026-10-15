@@ -1,13 +1,15 @@
 """Unit tests for the TIDE 2.0 visualizer data loading, filtering, and CLI logic."""
 
+import inspect
 import json
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
+import tide2.cli.unified_interface as ui
 from tide2.cli.main_visualizer import main as visualizer_cli_main
 from tide2.cli.unified_interface import build_legend_html
 from tide2.cli.unified_interface import collect_entity_types
@@ -21,6 +23,14 @@ from tide2.cli.unified_interface import load_pipeline_output_dir
 from tide2.cli.unified_interface import parse_cli_args
 from tide2.cli.unified_interface import parse_entities
 from tide2.runner.local_runner import add_row_id
+
+
+def test_guard_no_pandas_in_visualizer():
+    """Ensure pandas is not imported or used in unified_interface."""
+    source = inspect.getsource(ui)
+    assert "import pandas" not in source
+    assert "from pandas" not in source
+    assert "pd." not in source
 
 
 def test_parse_entities():
@@ -133,20 +143,22 @@ def test_collect_entity_types_and_legend():
 
 def test_load_data_single_parquet_file(tmp_path: Path):
     """Verify loading a single Parquet file containing both stages."""
-    df = pd.DataFrame(
-        [
-            {
-                "row_id": "row_1",
-                "text_hash": "hash_1",
-                "note_text": "Patient John Doe visited on 2024-01-01.",
-                "recognizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 8, "end": 16}]),
-                "anonymized_note_text": "Patient [PERSON] visited on [DATE_TIME].",
-                "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 8, "end": 16}]),
-            }
-        ]
-    )
     file_path = tmp_path / "sample.parquet"
-    df.to_parquet(file_path)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "row_1",
+                    "text_hash": "hash_1",
+                    "note_text": "Patient John Doe visited on 2024-01-01.",
+                    "recognizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 8, "end": 16}]),
+                    "anonymized_note_text": "Patient [PERSON] visited on [DATE_TIME].",
+                    "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 8, "end": 16}]),
+                }
+            ]
+        ),
+        file_path,
+    )
 
     results, desc = load_data(file_path)
     assert desc == "Single Parquet File"
@@ -159,10 +171,10 @@ def test_load_data_single_parquet_file(tmp_path: Path):
 
 def test_load_data_parquet_directory(tmp_path: Path):
     """Verify loading a directory directly containing Parquet files."""
-    df1 = pd.DataFrame([{"row_id": "note_1", "note_text": "First note"}])
-    df2 = pd.DataFrame([{"row_id": "note_2", "note_text": "Second note"}])
-    df1.to_parquet(tmp_path / "part-0.parquet")
-    df2.to_parquet(tmp_path / "part-1.parquet")
+    pq.write_table(pa.Table.from_pylist([{"row_id": "note_1", "note_text": "First note"}]), tmp_path / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist([{"row_id": "note_2", "note_text": "Second note"}]), tmp_path / "part-1.parquet"
+    )
 
     results, desc = load_data(tmp_path)
     assert desc == "Parquet Directory"
@@ -178,29 +190,35 @@ def test_load_data_pipeline_output_dir(tmp_path: Path):
 
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
-    pd.DataFrame(
-        [
-            {
-                "row_id": "p1",
-                "text_hash": "th1",
-                "note_text": "Original note 1",
-                "recognizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 8}]),
-            }
-        ]
-    ).to_parquet(rec_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "p1",
+                    "text_hash": "th1",
+                    "note_text": "Original note 1",
+                    "recognizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 8}]),
+                }
+            ]
+        ),
+        rec_dir / "part-0.parquet",
+    )
 
     anon_dir = out_dir / "anonymizer_output"
     anon_dir.mkdir()
-    pd.DataFrame(
-        [
-            {
-                "row_id": "p1",
-                "text_hash": "th1",
-                "anonymized_note_text": "Deidentified note 1",
-                "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 8}]),
-            }
-        ]
-    ).to_parquet(anon_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "p1",
+                    "text_hash": "th1",
+                    "anonymized_note_text": "Deidentified note 1",
+                    "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 8}]),
+                }
+            ]
+        ),
+        anon_dir / "part-0.parquet",
+    )
 
     results, desc = load_data(out_dir)
     assert desc == "Pipeline Output Directory (Parquet)"
@@ -218,27 +236,33 @@ def test_load_pipeline_anonymizer_hash_only_fallback(tmp_path: Path):
 
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
-    pd.DataFrame(
-        [
-            {
-                "text_hash": "th_fallback",
-                "note_text": "Sample text",
-                "recognizer_results_json": "[]",
-            }
-        ]
-    ).to_parquet(rec_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "text_hash": "th_fallback",
+                    "note_text": "Sample text",
+                    "recognizer_results_json": "[]",
+                }
+            ]
+        ),
+        rec_dir / "part-0.parquet",
+    )
 
     anon_dir = out_dir / "anonymizer_output"
     anon_dir.mkdir()
-    pd.DataFrame(
-        [
-            {
-                "text_hash": "th_fallback",
-                "anonymized_note_text": "Anonymized sample",
-                "anonymizer_results_json": "[]",
-            }
-        ]
-    ).to_parquet(anon_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "text_hash": "th_fallback",
+                    "anonymized_note_text": "Anonymized sample",
+                    "anonymizer_results_json": "[]",
+                }
+            ]
+        ),
+        anon_dir / "part-0.parquet",
+    )
 
     results = load_pipeline_output_dir(out_dir)
     assert len(results) == 1
@@ -255,21 +279,27 @@ def test_load_pipeline_output_recovers_text_from_transformer_partial_null(tmp_pa
 
     trans_dir = out_dir / "transformer_output"
     trans_dir.mkdir()
-    pd.DataFrame(
-        [
-            {"row_id": "r1", "text_hash": "th1", "note_text": "Transformer Text 1"},
-            {"row_id": "r2", "text_hash": "th2", "note_text": "Transformer Text 2"},
-        ]
-    ).to_parquet(trans_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"row_id": "r1", "text_hash": "th1", "note_text": "Transformer Text 1"},
+                {"row_id": "r2", "text_hash": "th2", "note_text": "Transformer Text 2"},
+            ]
+        ),
+        trans_dir / "part-0.parquet",
+    )
 
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
-    pd.DataFrame(
-        [
-            {"row_id": "r1", "text_hash": "th1", "note_text": "Recognizer Text 1", "recognizer_results_json": "[]"},
-            {"row_id": "r2", "text_hash": "th2", "note_text": None, "recognizer_results_json": "[]"},
-        ]
-    ).to_parquet(rec_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"row_id": "r1", "text_hash": "th1", "note_text": "Recognizer Text 1", "recognizer_results_json": "[]"},
+                {"row_id": "r2", "text_hash": "th2", "note_text": None, "recognizer_results_json": "[]"},
+            ]
+        ),
+        rec_dir / "part-0.parquet",
+    )
 
     results = load_pipeline_output_dir(out_dir)
     assert "r1" in results and "r2" in results
@@ -284,14 +314,16 @@ def test_load_pipeline_output_recovers_text_from_transformer(tmp_path: Path):
 
     trans_dir = out_dir / "transformer_output"
     trans_dir.mkdir()
-    pd.DataFrame([{"row_id": "r100", "text_hash": "th100", "note_text": "Recovered text"}]).to_parquet(
-        trans_dir / "part-0.parquet"
+    pq.write_table(
+        pa.Table.from_pylist([{"row_id": "r100", "text_hash": "th100", "note_text": "Recovered text"}]),
+        trans_dir / "part-0.parquet",
     )
 
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
-    pd.DataFrame([{"row_id": "r100", "text_hash": "th100", "recognizer_results_json": "[]"}]).to_parquet(
-        rec_dir / "part-0.parquet"
+    pq.write_table(
+        pa.Table.from_pylist([{"row_id": "r100", "text_hash": "th100", "recognizer_results_json": "[]"}]),
+        rec_dir / "part-0.parquet",
     )
 
     results = load_pipeline_output_dir(out_dir)
@@ -306,41 +338,47 @@ def test_load_pipeline_output_duplicate_hashes_differing_order(tmp_path: Path):
 
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
-    pd.DataFrame(
-        [
-            {
-                "row_id": "patient_A_note",
-                "text_hash": "shared_hash",
-                "note_text": "Common note text",
-                "recognizer_results_json": "[]",
-            },
-            {
-                "row_id": "patient_B_note",
-                "text_hash": "shared_hash",
-                "note_text": "Common note text",
-                "recognizer_results_json": "[]",
-            },
-        ]
-    ).to_parquet(rec_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "patient_A_note",
+                    "text_hash": "shared_hash",
+                    "note_text": "Common note text",
+                    "recognizer_results_json": "[]",
+                },
+                {
+                    "row_id": "patient_B_note",
+                    "text_hash": "shared_hash",
+                    "note_text": "Common note text",
+                    "recognizer_results_json": "[]",
+                },
+            ]
+        ),
+        rec_dir / "part-0.parquet",
+    )
 
     anon_dir = out_dir / "anonymizer_output"
     anon_dir.mkdir()
-    pd.DataFrame(
-        [
-            {
-                "row_id": "patient_B_note",
-                "text_hash": "shared_hash",
-                "anonymized_note_text": "Anon Patient B",
-                "anonymizer_results_json": "[]",
-            },
-            {
-                "row_id": "patient_A_note",
-                "text_hash": "shared_hash",
-                "anonymized_note_text": "Anon Patient A",
-                "anonymizer_results_json": "[]",
-            },
-        ]
-    ).to_parquet(anon_dir / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "patient_B_note",
+                    "text_hash": "shared_hash",
+                    "anonymized_note_text": "Anon Patient B",
+                    "anonymizer_results_json": "[]",
+                },
+                {
+                    "row_id": "patient_A_note",
+                    "text_hash": "shared_hash",
+                    "anonymized_note_text": "Anon Patient A",
+                    "anonymizer_results_json": "[]",
+                },
+            ]
+        ),
+        anon_dir / "part-0.parquet",
+    )
 
     results = load_pipeline_output_dir(out_dir)
     assert results["patient_A_note"]["modified_text"] == "Anon Patient A"
@@ -353,18 +391,24 @@ def test_load_pipeline_output_max_notes_pairs_stages_in_differing_order(tmp_path
     out_dir.mkdir()
     (out_dir / "recognizer_output").mkdir()
     (out_dir / "anonymizer_output").mkdir()
-    pd.DataFrame(
-        [
-            {"row_id": "A", "text_hash": "ha", "note_text": "Note A", "recognizer_results_json": "[]"},
-            {"row_id": "B", "text_hash": "hb", "note_text": "Note B", "recognizer_results_json": "[]"},
-        ]
-    ).to_parquet(out_dir / "recognizer_output" / "part-0.parquet")
-    pd.DataFrame(
-        [
-            {"row_id": "B", "text_hash": "hb", "anonymized_note_text": "Anon B", "anonymizer_results_json": "[]"},
-            {"row_id": "A", "text_hash": "ha", "anonymized_note_text": "Anon A", "anonymizer_results_json": "[]"},
-        ]
-    ).to_parquet(out_dir / "anonymizer_output" / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"row_id": "A", "text_hash": "ha", "note_text": "Note A", "recognizer_results_json": "[]"},
+                {"row_id": "B", "text_hash": "hb", "note_text": "Note B", "recognizer_results_json": "[]"},
+            ]
+        ),
+        out_dir / "recognizer_output" / "part-0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"row_id": "B", "text_hash": "hb", "anonymized_note_text": "Anon B", "anonymizer_results_json": "[]"},
+                {"row_id": "A", "text_hash": "ha", "anonymized_note_text": "Anon A", "anonymizer_results_json": "[]"},
+            ]
+        ),
+        out_dir / "anonymizer_output" / "part-0.parquet",
+    )
 
     results = load_pipeline_output_dir(out_dir, max_notes=1)
     assert list(results) == ["A"]
@@ -382,24 +426,33 @@ def test_load_pipeline_output_derives_row_id_before_matching(tmp_path: Path):
     keys = [("ha", "p1"), ("hb", "p2")]
     derived = {h: add_row_id(pa.table({"text_hash": [h], "patient_id": [p]}))["row_id"].to_pylist()[0] for h, p in keys}
 
-    pd.DataFrame(
-        [
-            {"text_hash": "ha", "patient_id": "p1", "recognizer_results_json": "[]"},
-            {"text_hash": "hb", "patient_id": "p2", "recognizer_results_json": "[]"},
-        ]
-    ).to_parquet(out_dir / "recognizer_output" / "part-0.parquet")
-    pd.DataFrame(
-        [
-            {"text_hash": "hb", "patient_id": "p2", "note_text": "Note B"},
-            {"text_hash": "ha", "patient_id": "p1", "note_text": "Note A"},
-        ]
-    ).to_parquet(out_dir / "transformer_output" / "part-0.parquet")
-    pd.DataFrame(
-        [
-            {"row_id": None, "text_hash": "hb", "patient_id": "p2", "anonymized_note_text": "Anon B"},
-            {"row_id": None, "text_hash": "ha", "patient_id": "p1", "anonymized_note_text": "Anon A"},
-        ]
-    ).to_parquet(out_dir / "anonymizer_output" / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"text_hash": "ha", "patient_id": "p1", "recognizer_results_json": "[]"},
+                {"text_hash": "hb", "patient_id": "p2", "recognizer_results_json": "[]"},
+            ]
+        ),
+        out_dir / "recognizer_output" / "part-0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"text_hash": "hb", "patient_id": "p2", "note_text": "Note B"},
+                {"text_hash": "ha", "patient_id": "p1", "note_text": "Note A"},
+            ]
+        ),
+        out_dir / "transformer_output" / "part-0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"row_id": None, "text_hash": "hb", "patient_id": "p2", "anonymized_note_text": "Anon B"},
+                {"row_id": None, "text_hash": "ha", "patient_id": "p1", "anonymized_note_text": "Anon A"},
+            ]
+        ),
+        out_dir / "anonymizer_output" / "part-0.parquet",
+    )
 
     results = load_pipeline_output_dir(out_dir, max_notes=1)
     assert list(results) == [derived["ha"]]
@@ -413,18 +466,24 @@ def test_load_pipeline_output_does_not_merge_patients_sharing_text_hash(tmp_path
     out_dir.mkdir()
     (out_dir / "recognizer_output").mkdir()
     (out_dir / "anonymizer_output").mkdir()
-    pd.DataFrame(
-        [
-            {"text_hash": "same", "patient_id": "p1", "note_text": "Same", "recognizer_results_json": "[]"},
-            {"text_hash": "same", "patient_id": "p2", "note_text": "Same", "recognizer_results_json": "[]"},
-        ]
-    ).to_parquet(out_dir / "recognizer_output" / "part-0.parquet")
-    pd.DataFrame(
-        [
-            {"text_hash": "same", "patient_id": "p2", "anonymized_note_text": "Anon p2"},
-            {"text_hash": "same", "patient_id": "p1", "anonymized_note_text": "Anon p1"},
-        ]
-    ).to_parquet(out_dir / "anonymizer_output" / "part-0.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"text_hash": "same", "patient_id": "p1", "note_text": "Same", "recognizer_results_json": "[]"},
+                {"text_hash": "same", "patient_id": "p2", "note_text": "Same", "recognizer_results_json": "[]"},
+            ]
+        ),
+        out_dir / "recognizer_output" / "part-0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {"text_hash": "same", "patient_id": "p2", "anonymized_note_text": "Anon p2"},
+                {"text_hash": "same", "patient_id": "p1", "anonymized_note_text": "Anon p1"},
+            ]
+        ),
+        out_dir / "anonymizer_output" / "part-0.parquet",
+    )
 
     results = load_pipeline_output_dir(out_dir)
     assert sorted(r["modified_text"] for r in results.values()) == ["Anon p1", "Anon p2"]
@@ -433,18 +492,20 @@ def test_load_pipeline_output_does_not_merge_patients_sharing_text_hash(tmp_path
 
 def test_load_data_preserves_text_hash(tmp_path: Path):
     """Verify text_hash is preserved in pipeline and single parquet loads."""
-    df = pd.DataFrame(
-        [
-            {
-                "row_id": "row_123",
-                "text_hash": "hash_abc",
-                "note_text": "Sample text",
-                "recognizer_results_json": "[]",
-            }
-        ]
-    )
     p_file = tmp_path / "test.parquet"
-    df.to_parquet(p_file)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "row_123",
+                    "text_hash": "hash_abc",
+                    "note_text": "Sample text",
+                    "recognizer_results_json": "[]",
+                }
+            ]
+        ),
+        p_file,
+    )
 
     results, _ = load_data(p_file)
     assert "row_123" in results
@@ -453,17 +514,19 @@ def test_load_data_preserves_text_hash(tmp_path: Path):
 
 def test_load_anonymizer_only_parquet(tmp_path: Path):
     """Verify an anonymizer-only Parquet file populates modified_text and modified_phi."""
-    df = pd.DataFrame(
-        [
-            {
-                "row_id": "anon_1",
-                "anonymized_note_text": "Anonymized text content",
-                "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 10}]),
-            }
-        ]
-    )
     p_file = tmp_path / "anon_only.parquet"
-    df.to_parquet(p_file)
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "anon_1",
+                    "anonymized_note_text": "Anonymized text content",
+                    "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 10}]),
+                }
+            ]
+        ),
+        p_file,
+    )
 
     results, _ = load_data(p_file)
     assert "anon_1" in results
@@ -475,9 +538,11 @@ def test_load_anonymizer_only_parquet(tmp_path: Path):
 
 def test_load_data_max_notes_cap(tmp_path: Path):
     """Verify max_notes bounds the number of loaded records."""
-    df = pd.DataFrame([{"row_id": f"r_{i}", "note_text": f"Note {i}"} for i in range(10)])
     p_file = tmp_path / "multi.parquet"
-    df.to_parquet(p_file)
+    pq.write_table(
+        pa.Table.from_pylist([{"row_id": f"r_{i}", "note_text": f"Note {i}"} for i in range(10)]),
+        p_file,
+    )
 
     results, _ = load_data(p_file, max_notes=3)
     assert len(results) == 3

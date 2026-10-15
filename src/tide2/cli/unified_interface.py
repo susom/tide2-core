@@ -22,13 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as pads
 import streamlit as st
 from spacy import displacy
 
 from tide2.runner.local_runner import add_row_id
+from tide2.utils.nulls import is_null
 from tide2.utils.text_processing import compute_text_hash
 
 # Color mapping for entity types
@@ -94,7 +94,7 @@ def parse_entities(raw: Any) -> list[dict[str, Any]]:
     Returns:
         List of entity dictionaries.
     """
-    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+    if is_null(raw):
         return []
 
     data: Any = raw
@@ -314,19 +314,19 @@ def _stage_pushdown_filter(schema_names: set[str], target_ids: set[str], target_
     return None
 
 
-def _scan_dataset_to_pandas(
+def _scan_dataset_to_table(
     path: Path,
     target_cols: set[str],
     max_notes: int | None = None,
     target_ids: set[str] | None = None,
     target_hashes: set[str] | None = None,
-) -> pd.DataFrame:
-    """Scan a Parquet file or dataset directory into a DataFrame with a guaranteed ``row_id`` column."""
+) -> pa.Table | None:
+    """Scan a Parquet file or dataset directory into a PyArrow Table with a guaranteed ``row_id`` column."""
     ds = pads.dataset(path)
     schema_names = set(ds.schema.names)
     cols = [c for c in schema_names if c in target_cols]
     if not cols:
-        return pd.DataFrame()
+        return None
 
     filter_expr = _stage_pushdown_filter(schema_names, target_ids, target_hashes or set()) if target_ids else None
 
@@ -350,36 +350,31 @@ def _scan_dataset_to_pandas(
             if found >= target_ids:
                 break
 
-    return pa.concat_tables(tables).to_pandas() if tables else pd.DataFrame()
+    return pa.concat_tables(tables, promote_options="default") if tables else None
 
 
-def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None) -> dict[str, dict[str, Any]]:
-    """Parse sample records from a DataFrame keyed by ``row_id``."""
-    if df.empty:
+def _load_results_from_table(table: pa.Table | None, max_notes: int | None = None) -> dict[str, dict[str, Any]]:
+    """Parse sample records from a PyArrow Table keyed by ``row_id``."""
+    if table is None or len(table) == 0:
         return {}
 
-    if max_notes and len(df) > max_notes:
-        df = df.iloc[:max_notes]
-
-    has_orig_text = "note_text" in df.columns
-    has_orig_phi = "recognizer_results_json" in df.columns
-    has_anon_text = "anonymized_note_text" in df.columns
-    has_anon_phi = "anonymizer_results_json" in df.columns
-    has_hash = "text_hash" in df.columns
+    if max_notes and len(table) > max_notes:
+        table = table.slice(0, max_notes)
 
     results: dict[str, dict[str, Any]] = {}
-    for _, row in df.iterrows():
+    for row in table.to_pylist():
         row_id = str(row["row_id"])
+        text_hash = row.get("text_hash")
+        note_text = row.get("note_text")
+        anon_text = row.get("anonymized_note_text")
         results[row_id] = {
             "sample_id": row_id,
             "row_id": row_id,
-            "text_hash": str(row["text_hash"]) if has_hash and pd.notna(row["text_hash"]) else None,
-            "original_text": str(row["note_text"]) if has_orig_text and pd.notna(row["note_text"]) else "",
-            "original_phi": parse_entities(row["recognizer_results_json"]) if has_orig_phi else [],
-            "modified_text": (
-                str(row["anonymized_note_text"]) if has_anon_text and pd.notna(row["anonymized_note_text"]) else ""
-            ),
-            "modified_phi": parse_entities(row["anonymizer_results_json"]) if has_anon_phi else [],
+            "text_hash": str(text_hash) if not is_null(text_hash) else None,
+            "original_text": str(note_text) if not is_null(note_text) else "",
+            "original_phi": parse_entities(row.get("recognizer_results_json")),
+            "modified_text": str(anon_text) if not is_null(anon_text) else "",
+            "modified_phi": parse_entities(row.get("anonymizer_results_json")),
         }
 
     return results
@@ -391,15 +386,15 @@ def load_from_parquet_file(
     """Load sample records from a Parquet file or directory of Parquet files."""
     path = Path(file_or_dir)
     if path.is_file():
-        df = _scan_dataset_to_pandas(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
+        table = _scan_dataset_to_table(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     elif path.is_dir():
         if not any(path.glob("**/*.parquet")):
             raise FileNotFoundError(f"No parquet files found in {path}")
-        df = _scan_dataset_to_pandas(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
+        table = _scan_dataset_to_table(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     else:
         raise FileNotFoundError(f"Parquet path not found: {path}")
 
-    return _load_results_from_dataframe(df, max_notes=max_notes)
+    return _load_results_from_table(table, max_notes=max_notes)
 
 
 def _find_pipeline_stage_dirs(root: Path) -> tuple[Path | None, Path | None, Path | None]:
@@ -425,20 +420,21 @@ def _load_pipeline_recognizer_stage(
     max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Load recognizer Parquet output and optional transformer backfill keyed by ``row_id``."""
-    rec_df = _scan_dataset_to_pandas(recognizer_dir, RECOGNIZER_COLUMNS, max_notes=max_notes)
-    rec_results = _load_results_from_dataframe(rec_df, max_notes=max_notes)
+    rec_table = _scan_dataset_to_table(recognizer_dir, RECOGNIZER_COLUMNS, max_notes=max_notes)
+    rec_results = _load_results_from_table(rec_table, max_notes=max_notes)
 
     missing_ids = {rid for rid, item in rec_results.items() if not item["original_text"].strip()}
     if transformer_dir and missing_ids:
         missing_hashes = {rec_results[rid]["text_hash"] for rid in missing_ids if rec_results[rid]["text_hash"]}
-        trans_df = _scan_dataset_to_pandas(
+        trans_table = _scan_dataset_to_table(
             transformer_dir, TRANSFORMER_COLUMNS, target_ids=missing_ids, target_hashes=missing_hashes
         )
-        if "note_text" in trans_df.columns:
-            for _, r in trans_df[["row_id", "note_text"]].dropna().iterrows():
-                rid = str(r["row_id"])
-                if rid in missing_ids:
-                    rec_results[rid]["original_text"] = str(r["note_text"])
+        if trans_table is not None and "note_text" in trans_table.column_names:
+            for row in trans_table.to_pylist():
+                rid = str(row["row_id"])
+                note_text = row.get("note_text")
+                if rid in missing_ids and not is_null(note_text):
+                    rec_results[rid]["original_text"] = str(note_text)
 
     return rec_results
 
@@ -451,14 +447,14 @@ def _load_pipeline_anonymizer_stage(
     """Load anonymizer Parquet output, matched by ``row_id`` to ``rec_results`` when present."""
     target_ids = set(rec_results) or None
     target_hashes = {item["text_hash"] for item in rec_results.values() if item["text_hash"]}
-    anon_df = _scan_dataset_to_pandas(
+    anon_table = _scan_dataset_to_table(
         anonymizer_dir,
         ANONYMIZER_COLUMNS,
         max_notes=None if target_ids else max_notes,
         target_ids=target_ids,
         target_hashes=target_hashes,
     )
-    return _load_results_from_dataframe(anon_df)
+    return _load_results_from_table(anon_table)
 
 
 def load_pipeline_output_dir(
@@ -787,7 +783,7 @@ def _render_phi_table(
                     "Score": score_str,
                 }
             )
-        st.dataframe(pd.DataFrame(table_rows), use_container_width=True)
+        st.dataframe(pa.Table.from_pylist(table_rows), use_container_width=True)
     elif not original_phi:
         st.info("No PHI detected in this note.")
     else:
