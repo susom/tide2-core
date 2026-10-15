@@ -11,7 +11,7 @@ The visualizer provides:
 - Side-by-side inspection of original and de-identified notes with displacy entity highlights
 - Tabular breakdown of detected PHI entities, character offsets, recognizers, and scores
 - Filtering by entity type and recognizer engine
-- Automatic format detection for pipeline Parquet stages and JSON folders
+- Automatic detection of pipeline Parquet stage directories and Parquet files
 """
 
 __all__ = []

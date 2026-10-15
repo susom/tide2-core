@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pytest
@@ -15,8 +16,6 @@ from tide2.cli.unified_interface import filter_entities
 from tide2.cli.unified_interface import filter_entities_by_recognizers
 from tide2.cli.unified_interface import get_recognizer_name
 from tide2.cli.unified_interface import get_recognizers_from_entities
-from tide2.cli.unified_interface import load_analyzer_results
-from tide2.cli.unified_interface import load_anonymized_results
 from tide2.cli.unified_interface import load_data
 from tide2.cli.unified_interface import load_pipeline_output_dir
 from tide2.cli.unified_interface import parse_cli_args
@@ -25,28 +24,21 @@ from tide2.runner.local_runner import add_row_id
 
 
 def test_parse_entities():
-    """Verify parsing of entities from JSON strings, lists, dicts, and empty values."""
+    """Verify parsing of entities from JSON strings, lists, dicts, numpy arrays, and empty values."""
     assert parse_entities(None) == []
     assert parse_entities(float("nan")) == []
     assert parse_entities("not valid json") == []
     assert parse_entities("123") == []
 
-    # Valid JSON string
     raw_list = [{"entity_type": "PERSON", "start": 0, "end": 4}]
     assert parse_entities(json.dumps(raw_list)) == raw_list
 
     raw_dict = {"entity_type": "DATE_TIME", "start": 5, "end": 10}
     assert parse_entities(json.dumps(raw_dict)) == [raw_dict]
 
-    # Direct list and dict
     assert parse_entities(raw_list) == raw_list
     assert parse_entities(raw_dict) == [raw_dict]
-
-    # NumPy array (e.g. from Parquet list-of-struct columns)
-    import numpy as np
-
-    arr = np.array(raw_list, dtype=object)
-    assert parse_entities(arr) == raw_list
+    assert parse_entities(np.array(raw_list, dtype=object)) == raw_list
 
 
 def test_get_recognizer_name():
@@ -90,26 +82,21 @@ def test_filter_entities():
         },
     ]
 
-    # No filter / "All"
     assert len(filter_entities(entities, selected_recognizers=["All"], selected_entity_types=["All"])) == 3
     assert len(filter_entities(entities, selected_recognizers=None, selected_entity_types=None)) == 3
 
-    # Filter by recognizer
     bert_only = filter_entities(entities, selected_recognizers=["BERT"])
     assert len(bert_only) == 2
     assert all(get_recognizer_name(e) == "BERT" for e in bert_only)
 
-    # Filter by entity type
     person_only = filter_entities(entities, selected_entity_types=["PERSON"])
     assert len(person_only) == 1
     assert person_only[0]["entity_type"] == "PERSON"
 
-    # Filter by both
     combo = filter_entities(entities, selected_recognizers=["BERT"], selected_entity_types=["PERSON"])
     assert len(combo) == 1
     assert combo[0]["entity_type"] == "PERSON"
 
-    # Backward compatibility helper
     assert len(filter_entities_by_recognizers(entities, ["BERT"])) == 2
 
 
@@ -118,9 +105,9 @@ def test_convert_to_displacy_format():
     text = "Hello John Doe!"
     entities = [
         {"start": 6, "end": 14, "entity_type": "PERSON"},
-        {"start": -1, "end": 4, "entity_type": "INVALID"},  # negative start
-        {"start": 10, "end": 5, "entity_type": "INVALID"},  # end <= start
-        {"start": 6, "end": 100, "entity_type": "INVALID"},  # beyond text length
+        {"start": -1, "end": 4, "entity_type": "INVALID"},
+        {"start": 10, "end": 5, "entity_type": "INVALID"},
+        {"start": 6, "end": 100, "entity_type": "INVALID"},
     ]
     doc = convert_to_displacy_format(text, entities)
     assert doc["text"] == text
@@ -185,13 +172,13 @@ def test_load_data_parquet_directory(tmp_path: Path):
 
 
 def test_load_data_pipeline_output_dir(tmp_path: Path):
-    """Verify pipeline output stage discovery and row alignment."""
+    """Verify pipeline output stage discovery and row alignment by row_id."""
     out_dir = tmp_path / "pipeline_run"
     out_dir.mkdir()
 
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
-    rec_df = pd.DataFrame(
+    pd.DataFrame(
         [
             {
                 "row_id": "p1",
@@ -200,12 +187,11 @@ def test_load_data_pipeline_output_dir(tmp_path: Path):
                 "recognizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 8}]),
             }
         ]
-    )
-    rec_df.to_parquet(rec_dir / "part-0.parquet")
+    ).to_parquet(rec_dir / "part-0.parquet")
 
     anon_dir = out_dir / "anonymizer_output"
     anon_dir.mkdir()
-    anon_df = pd.DataFrame(
+    pd.DataFrame(
         [
             {
                 "row_id": "p1",
@@ -214,8 +200,7 @@ def test_load_data_pipeline_output_dir(tmp_path: Path):
                 "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 8}]),
             }
         ]
-    )
-    anon_df.to_parquet(anon_dir / "part-0.parquet")
+    ).to_parquet(anon_dir / "part-0.parquet")
 
     results, desc = load_data(out_dir)
     assert desc == "Pipeline Output Directory (Parquet)"
@@ -297,14 +282,12 @@ def test_load_pipeline_output_recovers_text_from_transformer(tmp_path: Path):
     out_dir = tmp_path / "pipeline_run_recovering"
     out_dir.mkdir()
 
-    # Transformer stage has note_text and row_id
     trans_dir = out_dir / "transformer_output"
     trans_dir.mkdir()
     pd.DataFrame([{"row_id": "r100", "text_hash": "th100", "note_text": "Recovered text"}]).to_parquet(
         trans_dir / "part-0.parquet"
     )
 
-    # Recognizer stage lacks note_text
     rec_dir = out_dir / "recognizer_output"
     rec_dir.mkdir()
     pd.DataFrame([{"row_id": "r100", "text_hash": "th100", "recognizer_results_json": "[]"}]).to_parquet(
@@ -448,163 +431,6 @@ def test_load_pipeline_output_does_not_merge_patients_sharing_text_hash(tmp_path
     assert len(results) == 2
 
 
-def test_load_data_json_files_keep_filename_identity(tmp_path: Path):
-    """Verify distinct anonymizer/recognizer JSON files with identical content are not merged."""
-    anon_dir = tmp_path / "anon_only" / "cli_anonymizer_json"
-    anon_dir.mkdir(parents=True)
-    for name in ("note_a", "note_b"):
-        (anon_dir / f"{name}.json").write_text(json.dumps({"text": "Same [NAME]", "items": []}), encoding="utf-8")
-    results, _ = load_data(tmp_path / "anon_only")
-    assert sorted(results) == ["note_a", "note_b"]
-
-    rec_dir = tmp_path / "rec_only" / "cli_recognizer_json"
-    rec_dir.mkdir(parents=True)
-    for name in ("note_a", "note_b"):
-        (rec_dir / f"{name}.json").write_text(
-            json.dumps({"key": name, "value": "Same text", "recognizer_results": []}), encoding="utf-8"
-        )
-    results, _ = load_data(tmp_path / "rec_only")
-    assert sorted(results) == ["note_a", "note_b"]
-
-    loose = tmp_path / "loose"
-    loose.mkdir()
-    for name in ("note_a", "note_b"):
-        (loose / f"{name}.json").write_text(json.dumps({"text": "Same [NAME]", "items": []}), encoding="utf-8")
-    results, _ = load_data(loose)
-    assert sorted(results) == ["note_a", "note_b"]
-
-
-def test_load_data_loose_json_text_with_recognizer_results_is_original(tmp_path: Path):
-    """Verify a loose JSON file with text and recognizer_results is shown as original text, not anonymized."""
-    data = {
-        "row_id": "r1",
-        "text": "John visited",
-        "recognizer_results": [{"entity_type": "PERSON", "start": 0, "end": 4}],
-    }
-    (tmp_path / "loose.json").write_text(json.dumps(data), encoding="utf-8")
-
-    results, _ = load_data(tmp_path)
-    assert results["r1"]["original_text"] == "John visited"
-    assert results["r1"]["modified_text"] == ""
-    assert len(results["r1"]["original_phi"]) == 1
-
-
-def test_load_data_json_directory(tmp_path: Path):
-    """Verify loading from cli_recognizer_json and cli_anonymizer_json subdirectories."""
-    out_dir = tmp_path / "json_run"
-    out_dir.mkdir()
-
-    rec_json_dir = out_dir / "cli_recognizer_json"
-    rec_json_dir.mkdir()
-    rec_data = {
-        "key": "sample_alpha",
-        "row_id": "original/note/123",
-        "text_hash": "hash_xyz",
-        "value": "Note with John",
-        "recognizer_results": [{"entity_type": "PERSON", "start": 10, "end": 14}],
-    }
-    (rec_json_dir / "sample_alpha.json").write_text(json.dumps(rec_data), encoding="utf-8")
-
-    anon_json_dir = out_dir / "cli_anonymizer_json"
-    anon_json_dir.mkdir()
-    anon_data = {
-        "key": "sample_alpha",
-        "row_id": "original/note/123",
-        "text_hash": "hash_xyz",
-        "text": "Note with [NAME]",
-        "items": [{"entity_type": "PERSON", "start": 10, "end": 16}],
-    }
-    (anon_json_dir / "sample_alpha.json").write_text(json.dumps(anon_data), encoding="utf-8")
-
-    results, desc = load_data(out_dir)
-    assert desc == "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
-    assert "original/note/123" in results
-    assert results["original/note/123"]["row_id"] == "original/note/123"
-    assert results["original/note/123"]["text_hash"] == "hash_xyz"
-    assert results["original/note/123"]["original_text"] == "Note with John"
-    assert results["original/note/123"]["modified_text"] == "Note with [NAME]"
-
-    # Test backward-compatible helper loaders
-    assert len(load_analyzer_results(rec_json_dir)) == 1
-    assert len(load_anonymized_results(anon_json_dir)) == 1
-
-
-def test_load_data_json_directory_max_notes(tmp_path: Path):
-    """Verify max_notes bounds the loading of JSON directory files."""
-    out_dir = tmp_path / "json_run_bounded"
-    out_dir.mkdir()
-    rec_json_dir = out_dir / "cli_recognizer_json"
-    rec_json_dir.mkdir()
-    anon_json_dir = out_dir / "cli_anonymizer_json"
-    anon_json_dir.mkdir()
-
-    for i in range(10):
-        sid = f"sample_{i}"
-        (rec_json_dir / f"{sid}.json").write_text(
-            json.dumps({"key": sid, "row_id": sid, "value": f"text {i}"}), encoding="utf-8"
-        )
-        (anon_json_dir / f"{sid}.json").write_text(json.dumps({"text": f"anon {i}", "items": []}), encoding="utf-8")
-
-    results, desc = load_data(out_dir, max_notes=3)
-    assert desc == "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
-    assert len(results) == 3
-
-
-def test_load_data_loose_json_files(tmp_path: Path):
-    """Verify loading directory directly containing JSON files."""
-    data = {
-        "row_id": "sample_loose",
-        "value": "Original",
-        "recognizer_results": [],
-        "text": "Anonymized",
-        "items": [],
-    }
-    (tmp_path / "loose.json").write_text(json.dumps(data), encoding="utf-8")
-
-    results, desc = load_data(tmp_path)
-    assert desc == "JSON Files Directory"
-    assert "sample_loose" in results
-    assert results["sample_loose"]["original_text"] == "Original"
-    assert results["sample_loose"]["modified_text"] == "Anonymized"
-
-
-def test_load_data_single_json_file(tmp_path: Path):
-    """Verify loading an individual JSON file."""
-    data = {
-        "key": "hashed_key",
-        "row_id": "original/sample/1",
-        "value": "Original note",
-        "recognizer_results": [{"entity_type": "DATE_TIME", "start": 0, "end": 4}],
-    }
-    file_path = tmp_path / "single.json"
-    file_path.write_text(json.dumps(data), encoding="utf-8")
-
-    results, desc = load_data(file_path)
-    assert desc == "Single JSON File"
-    assert "original/sample/1" in results
-    assert results["original/sample/1"]["row_id"] == "original/sample/1"
-    assert results["original/sample/1"]["original_text"] == "Original note"
-
-
-def test_load_data_single_json_anonymizer_disambiguation(tmp_path: Path):
-    """Verify loading a single anonymizer JSON populates only modified_text and modified_phi."""
-    data = {
-        "text": "Patient [PERSON] visited on [DATE].",
-        "items": [{"entity_type": "PERSON", "start": 8, "end": 16}],
-    }
-    file_path = tmp_path / "anon_single.json"
-    file_path.write_text(json.dumps(data), encoding="utf-8")
-
-    results, desc = load_data(file_path)
-    assert desc == "Single JSON File"
-    assert "anon_single" in results
-    sample = results["anon_single"]
-    assert sample["original_text"] == ""
-    assert sample["original_phi"] == []
-    assert sample["modified_text"] == "Patient [PERSON] visited on [DATE]."
-    assert len(sample["modified_phi"]) == 1
-
-
 def test_load_data_preserves_text_hash(tmp_path: Path):
     """Verify text_hash is preserved in pipeline and single parquet loads."""
     df = pd.DataFrame(
@@ -625,14 +451,14 @@ def test_load_data_preserves_text_hash(tmp_path: Path):
     assert results["row_123"]["text_hash"] == "hash_abc"
 
 
-def test_load_anonymizer_only_parquet_disambiguation(tmp_path: Path):
-    """Verify an anonymizer-only Parquet file with text/items assigns text to modified_text."""
+def test_load_anonymizer_only_parquet(tmp_path: Path):
+    """Verify an anonymizer-only Parquet file populates modified_text and modified_phi."""
     df = pd.DataFrame(
         [
             {
                 "row_id": "anon_1",
-                "text": "Anonymized text content",
-                "items": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 10}]),
+                "anonymized_note_text": "Anonymized text content",
+                "anonymizer_results_json": json.dumps([{"entity_type": "PERSON", "start": 0, "end": 10}]),
             }
         ]
     )
@@ -659,25 +485,21 @@ def test_load_data_max_notes_cap(tmp_path: Path):
 
 def test_load_data_errors(tmp_path: Path):
     """Verify error handling on invalid or empty paths."""
-    # Empty path
     res, desc = load_data("")
     assert res == {}
     assert desc == "No path provided"
 
-    # Non-existent path
     with pytest.raises(FileNotFoundError):
         load_data(tmp_path / "nonexistent")
 
-    # Unsupported file extension
-    csv_file = tmp_path / "test.csv"
-    csv_file.write_text("a,b,c\n", encoding="utf-8")
+    json_file = tmp_path / "test.json"
+    json_file.write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="Unsupported file format"):
-        load_data(csv_file)
+        load_data(json_file)
 
-    # Empty directory
     empty_dir = tmp_path / "empty_dir"
     empty_dir.mkdir()
-    with pytest.raises(ValueError, match="No recognizable Parquet stages or JSON files"):
+    with pytest.raises(ValueError, match="No recognizable Parquet stages or Parquet files"):
         load_data(empty_dir)
 
 

@@ -7,7 +7,7 @@ An interactive interface for:
 - Visualizing detected PHI entities and anonymization replacements
 - Filtering by entity type and recognizer engine
 - Tabular breakdown of detected PHI metadata
-- Auto-detecting and loading pipeline Parquet outputs or JSON directories
+- Auto-detecting and loading pipeline Parquet outputs
 
 Usage:
     tide2-visualizer [path]
@@ -15,7 +15,6 @@ Usage:
     streamlit run unified_interface.py [-- path]
 """
 
-import contextlib
 import json
 import os
 import sys
@@ -67,13 +66,7 @@ RECOGNIZER_COLUMNS = {
     "text_hash",
     "patient_id",
     "note_text",
-    "original_note_text",
-    "phi_note_text",
-    "text",
-    "value",
     "recognizer_results_json",
-    "recognizer_results",
-    "entities",
 }
 
 ANONYMIZER_COLUMNS = {
@@ -81,15 +74,7 @@ ANONYMIZER_COLUMNS = {
     "text_hash",
     "patient_id",
     "anonymized_note_text",
-    "deid_note_text",
-    "anonymized_text",
-    "note_text",
-    "modified_text",
-    "text",
     "anonymizer_results_json",
-    "items",
-    "anonymizer_results",
-    "operators",
 }
 
 TRANSFORMER_COLUMNS = {
@@ -97,8 +82,6 @@ TRANSFORMER_COLUMNS = {
     "text_hash",
     "patient_id",
     "note_text",
-    "text",
-    "value",
 }
 
 
@@ -297,211 +280,12 @@ def build_legend_html(entity_types: set[str]) -> str:
     return legend_html
 
 
-def _json_row_id(data: dict[str, Any], fallback_id: str) -> str:
-    """Return a JSON record's identity: its non-blank ``row_id``, else the key/filename identity.
-
-    Anonymizer JSON carries only ``text`` and ``items``, and its filename is the note's identity,
-    so an id is never derived from the (replacement) text.
-    """
-    supplied = data.get("row_id")
-    if supplied is not None and str(supplied).strip():
-        return str(supplied)
-    return fallback_id
-
-
-def _parse_json_record(data: dict[str, Any], fallback_id: str) -> dict[str, Any]:
-    """Parse one recognizer and/or anonymizer JSON document into a unified record.
-
-    ``text`` is the anonymized text when the document has anonymizer fields (``items``,
-    ``modified_text``, ``anonymized_note_text``) and the original text otherwise.
-    """
-    has_rec = "recognizer_results" in data or "value" in data or "original_text" in data
-    has_anon = "items" in data or "modified_text" in data or "anonymized_note_text" in data
-
-    orig_text = ""
-    orig_phi: list[dict[str, Any]] = []
-    if has_rec:
-        orig_text = str(
-            data.get("value") or data.get("original_text") or (data.get("text") if not has_anon else "") or ""
-        )
-        orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
-
-    mod_text = ""
-    mod_phi: list[dict[str, Any]] = []
-    if has_anon:
-        mod_text = str(data.get("modified_text") or data.get("anonymized_note_text") or data.get("text") or "")
-        mod_phi = parse_entities(data.get("items") or data.get("modified_phi") or [])
-    elif not has_rec and "text" in data:
-        orig_text = str(data.get("text", ""))
-
-    row_id = _json_row_id(data, str(data.get("key") or data.get("text_hash") or fallback_id))
-    return {
-        "sample_id": row_id,
-        "row_id": row_id,
-        "text_hash": str(data["text_hash"]) if data.get("text_hash") else None,
-        "original_text": orig_text,
-        "original_phi": orig_phi,
-        "modified_text": mod_text,
-        "modified_phi": mod_phi,
-    }
-
-
-def load_analyzer_results(
-    analyzer_dir: str | os.PathLike[str], max_notes: int | None = None
-) -> dict[str, dict[str, Any]]:
-    """Load analyzer results from a directory of JSON files.
-
-    Each JSON file is expected to have ``key`` (sample ID), ``value`` (original
-    text), and ``recognizer_results`` (list of entity dicts) fields.
-
-    Args:
-        analyzer_dir: Path to directory containing analyzer result JSON files.
-        max_notes: Optional maximum number of notes to load.
-
-    Returns:
-        Dictionary mapping sample IDs to dicts with ``original_text`` and
-        ``original_phi`` keys.
-    """
-    dir_path = Path(analyzer_dir)
-    if not dir_path.is_dir():
-        return {}
-
-    results = {}
-    for file_path in sorted(dir_path.glob("*.json")):
-        if max_notes is not None and len(results) >= max_notes:
-            break
-        with contextlib.suppress(Exception):
-            with file_path.open(encoding="utf-8") as file:
-                data = json.load(file)
-            sample_id = str(data.get("key") or file_path.stem)
-            orig_text = str(data.get("value") or data.get("text") or data.get("original_text") or "")
-            text_hash = str(data["text_hash"]) if data.get("text_hash") else None
-            row_id = _json_row_id(data, sample_id)
-            orig_phi = parse_entities(data.get("recognizer_results") or data.get("original_phi") or [])
-            results[sample_id] = {
-                "sample_id": sample_id,
-                "row_id": row_id,
-                "text_hash": text_hash,
-                "original_text": orig_text,
-                "original_phi": orig_phi,
-            }
-
-    return results
-
-
-def load_anonymized_results(
-    anonymizer_dir: str | os.PathLike[str],
-    max_notes: int | None = None,
-    allowed_ids: set[str] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Load anonymized results from a directory of JSON files.
-
-    Each JSON file is expected to have ``text`` (anonymized text) and ``items``
-    (list of anonymization item dicts) fields. The sample ID is derived from
-    the filename stem or a ``key``/``row_id`` field.
-
-    Args:
-        anonymizer_dir: Path to directory containing anonymized result JSON files.
-        max_notes: Optional maximum number of notes to load.
-        allowed_ids: Optional set of sample IDs to restrict loading to.
-
-    Returns:
-        Dictionary mapping sample IDs to dicts with ``modified_text`` and
-        ``modified_phi`` keys.
-    """
-    dir_path = Path(anonymizer_dir)
-    if not dir_path.is_dir():
-        return {}
-
-    results = {}
-    for file_path in sorted(dir_path.glob("*.json")):
-        if max_notes is not None and len(results) >= max_notes:
-            break
-        if allowed_ids is not None and file_path.stem not in allowed_ids:
-            continue
-        with contextlib.suppress(Exception):
-            with file_path.open(encoding="utf-8") as file:
-                data = json.load(file)
-            sample_id = str(data.get("key") or file_path.stem)
-            if allowed_ids is not None and sample_id not in allowed_ids:
-                continue
-            mod_text = str(data.get("text") or data.get("modified_text") or data.get("anonymized_note_text") or "")
-            text_hash = str(data["text_hash"]) if data.get("text_hash") else None
-            row_id = _json_row_id(data, sample_id)
-            mod_phi = parse_entities(
-                data.get("items") or data.get("modified_phi") or data.get("anonymizer_results") or []
-            )
-            results[sample_id] = {
-                "sample_id": sample_id,
-                "row_id": row_id,
-                "text_hash": text_hash,
-                "modified_text": mod_text,
-                "modified_phi": mod_phi,
-            }
-
-    return results
-
-
-def _resolve_text_columns(df: pd.DataFrame) -> tuple[str | None, str | None, str | None, str | None]:
-    """Determine recognizer/anonymizer text and entity columns without ambiguous assignment.
-
-    Returns:
-        Tuple of (orig_text_col, rec_phi_col, anon_text_col, anon_phi_col).
-    """
-    rec_phi_col = next(
-        (c for c in ("recognizer_results_json", "recognizer_results", "entities") if c in df.columns),
-        None,
-    )
-    anon_phi_col = next(
-        (c for c in ("anonymizer_results_json", "items", "anonymizer_results", "operators") if c in df.columns),
-        None,
-    )
-
-    has_rec = rec_phi_col is not None
-    has_anon = anon_phi_col is not None
-
-    orig_text_candidates = ("original_note_text", "phi_note_text", "value")
-    anon_text_candidates = ("anonymized_note_text", "deid_note_text", "anonymized_text", "modified_text")
-
-    explicit_orig = next((c for c in orig_text_candidates if c in df.columns), None)
-    explicit_anon = next((c for c in anon_text_candidates if c in df.columns), None)
-
-    ambiguous_text = next((c for c in ("note_text", "text") if c in df.columns), None)
-
-    orig_text_col = explicit_orig
-    anon_text_col = explicit_anon
-
-    if not has_rec and has_anon and not explicit_anon and ambiguous_text:
-        anon_text_col = ambiguous_text
-    elif explicit_orig is None and ambiguous_text:
-        orig_text_col = ambiguous_text
-
-    return orig_text_col, rec_phi_col, anon_text_col, anon_phi_col
-
-
-_ID_TEXT_COLUMNS = (
-    "note_text",
-    "original_note_text",
-    "phi_note_text",
-    "text",
-    "value",
-    "anonymized_note_text",
-    "deid_note_text",
-    "anonymized_text",
-    "modified_text",
-)
-
-
 def _ensure_table_row_id(table: pa.Table) -> pa.Table:
-    """Return the table with a complete string ``row_id``, derived with ``add_row_id`` where it is missing.
-
-    A missing ``text_hash`` is computed from the note text, as ``normalize_source_batch`` does, so the
-    derived ``row_id`` is the one the pipeline would have written for the same note and patient.
-    """
+    """Return the table with a complete string ``row_id``, derived with ``add_row_id`` where it is missing."""
     if "row_id" not in table.column_names or table["row_id"].null_count > 0:
         has_hash = "text_hash" in table.column_names
         if not has_hash or table["text_hash"].null_count > 0:
-            text_col = next((c for c in _ID_TEXT_COLUMNS if c in table.column_names), None)
+            text_col = next((c for c in ("note_text", "anonymized_note_text") if c in table.column_names), None)
             texts = table[text_col].to_pylist() if text_col else [None] * len(table)
             supplied = table["text_hash"].to_pylist() if has_hash else [None] * len(table)
             hashes = pa.array(
@@ -520,12 +304,7 @@ def _ensure_table_row_id(table: pa.Table) -> pa.Table:
 
 
 def _stage_pushdown_filter(schema_names: set[str], target_ids: set[str], target_hashes: set[str]) -> Any:
-    """Build a scan predicate that keeps every row that could resolve to one of ``target_ids``.
-
-    Rows with a null ``row_id`` are kept because their id is derived after the scan, and a stage with
-    no ``row_id`` column is narrowed by ``text_hash`` (part of the derivation). The exact match on the
-    normalized ``row_id`` is applied after the scan.
-    """
+    """Build a scan predicate that keeps every row that could resolve to one of ``target_ids``."""
     if "row_id" in schema_names:
         row_id = pads.field("row_id")
         return row_id.cast(pa.string()).isin(sorted(target_ids)) | row_id.is_null()
@@ -535,46 +314,6 @@ def _stage_pushdown_filter(schema_names: set[str], target_ids: set[str], target_
     return None
 
 
-def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None) -> dict[str, dict[str, Any]]:
-    """Parse unified sample records from a pandas DataFrame.
-
-    Args:
-        df: DataFrame containing recognizer and/or anonymizer columns.
-        max_notes: Optional maximum number of rows to load.
-
-    Returns:
-        Dictionary mapping sample IDs to sample data dictionaries.
-    """
-    if df.empty:
-        return {}
-
-    if max_notes and len(df) > max_notes:
-        df = df.iloc[:max_notes]
-
-    orig_text_col, rec_phi_col, anon_text_col, anon_phi_col = _resolve_text_columns(df)
-
-    results: dict[str, dict[str, Any]] = {}
-    for _, row in df.iterrows():
-        row_id = str(row["row_id"])
-        th_val = str(row["text_hash"]) if "text_hash" in df.columns and pd.notna(row["text_hash"]) else None
-        orig_text = str(row[orig_text_col]) if orig_text_col and pd.notna(row[orig_text_col]) else ""
-        orig_phi = parse_entities(row[rec_phi_col]) if rec_phi_col else []
-        anon_text = str(row[anon_text_col]) if anon_text_col and pd.notna(row[anon_text_col]) else ""
-        anon_phi = parse_entities(row[anon_phi_col]) if anon_phi_col else []
-
-        results[row_id] = {
-            "sample_id": row_id,
-            "row_id": row_id,
-            "text_hash": th_val,
-            "original_text": orig_text,
-            "original_phi": orig_phi,
-            "modified_text": anon_text,
-            "modified_phi": anon_phi,
-        }
-
-    return results
-
-
 def _scan_dataset_to_pandas(
     path: Path,
     target_cols: set[str],
@@ -582,13 +321,7 @@ def _scan_dataset_to_pandas(
     target_ids: set[str] | None = None,
     target_hashes: set[str] | None = None,
 ) -> pd.DataFrame:
-    """Scan a parquet file or dataset directory, one batch at a time, into a frame with a ``row_id`` column.
-
-    Each batch gets its ``row_id`` completed (see ``_ensure_table_row_id``) before anything is counted, so
-    ``max_notes`` always limits normalized rows. With ``target_ids`` only rows that resolve to one of those
-    ids are kept (a stage matched to the rows chosen from another stage), and the scan ends once every
-    target has been found; ``target_hashes`` lets a stage without a ``row_id`` column push the match down.
-    """
+    """Scan a Parquet file or dataset directory into a DataFrame with a guaranteed ``row_id`` column."""
     ds = pads.dataset(path)
     schema_names = set(ds.schema.names)
     cols = [c for c in schema_names if c in target_cols]
@@ -620,27 +353,47 @@ def _scan_dataset_to_pandas(
     return pa.concat_tables(tables).to_pandas() if tables else pd.DataFrame()
 
 
+def _load_results_from_dataframe(df: pd.DataFrame, max_notes: int | None = None) -> dict[str, dict[str, Any]]:
+    """Parse sample records from a DataFrame keyed by ``row_id``."""
+    if df.empty:
+        return {}
+
+    if max_notes and len(df) > max_notes:
+        df = df.iloc[:max_notes]
+
+    has_orig_text = "note_text" in df.columns
+    has_orig_phi = "recognizer_results_json" in df.columns
+    has_anon_text = "anonymized_note_text" in df.columns
+    has_anon_phi = "anonymizer_results_json" in df.columns
+    has_hash = "text_hash" in df.columns
+
+    results: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        row_id = str(row["row_id"])
+        results[row_id] = {
+            "sample_id": row_id,
+            "row_id": row_id,
+            "text_hash": str(row["text_hash"]) if has_hash and pd.notna(row["text_hash"]) else None,
+            "original_text": str(row["note_text"]) if has_orig_text and pd.notna(row["note_text"]) else "",
+            "original_phi": parse_entities(row["recognizer_results_json"]) if has_orig_phi else [],
+            "modified_text": (
+                str(row["anonymized_note_text"]) if has_anon_text and pd.notna(row["anonymized_note_text"]) else ""
+            ),
+            "modified_phi": parse_entities(row["anonymizer_results_json"]) if has_anon_phi else [],
+        }
+
+    return results
+
+
 def load_from_parquet_file(
     file_or_dir: str | os.PathLike[str], max_notes: int | None = None
 ) -> dict[str, dict[str, Any]]:
-    """Load sample records from a Parquet file or directory of Parquet files.
-
-    Args:
-        file_or_dir: Path to a ``.parquet`` file or a directory containing Parquet files.
-        max_notes: Optional maximum number of rows to load.
-
-    Returns:
-        Dictionary mapping sample IDs to sample data dictionaries.
-
-    Raises:
-        FileNotFoundError: If the path does not exist or directory contains no Parquet files.
-    """
+    """Load sample records from a Parquet file or directory of Parquet files."""
     path = Path(file_or_dir)
     if path.is_file():
         df = _scan_dataset_to_pandas(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     elif path.is_dir():
-        parquet_files = sorted(path.glob("**/*.parquet"))
-        if not parquet_files:
+        if not any(path.glob("**/*.parquet")):
             raise FileNotFoundError(f"No parquet files found in {path}")
         df = _scan_dataset_to_pandas(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     else:
@@ -651,23 +404,18 @@ def load_from_parquet_file(
 
 def _find_pipeline_stage_dirs(root: Path) -> tuple[Path | None, Path | None, Path | None]:
     """Locate recognizer, anonymizer, and transformer stage directories."""
-    rec_dir = None
-    for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output"):
-        cand = root / stage
-        if cand.is_dir() and any(cand.glob("**/*.parquet")):
-            rec_dir = cand
-            break
-
-    anon_dir = None
-    cand_anon = root / "anonymizer_output"
-    if cand_anon.is_dir() and any(cand_anon.glob("**/*.parquet")):
-        anon_dir = cand_anon
-
-    trans_dir = None
-    cand_trans = root / "transformer_output"
-    if cand_trans.is_dir() and any(cand_trans.glob("**/*.parquet")):
-        trans_dir = cand_trans
-
+    rec_dir = next(
+        (
+            cand
+            for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output")
+            if (cand := root / stage).is_dir() and any(cand.glob("**/*.parquet"))
+        ),
+        None,
+    )
+    anon_cand = root / "anonymizer_output"
+    anon_dir = anon_cand if anon_cand.is_dir() and any(anon_cand.glob("**/*.parquet")) else None
+    trans_cand = root / "transformer_output"
+    trans_dir = trans_cand if trans_cand.is_dir() and any(trans_cand.glob("**/*.parquet")) else None
     return rec_dir, anon_dir, trans_dir
 
 
@@ -676,46 +424,21 @@ def _load_pipeline_recognizer_stage(
     transformer_dir: Path | None,
     max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Load recognizer parquet output and optional transformer backfill."""
+    """Load recognizer Parquet output and optional transformer backfill keyed by ``row_id``."""
     rec_df = _scan_dataset_to_pandas(recognizer_dir, RECOGNIZER_COLUMNS, max_notes=max_notes)
+    rec_results = _load_results_from_dataframe(rec_df, max_notes=max_notes)
 
-    text_col = next((c for c in ("note_text", "original_note_text", "text", "value") if c in rec_df.columns), None)
-    rec_phi_col = next(
-        (c for c in ("recognizer_results_json", "recognizer_results", "entities") if c in rec_df.columns), None
-    )
-
-    rec_results: dict[str, dict[str, Any]] = {}
-
-    for _, row in rec_df.iterrows():
-        row_id = str(row["row_id"])
-        text_val = ""
-        if text_col and pd.notna(row.get(text_col)) and str(row.get(text_col)).strip():
-            text_val = str(row[text_col])
-
-        phi_val = parse_entities(row.get(rec_phi_col)) if rec_phi_col else []
-        th_val = str(row["text_hash"]) if "text_hash" in rec_df.columns and pd.notna(row["text_hash"]) else None
-
-        rec_results[row_id] = {
-            "sample_id": row_id,
-            "row_id": row_id,
-            "text_hash": th_val,
-            "original_text": text_val,
-            "original_phi": phi_val,
-        }
-
-    # Recover missing note_text from the transformer stage, matched to the selected recognizer rows
-    missing_ids = {rid for rid, item in rec_results.items() if not item["original_text"]}
+    missing_ids = {rid for rid, item in rec_results.items() if not item["original_text"].strip()}
     if transformer_dir and missing_ids:
         missing_hashes = {rec_results[rid]["text_hash"] for rid in missing_ids if rec_results[rid]["text_hash"]}
         trans_df = _scan_dataset_to_pandas(
             transformer_dir, TRANSFORMER_COLUMNS, target_ids=missing_ids, target_hashes=missing_hashes
         )
-        t_col = next((c for c in ("note_text", "text", "value") if c in trans_df.columns), None)
-        if t_col:
-            text_map = {str(r["row_id"]): str(r[t_col]) for _, r in trans_df[["row_id", t_col]].dropna().iterrows()}
-            for rid in missing_ids:
-                if rid in text_map:
-                    rec_results[rid]["original_text"] = text_map[rid]
+        if "note_text" in trans_df.columns:
+            for _, r in trans_df[["row_id", "note_text"]].dropna().iterrows():
+                rid = str(r["row_id"])
+                if rid in missing_ids:
+                    rec_results[rid]["original_text"] = str(r["note_text"])
 
     return rec_results
 
@@ -725,7 +448,7 @@ def _load_pipeline_anonymizer_stage(
     rec_results: dict[str, dict[str, Any]],
     max_notes: int | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Load anonymizer parquet output, matched to the recognizer rows when there are any."""
+    """Load anonymizer Parquet output, matched by ``row_id`` to ``rec_results`` when present."""
     target_ids = set(rec_results) or None
     target_hashes = {item["text_hash"] for item in rec_results.values() if item["text_hash"]}
     anon_df = _scan_dataset_to_pandas(
@@ -735,90 +458,31 @@ def _load_pipeline_anonymizer_stage(
         target_ids=target_ids,
         target_hashes=target_hashes,
     )
-
-    text_col = next(
-        (
-            c
-            for c in ("anonymized_note_text", "deid_note_text", "anonymized_text", "note_text", "text")
-            if c in anon_df.columns
-        ),
-        None,
-    )
-    phi_col = next(
-        (c for c in ("anonymizer_results_json", "items", "anonymizer_results", "operators") if c in anon_df.columns),
-        None,
-    )
-
-    anon_results: dict[str, dict[str, Any]] = {}
-    for _, row in anon_df.iterrows():
-        row_id = str(row["row_id"])
-        th_val = str(row["text_hash"]) if "text_hash" in anon_df.columns and pd.notna(row["text_hash"]) else None
-        mod_text = str(row[text_col]) if text_col and pd.notna(row.get(text_col)) else ""
-        mod_phi = parse_entities(row.get(phi_col)) if phi_col else []
-
-        anon_results[row_id] = {
-            "sample_id": row_id,
-            "row_id": row_id,
-            "text_hash": th_val,
-            "modified_text": mod_text,
-            "modified_phi": mod_phi,
-        }
-
-    return anon_results
+    return _load_results_from_dataframe(anon_df)
 
 
 def load_pipeline_output_dir(
     output_dir: str | os.PathLike[str], max_notes: int | None = None
 ) -> dict[str, dict[str, Any]]:
-    """Load and join recognizer and anonymizer Parquet stages from a pipeline run.
-
-    Discovers:
-    - Recognizer stage: ``merged_recognizer_output/``, else ``llm_recognizer_output/``,
-      else ``recognizer_output/``.
-    - Anonymizer stage: ``anonymizer_output/``.
-    - Transformer stage: ``transformer_output/`` (used to backfill ``note_text``
-      if omitted in the recognizer output).
-
-    Rows are aligned strictly by ``row_id``.
-
-    Args:
-        output_dir: Directory containing pipeline output stage folders.
-        max_notes: Optional maximum number of rows to load.
-
-    Returns:
-        Dictionary mapping sample IDs to merged sample records.
-
-    Raises:
-        ValueError: If neither recognizer nor anonymizer stage output is found.
-    """
+    """Load and join recognizer and anonymizer Parquet stages from a pipeline run by ``row_id``."""
     root = Path(output_dir)
     rec_dir, anon_dir, trans_dir = _find_pipeline_stage_dirs(root)
 
     if not rec_dir and not anon_dir:
         raise ValueError(f"No pipeline stage parquet files found under {root}")
 
-    rec_results: dict[str, dict[str, Any]] = {}
-    if rec_dir:
-        rec_results = _load_pipeline_recognizer_stage(rec_dir, trans_dir, max_notes=max_notes)
+    rec_results = _load_pipeline_recognizer_stage(rec_dir, trans_dir, max_notes=max_notes) if rec_dir else {}
+    anon_results = _load_pipeline_anonymizer_stage(anon_dir, rec_results, max_notes=max_notes) if anon_dir else {}
 
-    anon_results: dict[str, dict[str, Any]] = {}
-    if anon_dir:
-        anon_results = _load_pipeline_anonymizer_stage(anon_dir, rec_results, max_notes=max_notes)
-
+    all_ids = list(rec_results) + [rid for rid in anon_results if rid not in rec_results]
     results: dict[str, dict[str, Any]] = {}
-    all_keys = list(rec_results.keys())
-    for k in anon_results:
-        if k not in rec_results:
-            all_keys.append(k)
-
-    for k in all_keys:
-        rec = rec_results.get(k, {})
-        anon = anon_results.get(k, {})
-        th = rec.get("text_hash") or anon.get("text_hash")
-        results[k] = {
-            "sample_id": k,
-            "row_id": k,
-            "text_hash": th,
+    for rid in all_ids:
+        rec = rec_results.get(rid, {})
+        anon = anon_results.get(rid, {})
+        results[rid] = {
+            "sample_id": rid,
+            "row_id": rid,
+            "text_hash": rec.get("text_hash") or anon.get("text_hash"),
             "original_text": rec.get("original_text", ""),
             "original_phi": rec.get("original_phi", []),
             "modified_text": anon.get("modified_text", ""),
@@ -828,124 +492,13 @@ def load_pipeline_output_dir(
     return results
 
 
-def _load_data_file(p: Path, max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
-    """Load data from a single Parquet or JSON file."""
-    if p.suffix.lower() == ".parquet":
-        return load_from_parquet_file(p, max_notes=max_notes), "Single Parquet File"
-    if p.suffix.lower() == ".json":
-        try:
-            with p.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            raise ValueError(f"Could not load JSON file {p}: {e}") from e
-
-        record = _parse_json_record(data, p.stem)
-        return {record["row_id"]: record}, "Single JSON File"
-
-    raise ValueError(f"Unsupported file format '{p.suffix}'. Expected .parquet or .json")
-
-
-def _load_data_dir(p: Path, max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
-    """Load data from a directory by auto-detecting layout."""
-    for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output", "anonymizer_output"):
-        if (p / stage).is_dir() and any((p / stage).glob("**/*.parquet")):
-            return load_pipeline_output_dir(p, max_notes=max_notes), "Pipeline Output Directory (Parquet)"
-
-    rec_json_dir = p / "cli_recognizer_json"
-    anon_json_dir = p / "cli_anonymizer_json"
-    if rec_json_dir.is_dir() or anon_json_dir.is_dir():
-        rec_res = load_analyzer_results(rec_json_dir, max_notes=max_notes) if rec_json_dir.is_dir() else {}
-        allowed_ids = set(rec_res.keys()) if rec_res else None
-        anon_res = (
-            load_anonymized_results(anon_json_dir, max_notes=max_notes, allowed_ids=allowed_ids)
-            if anon_json_dir.is_dir()
-            else {}
-        )
-        all_ids = list(rec_res.keys())
-        for k in anon_res:
-            if k not in rec_res:
-                all_ids.append(k)
-        if max_notes and len(all_ids) > max_notes:
-            all_ids = all_ids[:max_notes]
-
-        combined: dict[str, dict[str, Any]] = {}
-        for sid in all_ids:
-            r = rec_res.get(sid, {})
-            a = anon_res.get(sid, {})
-            row_id = r.get("row_id") or a.get("row_id") or sid
-            combined[row_id] = {
-                "sample_id": row_id,
-                "row_id": row_id,
-                "text_hash": r.get("text_hash") or a.get("text_hash"),
-                "original_text": r.get("original_text", ""),
-                "original_phi": r.get("original_phi", []),
-                "modified_text": a.get("modified_text", ""),
-                "modified_phi": a.get("modified_phi", []),
-            }
-        return combined, "JSON Directory (cli_recognizer_json / cli_anonymizer_json)"
-
-    if any(p.glob("*.parquet")):
-        return load_from_parquet_file(p, max_notes=max_notes), "Parquet Directory"
-
-    json_files = list(p.glob("*.json"))
-    if json_files:
-        if max_notes and len(json_files) > max_notes:
-            json_files = json_files[:max_notes]
-        combined = {}
-        for jf in json_files:
-            with contextlib.suppress(Exception):
-                with jf.open(encoding="utf-8") as f:
-                    data = json.load(f)
-                record = _parse_json_record(data, jf.stem)
-                existing = combined.get(record["row_id"])
-                if existing is None:
-                    combined[record["row_id"]] = record
-                    continue
-                # A recognizer file and an anonymizer file for one note share an identity: merge their fields.
-                for field, value in record.items():
-                    if value:
-                        existing[field] = value
-        if combined:
-            return combined, "JSON Files Directory"
-
-    raise ValueError(f"No recognizable Parquet stages or JSON files found in {p}")
-
-
 def _resolve_data_path(user_input: str) -> Path:
-    """Normalize and resolve user-supplied path to prevent path traversal issues.
-
-    Args:
-        user_input: Raw string path from user input or CLI.
-
-    Returns:
-        Resolved Path object.
-    """
-    clean_path = os.path.normpath(user_input.strip())
-    return Path(clean_path).resolve()
+    """Normalize and resolve user-supplied path."""
+    return Path(os.path.normpath(user_input.strip())).resolve()
 
 
 def load_data(path: str | os.PathLike[str], max_notes: int | None = None) -> tuple[dict[str, dict[str, Any]], str]:
-    """Unified data loader with automatic format detection.
-
-    Auto-detects:
-    1. Pipeline Parquet output directory (containing stage subdirectories).
-    2. JSON results directory (containing ``cli_recognizer_json/`` and/or ``cli_anonymizer_json/``).
-    3. Directory containing ``*.parquet`` files directly.
-    4. Directory containing ``*.json`` files directly.
-    5. Single ``.parquet`` file.
-    6. Single ``.json`` file.
-
-    Args:
-        path: Path to file or folder to load.
-        max_notes: Optional maximum number of notes to load to conserve memory.
-
-    Returns:
-        Tuple of (results_dict, format_description_str).
-
-    Raises:
-        FileNotFoundError: If the path does not exist.
-        ValueError: If format is unsupported or contains no recognizable data.
-    """
+    """Load Parquet pipeline stages, a Parquet directory, or a single Parquet file."""
     if not path:
         return {}, "No path provided"
 
@@ -954,24 +507,22 @@ def load_data(path: str | os.PathLike[str], max_notes: int | None = None) -> tup
         raise FileNotFoundError(f"Path does not exist: {p}")
 
     if p.is_file():
-        return _load_data_file(p, max_notes=max_notes)
+        if p.suffix.lower() != ".parquet":
+            raise ValueError(f"Unsupported file format '{p.suffix}'. Expected .parquet")
+        return load_from_parquet_file(p, max_notes=max_notes), "Single Parquet File"
 
-    return _load_data_dir(p, max_notes=max_notes)
+    rec_dir, anon_dir, _ = _find_pipeline_stage_dirs(p)
+    if rec_dir or anon_dir:
+        return load_pipeline_output_dir(p, max_notes=max_notes), "Pipeline Output Directory (Parquet)"
+
+    if any(p.glob("*.parquet")):
+        return load_from_parquet_file(p, max_notes=max_notes), "Parquet Directory"
+
+    raise ValueError(f"No recognizable Parquet stages or Parquet files found in {p}")
 
 
 def parse_cli_args(args: list[str] | None = None) -> str:
-    """Extract data path from CLI arguments if provided.
-
-    When launched via ``tide2-visualizer [path]`` (which runs
-    ``streamlit run unified_interface.py -- [path]``), the CLI arguments
-    appear in ``sys.argv``.
-
-    Args:
-        args: List of command-line arguments. Defaults to ``sys.argv[1:]``.
-
-    Returns:
-        The first positional path argument, or an empty string if none provided.
-    """
+    """Extract data path from CLI arguments if provided."""
     raw_args = sys.argv[1:] if args is None else args
     for arg in raw_args:
         if not arg.startswith("-"):
@@ -986,7 +537,7 @@ def _render_sidebar_data_location() -> None:
         data_path_input = st.text_input(
             "Path to Output Folder or File:",
             value=st.session_state.get("data_path", ""),
-            help="Path to pipeline output folder, JSON results folder, or Parquet file",
+            help="Path to pipeline output folder or Parquet file",
             key="data_path_widget",
         )
         row_limit = st.number_input(
@@ -1268,7 +819,7 @@ def main() -> None:
 
     results: dict[str, dict[str, Any]] = st.session_state.get("results", {})
     if not results:
-        st.info("Please enter a valid path to pipeline output or JSON results in the sidebar and click **Load Data**.")
+        st.info("Please enter a valid path to pipeline output or Parquet file in the sidebar and click **Load Data**.")
         return
 
     selected_sample, total_samples = _render_sidebar_navigation(results)
