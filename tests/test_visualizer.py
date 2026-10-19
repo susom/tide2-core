@@ -602,9 +602,99 @@ def test_load_pipeline_preserves_failed_status(tmp_path: Path, monkeypatch):
     ui._render_phi_table(
         rec["original_text"], rec["original_phi"], [], rec["processing_status"], rec["stage_status_json"]
     )
+    assert len(warnings) == 2
+    assert "Processing failed" in warnings[0]
+    assert "unavailable" in warnings[1]
+    assert infos == []
+
+
+def test_render_phi_table_shows_detections_when_only_anonymizer_failed(tmp_path: Path, monkeypatch):
+    """Verify successful recognition followed by anonymizer failure renders both warning and detections/filter info."""
+    out_dir = tmp_path / "pipeline_anon_failed"
+    out_dir.mkdir()
+    (out_dir / "recognizer_output").mkdir()
+    (out_dir / "anonymizer_output").mkdir()
+
+    rec_stage_json = json.dumps({"recognizer": {"status": "success"}})
+    anon_stage_json = json.dumps(
+        {
+            "recognizer": {"status": "success"},
+            "anonymizer": {"status": "failed", "reason": "MRN:RuntimeError"},
+        }
+    )
+    phi_ent = {"entity_type": "PERSON", "start": 0, "end": 4, "score": 0.99}
+
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "r_anon_fail",
+                    "text_hash": "h1",
+                    "note_text": "John seen today",
+                    "recognizer_results_json": json.dumps([phi_ent]),
+                    "processing_status": "success",
+                    "stage_status_json": rec_stage_json,
+                }
+            ]
+        ),
+        out_dir / "recognizer_output" / "part-0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "r_anon_fail",
+                    "text_hash": "h1",
+                    "anonymized_note_text": "Anon seen today",
+                    "anonymizer_results_json": json.dumps([phi_ent]),
+                    "processing_status": "failed",
+                    "stage_status_json": anon_stage_json,
+                }
+            ]
+        ),
+        out_dir / "anonymizer_output" / "part-0.parquet",
+    )
+
+    results = load_pipeline_output_dir(out_dir)
+    rec = results["r_anon_fail"]
+    assert rec["processing_status"] == "failed"
+    assert len(rec["original_phi"]) == 1
+
+    warnings: list[str] = []
+    infos: list[str] = []
+    tables: list[pa.Table] = []
+    monkeypatch.setattr(ui.st, "divider", lambda: None)
+    monkeypatch.setattr(ui.st, "subheader", lambda *_: None)
+    monkeypatch.setattr(ui.st, "warning", warnings.append)
+    monkeypatch.setattr(ui.st, "info", infos.append)
+    monkeypatch.setattr(ui.st, "dataframe", lambda tbl, **_: tables.append(tbl))
+
+    # Case 1: detections pass filters -> warning + dataframe rendered
+    ui._render_phi_table(
+        rec["original_text"],
+        rec["original_phi"],
+        rec["original_phi"],
+        rec["processing_status"],
+        rec["stage_status_json"],
+    )
     assert len(warnings) == 1
     assert "Processing failed" in warnings[0]
+    assert len(tables) == 1
     assert infos == []
+
+    # Case 2: filters hide all detections -> warning + "No PHI matching the selected filters."
+    warnings.clear()
+    tables.clear()
+    ui._render_phi_table(
+        rec["original_text"],
+        rec["original_phi"],
+        [],
+        rec["processing_status"],
+        rec["stage_status_json"],
+    )
+    assert len(warnings) == 1
+    assert tables == []
+    assert infos == ["No PHI matching the selected filters."]
 
 
 def test_load_data_errors(tmp_path: Path):

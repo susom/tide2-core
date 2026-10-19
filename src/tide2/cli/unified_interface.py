@@ -30,6 +30,7 @@ from spacy import displacy
 from tide2.runner.local_runner import add_row_id
 from tide2.utils.nulls import is_null
 from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import load_stage_status
 from tide2.utils.stage_status import merge_stage_status
 from tide2.utils.text_processing import compute_text_hash
 
@@ -784,6 +785,23 @@ def _render_comparison_view(
         st.warning("No text content available for this note.")
 
 
+def _is_recognition_unavailable(
+    original_phi: list[dict[str, Any]],
+    processing_status: str | None,
+    stage_status_json: str | None,
+) -> bool:
+    """Return True when recognition failed and produced no detections."""
+    if original_phi or processing_status != FAILED:
+        return False
+    stages = load_stage_status(stage_status_json)
+    if not stages:
+        return True
+    return any(
+        isinstance(stages.get(stage), dict) and stages[stage].get("status") == FAILED
+        for stage in ("transformer", "bio_aggregation", "recognizer", "llm_recognizer")
+    )
+
+
 def _render_phi_table(
     original_text: str,
     original_phi: list[dict[str, Any]],
@@ -796,8 +814,9 @@ def _render_phi_table(
     st.subheader("Detected PHI in this Note")
     if processing_status == FAILED:
         detail = f" ({stage_status_json})" if stage_status_json else ""
-        st.warning(f"Processing failed for this note; PHI detection results are unavailable{detail}.")
-    elif filtered_original_phi:
+        st.warning(f"Processing failed for this note{detail}.")
+
+    if filtered_original_phi:
         table_rows = []
         for ent in filtered_original_phi:
             start = ent.get("start", 0)
@@ -820,6 +839,8 @@ def _render_phi_table(
                 }
             )
         st.dataframe(pa.Table.from_pylist(table_rows), use_container_width=True)
+    elif _is_recognition_unavailable(original_phi, processing_status, stage_status_json):
+        st.warning("PHI detection results are unavailable for this note.")
     elif not original_phi:
         st.info("No PHI detected in this note.")
     else:
