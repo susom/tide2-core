@@ -82,6 +82,10 @@ TIDE 2.0 includes a Streamlit visualizer for comparing original and de-identifie
 
 Launch it with:
 ```bash
+# Point directly to a pipeline output directory or single Parquet file
+tide2-visualizer ./data/output
+
+# Or launch with blank interface
 tide2-visualizer
 ```
 
@@ -143,12 +147,11 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Command Line Tools
 - **`tide2-runner`**: Ray-based single-node job runner with five job types: `recognizer`, `anonymizer`, `transformer`, `pipeline` (full end-to-end), and `llm-recognizer`. Supports YAML config files (`--config`) and dry-run mode (`--dry-run` for recognizer, anonymizer, and llm-recognizer).
-- **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and entity editing.
+- **`tide2-visualizer`**: Streamlit app for side-by-side PHI comparison and inspection.
 
 
 ### Cloud Integration
 - **GCS**: input/output I/O and model caching.
-- **BigQuery**: input/output of notes and recognizer/anonymizer results (e.g. via `ARRAY_AGG`-grouped chunk columns) for the runner and visualizer.
 - **Automatic Caching**: Download and cache models from GCS automatically (`$TIDE_CACHE_DIR`).
 
 ## CLI Usage
@@ -198,19 +201,8 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
     --read-cpus 0.25 --write-cpus 0.25 \
     --agg-num-cpus 0.5 --transformer-cpus 0.25 --no-checkpoint
 
-# Generate visualizer JSON files from a finished pipeline run
-tide2-runner visualizer-json -o ./data/output
-```
-
-### Visualizer JSON Generation (Python API)
-
-After running the pipeline, generate JSON files for `tide2-visualizer`:
-
-```python
-from tide2.runner.utils import write_visualizer_json
-
-counts = write_visualizer_json(output_dir="./data/output")
-print(f"Generated {counts.get('recognizer_json', 0):,} recognizer and {counts.get('anonymizer_json', 0):,} anonymizer JSON files")
+# Inspect pipeline output interactively in the Streamlit visualizer
+tide2-visualizer ./data/output
 ```
 
 #### Execution modes: `discrete` (default) vs `streamed`
@@ -668,13 +660,22 @@ Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
 
 ### Interactive Visualizer
 
+TIDE 2.0 includes a Streamlit visualizer for inspecting clinical notes before and after de-identification side by side, with highlighted PHI entities, recognizer/entity filtering, and tabular metadata breakdowns.
+
 ```bash
-# Launch the Streamlit PHI visualizer
+# Launch visualizer pointing directly to a pipeline output directory
+tide2-visualizer ./data/output
+
+# Or launch pointing to an individual Parquet file
+tide2-visualizer ./data/output/anonymizer_output/part-0.parquet
+
+# Or launch with blank interface
 tide2-visualizer
 ```
 
-To load the results of a pipeline run in the visualizer, write the JSON files it
-reads. This is a separate step, run after the pipeline on a local output folder:
+The visualizer auto-detects **Parquet pipeline stages** (`merged_recognizer_output`, `llm_recognizer_output`, `recognizer_output`, `anonymizer_output`, and `transformer_output` for note text recovery) as well as individual Parquet files or directories containing Parquet files, matching rows across stages by `row_id`.
+
+If you also want to export human-readable JSON files from a finished pipeline run:
 
 ```bash
 tide2-runner visualizer-json -o ./output
