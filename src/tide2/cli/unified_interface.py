@@ -29,6 +29,8 @@ from spacy import displacy
 
 from tide2.runner.local_runner import add_row_id
 from tide2.utils.nulls import is_null
+from tide2.utils.stage_status import FAILED
+from tide2.utils.stage_status import merge_stage_status
 from tide2.utils.text_processing import compute_text_hash
 
 # Color mapping for entity types
@@ -67,6 +69,8 @@ RECOGNIZER_COLUMNS = {
     "patient_id",
     "note_text",
     "recognizer_results_json",
+    "processing_status",
+    "stage_status_json",
 }
 
 ANONYMIZER_COLUMNS = {
@@ -75,6 +79,8 @@ ANONYMIZER_COLUMNS = {
     "patient_id",
     "anonymized_note_text",
     "anonymizer_results_json",
+    "processing_status",
+    "stage_status_json",
 }
 
 TRANSFORMER_COLUMNS = {
@@ -329,19 +335,28 @@ def _scan_dataset_to_table(
         return None
 
     filter_expr = _stage_pushdown_filter(schema_names, target_ids, target_hashes or set()) if target_ids else None
+    batch_size = min(max_notes, 512) if max_notes is not None and not target_ids else 512
 
     tables: list[pa.Table] = []
     collected = 0
     found: set[str] = set()
-    for batch in ds.scanner(columns=cols, filter=filter_expr).to_batches():
-        table = _ensure_table_row_id(pa.Table.from_batches([batch]))
+    scanner = ds.scanner(
+        columns=cols,
+        filter=filter_expr,
+        batch_size=batch_size,
+        batch_readahead=1,
+        fragment_readahead=1,
+    )
+    for batch in scanner.to_batches():
+        cur_batch = batch.slice(0, max_notes - collected) if max_notes is not None and not target_ids else batch
+        table = _ensure_table_row_id(pa.Table.from_batches([cur_batch]))
         if target_ids:
             table = table.filter(pa.array([row_id in target_ids for row_id in table["row_id"].to_pylist()], pa.bool_()))
         if max_notes is not None:
             table = table.slice(0, max_notes - collected)
         if len(table) == 0:
             continue
-        tables.append(table)
+        tables.append(pa.Table.from_pydict(table.to_pydict(), schema=table.schema))
         collected += len(table)
         if max_notes is not None and collected >= max_notes:
             break
@@ -367,6 +382,8 @@ def _load_results_from_table(table: pa.Table | None, max_notes: int | None = Non
         text_hash = row.get("text_hash")
         note_text = row.get("note_text")
         anon_text = row.get("anonymized_note_text")
+        proc_status = row.get("processing_status")
+        stage_status = row.get("stage_status_json")
         results[row_id] = {
             "sample_id": row_id,
             "row_id": row_id,
@@ -375,6 +392,8 @@ def _load_results_from_table(table: pa.Table | None, max_notes: int | None = Non
             "original_phi": parse_entities(row.get("recognizer_results_json")),
             "modified_text": str(anon_text) if not is_null(anon_text) else "",
             "modified_phi": parse_entities(row.get("anonymizer_results_json")),
+            "processing_status": str(proc_status) if not is_null(proc_status) else None,
+            "stage_status_json": str(stage_status) if not is_null(stage_status) else None,
         }
 
     return results
@@ -388,7 +407,7 @@ def load_from_parquet_file(
     if path.is_file():
         table = _scan_dataset_to_table(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     elif path.is_dir():
-        if not any(path.glob("**/*.parquet")):
+        if not any(path.glob("*.parquet")):
             raise FileNotFoundError(f"No parquet files found in {path}")
         table = _scan_dataset_to_table(path, RECOGNIZER_COLUMNS | ANONYMIZER_COLUMNS, max_notes=max_notes)
     else:
@@ -403,14 +422,14 @@ def _find_pipeline_stage_dirs(root: Path) -> tuple[Path | None, Path | None, Pat
         (
             cand
             for stage in ("merged_recognizer_output", "llm_recognizer_output", "recognizer_output")
-            if (cand := root / stage).is_dir() and any(cand.glob("**/*.parquet"))
+            if (cand := root / stage).is_dir() and any(cand.glob("*.parquet"))
         ),
         None,
     )
     anon_cand = root / "anonymizer_output"
-    anon_dir = anon_cand if anon_cand.is_dir() and any(anon_cand.glob("**/*.parquet")) else None
+    anon_dir = anon_cand if anon_cand.is_dir() and any(anon_cand.glob("*.parquet")) else None
     trans_cand = root / "transformer_output"
-    trans_dir = trans_cand if trans_cand.is_dir() and any(trans_cand.glob("**/*.parquet")) else None
+    trans_dir = trans_cand if trans_cand.is_dir() and any(trans_cand.glob("*.parquet")) else None
     return rec_dir, anon_dir, trans_dir
 
 
@@ -475,6 +494,16 @@ def load_pipeline_output_dir(
     for rid in all_ids:
         rec = rec_results.get(rid, {})
         anon = anon_results.get(rid, {})
+        rec_status = rec.get("processing_status")
+        anon_status = anon.get("processing_status")
+        rec_stage_json = rec.get("stage_status_json")
+        anon_stage_json = anon.get("stage_status_json")
+        if rec_status or anon_status or rec_stage_json or anon_stage_json:
+            merged_stage_json, merged_status = merge_stage_status(
+                rec_stage_json, anon_stage_json, rec_status, anon_status
+            )
+        else:
+            merged_stage_json, merged_status = None, None
         results[rid] = {
             "sample_id": rid,
             "row_id": rid,
@@ -483,6 +512,8 @@ def load_pipeline_output_dir(
             "original_phi": rec.get("original_phi", []),
             "modified_text": anon.get("modified_text", ""),
             "modified_phi": anon.get("modified_phi", []),
+            "processing_status": merged_status,
+            "stage_status_json": merged_stage_json,
         }
 
     return results
@@ -757,11 +788,16 @@ def _render_phi_table(
     original_text: str,
     original_phi: list[dict[str, Any]],
     filtered_original_phi: list[dict[str, Any]],
+    processing_status: str | None = None,
+    stage_status_json: str | None = None,
 ) -> None:
     """Render tabular breakdown of detected PHI entities."""
     st.divider()
     st.subheader("Detected PHI in this Note")
-    if filtered_original_phi:
+    if processing_status == FAILED:
+        detail = f" ({stage_status_json})" if stage_status_json else ""
+        st.warning(f"Processing failed for this note; PHI detection results are unavailable{detail}.")
+    elif filtered_original_phi:
         table_rows = []
         for ent in filtered_original_phi:
             start = ent.get("start", 0)
@@ -825,13 +861,15 @@ def main() -> None:
     orig_text = sample_data.get("original_text", "")
     orig_phi = sample_data.get("original_phi", [])
     mod_text = sample_data.get("modified_text", "")
+    proc_status = sample_data.get("processing_status")
+    stage_status_json = sample_data.get("stage_status_json")
     display_id = sample_data.get("row_id") or selected_sample
 
     st.caption(f"Viewing note **{st.session_state.current_index + 1} of {total_samples}** | Row ID: `{display_id}`")
 
     _render_comparison_view(orig_text, mod_text, filtered_orig_phi, filtered_mod_phi)
-    if orig_text or orig_phi:
-        _render_phi_table(orig_text, orig_phi, filtered_orig_phi)
+    if orig_text or orig_phi or proc_status == FAILED:
+        _render_phi_table(orig_text, orig_phi, filtered_orig_phi, proc_status, stage_status_json)
 
     st.divider()
     st.subheader("Entity Types Legend")

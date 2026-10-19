@@ -548,6 +548,65 @@ def test_load_data_max_notes_cap(tmp_path: Path):
     assert len(results) == 3
 
 
+def test_load_pipeline_preserves_failed_status(tmp_path: Path, monkeypatch):
+    """Verify processing_status and stage_status_json are preserved across stages and shown as a warning."""
+    out_dir = tmp_path / "pipeline_failed"
+    out_dir.mkdir()
+    (out_dir / "recognizer_output").mkdir()
+    (out_dir / "anonymizer_output").mkdir()
+
+    stage_json = json.dumps({"recognizer": {"status": "failed", "reason": "ValueError"}})
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "r_fail",
+                    "text_hash": "h_fail",
+                    "note_text": "Note that failed recognition",
+                    "recognizer_results_json": None,
+                    "processing_status": "failed",
+                    "stage_status_json": stage_json,
+                }
+            ]
+        ),
+        out_dir / "recognizer_output" / "part-0.parquet",
+    )
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "row_id": "r_fail",
+                    "text_hash": "h_fail",
+                    "anonymized_note_text": None,
+                    "anonymizer_results_json": None,
+                    "processing_status": "failed",
+                    "stage_status_json": stage_json,
+                }
+            ]
+        ),
+        out_dir / "anonymizer_output" / "part-0.parquet",
+    )
+
+    results = load_pipeline_output_dir(out_dir)
+    rec = results["r_fail"]
+    assert rec["processing_status"] == "failed"
+    assert json.loads(rec["stage_status_json"]) == {"recognizer": {"status": "failed", "reason": "ValueError"}}
+
+    warnings: list[str] = []
+    infos: list[str] = []
+    monkeypatch.setattr(ui.st, "divider", lambda: None)
+    monkeypatch.setattr(ui.st, "subheader", lambda *_: None)
+    monkeypatch.setattr(ui.st, "warning", warnings.append)
+    monkeypatch.setattr(ui.st, "info", infos.append)
+
+    ui._render_phi_table(
+        rec["original_text"], rec["original_phi"], [], rec["processing_status"], rec["stage_status_json"]
+    )
+    assert len(warnings) == 1
+    assert "Processing failed" in warnings[0]
+    assert infos == []
+
+
 def test_load_data_errors(tmp_path: Path):
     """Verify error handling on invalid or empty paths."""
     res, desc = load_data("")
