@@ -17,6 +17,9 @@ from typing import Any
 import ray
 
 from tide2.utils.batch_columns import check_no_patient_uid
+from tide2.utils.logging import configure_ray_loggers
+from tide2.utils.logging import setup_driver_logging
+from tide2.utils.logging import split_streams_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +294,7 @@ def init_ray_local(
     object_store_memory_gb: int | None = None,
     dashboard_host: str = DEFAULT_DASHBOARD_HOST,
     metrics_port: int = 9090,
+    configure_logging: bool = True,
 ) -> None:
     """
     Initialize Ray for local/VM mode with standard configuration.
@@ -301,6 +305,8 @@ def init_ray_local(
         object_store_memory_gb: Object store memory in GB.
         dashboard_host: Host for Ray Dashboard.
         metrics_port: Port for Prometheus metrics.
+        configure_logging: Route INFO-level Ray/tide2 logs to stdout and WARNING+ to stderr
+            (see ``tide2.utils.logging``). Also disabled by ``TIDE2_SPLIT_LOG_STREAMS=0``.
     """
     ray_init_kwargs: dict[str, Any] = {
         "dashboard_host": dashboard_host,
@@ -318,7 +324,10 @@ def init_ray_local(
     if object_store_memory_gb:
         ray_init_kwargs["object_store_memory"] = object_store_memory_gb * 1024**3
 
+    ray_init_kwargs["runtime_env"] = setup_driver_logging(ray_init_kwargs["runtime_env"], configure_logging)
     ray.init(**ray_init_kwargs)
+    if split_streams_enabled(configure_logging):
+        configure_ray_loggers()
 
     logger.info(f"Ray Dashboard: http://{dashboard_host}:8265")
     logger.info(f"Prometheus metrics: http://{dashboard_host}:{metrics_port}")
