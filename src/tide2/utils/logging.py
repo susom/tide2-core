@@ -63,10 +63,10 @@ def split_streams_enabled(configure_logging: bool = True) -> bool:
 def _is_worker() -> bool:
     try:
         import ray._private.worker as ray_worker
-
-        return ray_worker.global_worker.mode == ray_worker.WORKER_MODE
     except Exception:
         return False
+    else:
+        return ray_worker.global_worker.mode == ray_worker.WORKER_MODE
 
 
 def _replace_handler(logger: logging.Logger) -> None:

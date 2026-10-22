@@ -20,7 +20,9 @@
   },
   "shutdownAction": "stopContainer",
   "containerEnv": {
-    "UV_LINK_MODE": "copy",
+    "UV_LINK_MODE": "copy"
+  },
+  "remoteEnv": {
     "PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"
   },
   "postCreateCommand": "pipx install uv==0.9.8 && uv sync --locked --extra llm && make setup-hooks",
