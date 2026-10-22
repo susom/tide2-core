@@ -55,6 +55,9 @@ from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
 from tide2.utils.batch_columns import check_no_patient_uid
+from tide2.utils.logging import configure_ray_loggers
+from tide2.utils.logging import setup_driver_logging
+from tide2.utils.logging import split_streams_enabled
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import merge_stage_status
@@ -749,6 +752,7 @@ class LocalJobRunner:
         include_dashboard: bool = False,
         no_progress_timeout_s: float | None = None,
         hardware_autotune: bool = True,
+        configure_logging: bool = True,
     ):
         """
         Initialize local job runner.
@@ -767,7 +771,10 @@ class LocalJobRunner:
                 this runner runs: ``run_pipeline`` and the stage jobs. If False, the recommendations are
                 skipped and the built-in defaults run. It does not affect the Ray object store, which is
                 sized by ``object_store_gb`` or by Ray.
+            configure_logging: Route INFO-level Ray/tide2 logs to stdout and WARNING+ to stderr
+                (see ``tide2.utils.logging``). Also disabled by ``TIDE2_SPLIT_LOG_STREAMS=0``.
         """
+        self.configure_logging = configure_logging
         self.num_cpus = num_cpus
         self.num_gpus = num_gpus
         self.object_store_gb = object_store_gb
@@ -828,7 +835,11 @@ class LocalJobRunner:
         if self.object_store_gb:
             kwargs["object_store_memory"] = self.object_store_gb * 1024**3
 
+        kwargs["runtime_env"] = setup_driver_logging(kwargs["runtime_env"], self.configure_logging)
         ray.init(**kwargs)
+        if split_streams_enabled(self.configure_logging):
+            # ray.init may reapply Ray's default logging config; install ours afterwards.
+            configure_ray_loggers()
         logger.info("Ray initialized")
 
         # Log resources

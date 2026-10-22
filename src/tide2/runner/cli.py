@@ -20,6 +20,7 @@ import logging
 import sys
 from pathlib import Path
 
+from tide2.utils.logging import configure_cli_logging
 from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
@@ -37,10 +38,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         print("Error: --output is required (via CLI or config file)")
         sys.exit(1)
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    configure_cli_logging(getattr(logging, args.log_level))
 
     no_prog = getattr(args, "no_progress_timeout_s", None)
     hw_tune = getattr(args, "hardware_autotune", None) is not False
@@ -320,10 +318,7 @@ def cmd_visualizer_json(args: argparse.Namespace) -> None:
     """Write the visualizer JSON files for a finished pipeline run."""
     from tide2.runner.utils import write_visualizer_json
 
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    configure_cli_logging(getattr(logging, args.log_level))
     try:
         counts = write_visualizer_json(args.output, args.json_dir)
     except ValueError as exc:
