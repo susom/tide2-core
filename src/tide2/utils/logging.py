@@ -38,7 +38,7 @@ class SplitStreamHandler(logging.Handler):
         """Write the formatted record to stdout or stderr depending on its level."""
         try:
             stream = sys.stdout if record.levelno < logging.WARNING else sys.stderr
-            text = record.getMessage() if _is_worker() else self.format(record)
+            text = logging.Formatter("%(message)s").format(record) if _is_worker() else self.format(record)
             stream.write(text + "\n")
             stream.flush()
         except Exception:
@@ -136,11 +136,12 @@ def configure_cli_logging(level: int | str = logging.INFO) -> None:
         logging.basicConfig(level=level, format=TIDE2_LOG_FORMAT)
         return
     root = logging.getLogger()
+    if root.handlers:
+        return
     root.setLevel(level)
-    if not any(isinstance(h, SplitStreamHandler) for h in root.handlers):
-        handler = SplitStreamHandler()
-        handler.setFormatter(logging.Formatter(TIDE2_LOG_FORMAT))
-        root.addHandler(handler)
+    handler = SplitStreamHandler()
+    handler.setFormatter(logging.Formatter(TIDE2_LOG_FORMAT))
+    root.addHandler(handler)
 
 
 def with_logging_runtime_env(runtime_env: dict[str, Any] | None = None) -> dict[str, Any]:
