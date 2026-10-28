@@ -151,8 +151,8 @@ def anonymize_cell(
         key: 32-byte key.
         patient_id: Patient identifier used to derive the date jitter.
         jitter: Explicit date jitter in days; wins over ``patient_id``.
-        zip_mode: ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"``; required for ``ZIP_CODE``, ignored
-            for other types. An integer ZIP is padded to 5 digits (see ``ZipCodeAnonymizer``).
+        zip_mode: ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"`` (the default, as in ``AnonymizerWorker``);
+            used for ``ZIP_CODE`` only. An integer ZIP is padded to 5 digits (see ``ZipCodeAnonymizer``).
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -160,13 +160,15 @@ def anonymize_cell(
 
     Raises:
         ValueError: If ``entity_type`` is missing or not supported, or ``entity_type`` is ``ZIP_CODE`` and
-            ``zip_mode`` is missing or invalid.
+            ``zip_mode`` is invalid.
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
     if entity_type in ZIP_ENTITY_TYPES:
-        from tide2.anonymizers.zip_code import validate_zip_mode  # see _zip_operator
+        from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE  # see _zip_operator
+        from tide2.anonymizers.zip_code import validate_zip_mode
 
+        zip_mode = DEFAULT_ZIP_MODE if zip_mode is None else zip_mode
         validate_zip_mode(zip_mode)
 
     if is_null(value):

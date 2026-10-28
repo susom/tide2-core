@@ -8,9 +8,9 @@ Two modes:
 
 - ``safe-harbor-strict``: the regulation as written. A ZIP becomes its 3-digit prefix, or ``000`` when the prefix
   area has 20,000 people or fewer.
-- ``safe-harbor-relaxed``: **not Safe Harbor compliant.** A ZIP in a prefix area with more than 20,000 people is
-  kept as its 5 digits; otherwise it becomes its real 3-digit prefix. Use it only under an expert determination or
-  a data use agreement that allows 5-digit ZIPs.
+- ``safe-harbor-relaxed`` (the default): **not Safe Harbor compliant.** A ZIP in a prefix area with more than 20,000
+  people is kept as its 5 digits; otherwise it becomes its real 3-digit prefix. Use it only under an expert
+  determination or a data use agreement that allows 5-digit ZIPs.
 
 The population comes from ``resources/zip3_population_2020.tsv`` (2020 Census total population by ZCTA, summed by
 the first three digits; see ``scripts/zip/build_zip3_population.py``). ZCTAs approximate USPS ZIP areas. A prefix
@@ -41,8 +41,8 @@ __docformat__ = "google"
 MODE_STRICT = "safe-harbor-strict"
 MODE_RELAXED = "safe-harbor-relaxed"
 ZIP_MODES: tuple[str, ...] = (MODE_STRICT, MODE_RELAXED)
-# The default mode of the pipeline: ZIPs are replaced by a random real ZIP (HipsLocationAnonymizer), not by this operator.
-ZIP_MODE_HIPS = "hips"
+# The mode used when none is given. It is not Safe Harbor compliant: pass MODE_STRICT for that.
+DEFAULT_ZIP_MODE = MODE_RELAXED
 # Labels other than ZIP_CODE that transformer models emit for a ZIP code.
 ZIP_ENTITY_ALIASES: frozenset[str] = frozenset({"ZIP", "ZIPCODE"})
 

@@ -13,6 +13,9 @@ from typing import ClassVar
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.anonymizers.guarded import record_fallback
+from tide2.anonymizers.zip_code import ZIP_MODES
+from tide2.anonymizers.zip_code import anonymize_zip
 from tide2.cryptographic.string_selector import secure_string_selector
 from tide2.string_parsers.address_parsers import AddressParser
 from tide2.utils.resource_utils import CITIES_FILE
@@ -252,6 +255,10 @@ class HipsLocationAnonymizer(Operator):
             params: Operator parameters. Required keys:
                 - salt (str): Cryptographic salt for deterministic output.
                 - key (str): Encryption key.
+                Optional key:
+                - zip_mode (str): ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"``. The ZIP inside
+                  an address is reduced as ``ZipCodeAnonymizer`` does (and dropped if it is not a
+                  5-digit ZIP). Without it the ZIP is replaced by a random real ZIP.
 
         Returns:
             The anonymized location string, or the original text if it is
@@ -293,7 +300,15 @@ class HipsLocationAnonymizer(Operator):
             zipcode = result_components.get("zipcode")
             new_zipcode = None
             if zipcode:
-                new_zipcode = secure_string_selector(salt, key, self.zipcodes, zipcode)
+                zip_mode = params.get("zip_mode")
+                if zip_mode is None:
+                    new_zipcode = secure_string_selector(salt, key, self.zipcodes, zipcode)
+                else:
+                    try:
+                        new_zipcode = anonymize_zip(zipcode, zip_mode)
+                    except ValueError:
+                        # Not a 5-digit ZIP: leave it out rather than keep digits that may identify the person.
+                        record_fallback(params.get("entity_type", "LOCATION"))
 
             # leave state untouched for now
             new_state = result_components.get("state")
@@ -335,6 +350,10 @@ class HipsLocationAnonymizer(Operator):
         key = params.get("key")
         if not salt or not key:
             raise ValueError("Both 'salt' and 'key' must be provided for HipsLocationAnonimizer.")
+
+        zip_mode = params.get("zip_mode")
+        if zip_mode is not None and zip_mode not in ZIP_MODES:
+            raise ValueError(f"Parameter 'zip_mode' must be one of {ZIP_MODES}, got {zip_mode!r}.")
 
     def operator_name(self) -> str:
         """Return the operator name."""
