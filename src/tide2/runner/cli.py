@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Mirrors ZIP_MODES and DEFAULT_ZIP_MODE in tide2.anonymizers.zip_code, which is not imported here to keep --help
 # fast (tests/test_zip_code_anonymizer.py checks they agree).
-ZIP_MODE_CHOICES = ("safe-harbor-strict", "safe-harbor-relaxed")
-DEFAULT_ZIP_MODE = "safe-harbor-relaxed"
+ZIP_MODE_CHOICES = ("strict", "relaxed")
+DEFAULT_ZIP_MODE = "relaxed"
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -496,8 +496,8 @@ Examples:
         default=DEFAULT_ZIP_MODE,
         help=(
             "How ZIP codes, including the ZIP inside an address, are anonymized (anonymizer/pipeline jobs). "
-            "'safe-harbor-strict': HIPAA Safe Harbor, the 3-digit prefix, or 000 when its area has 20,000 people or "
-            "fewer (2020 Census). 'safe-harbor-relaxed' (default): keep all 5 digits when the area has more than "
+            "'strict': HIPAA Safe Harbor, the 3-digit prefix, or 000 when its area has 20,000 people or "
+            "fewer (2020 Census). 'relaxed' (default): keep all 5 digits when the area has more than "
             "20,000 people, else the 3-digit prefix; NOT Safe Harbor compliant"
         ),
     )

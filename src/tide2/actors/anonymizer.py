@@ -105,8 +105,8 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
-            zip_mode: How ZIP codes (and the ZIP inside an address) are anonymized: ``"safe-harbor-relaxed"``
-                (default; not Safe Harbor compliant) or ``"safe-harbor-strict"``. See ``ZipCodeAnonymizer``.
+            zip_mode: How ZIP codes (and the ZIP inside an address) are anonymized: ``"relaxed"``
+                (default; not Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -713,7 +713,7 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
-        zip_mode: ``"safe-harbor-relaxed"`` (default) or ``"safe-harbor-strict"``; see ``AnonymizerWorker``
+        zip_mode: ``"relaxed"`` (default) or ``"strict"``; see ``AnonymizerWorker``
 
     Returns:
         A class that can be used with Ray Data's map_batches()

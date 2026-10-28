@@ -13,7 +13,8 @@ from typing import ClassVar
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
-from tide2.anonymizers.guarded import record_fallback
+from tide2.anonymizers.guarded import mask
+from tide2.anonymizers.guarded import record_error
 from tide2.anonymizers.zip_code import ZIP_MODES
 from tide2.anonymizers.zip_code import anonymize_zip
 from tide2.cryptographic.string_selector import secure_string_selector
@@ -25,6 +26,7 @@ from tide2.utils.resource_utils import STATES_FILE
 from tide2.utils.resource_utils import STREET_NAMES_FILE
 from tide2.utils.resource_utils import ZIPCODES_FILE
 from tide2.utils.resource_utils import get_resource_path
+from tide2.utils.stage_status import failure_reason
 
 # Hospital length bucket thresholds
 TINY_HOSPITAL_MAX_LEN = 5
@@ -256,9 +258,10 @@ class HipsLocationAnonymizer(Operator):
                 - salt (str): Cryptographic salt for deterministic output.
                 - key (str): Encryption key.
                 Optional key:
-                - zip_mode (str): ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"``. The ZIP inside
-                  an address is reduced as ``ZipCodeAnonymizer`` does (and dropped if it is not a
-                  5-digit ZIP). Without it the ZIP is replaced by a random real ZIP.
+                - zip_mode (str): ``"strict"`` or ``"relaxed"``. The ZIP inside
+                  an address is reduced as ``ZipCodeAnonymizer`` does (a value that is not a 5-digit ZIP
+                  becomes ``[ZIP_CODE]`` and the note records an error). Without it the ZIP is replaced by
+                  a random real ZIP.
 
         Returns:
             The anonymized location string, or the original text if it is
@@ -306,9 +309,11 @@ class HipsLocationAnonymizer(Operator):
                 else:
                     try:
                         new_zipcode = anonymize_zip(zipcode, zip_mode)
-                    except ValueError:
-                        # Not a 5-digit ZIP: leave it out rather than keep digits that may identify the person.
-                        record_fallback(params.get("entity_type", "LOCATION"))
+                    except ValueError as exc:
+                        # Not a 5-digit ZIP: never keep digits that may identify the person. Same outcome as a
+                        # standalone ZIP_CODE entity: the placeholder, and the note records the error.
+                        new_zipcode = mask("ZIP_CODE")
+                        record_error("ZIP_CODE", failure_reason(exc))
 
             # leave state untouched for now
             new_state = result_components.get("state")

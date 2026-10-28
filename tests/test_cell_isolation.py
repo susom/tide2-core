@@ -21,7 +21,7 @@ import tide2.anonymizers.cell as cell
 
 ok = cell.anonymize_cell("48291037", "MRN", b"\\x01" * 32, b"\\x02" * 32)
 modules = sorted(sys.modules)  # before any ZIP call: the ZIP module must load lazily
-zip_out = cell.anonymize_cell("02139", "ZIP_CODE", b"\\x01" * 32, b"\\x02" * 32, zip_mode="safe-harbor-strict")
+zip_out = cell.anonymize_cell("02139", "ZIP_CODE", b"\\x01" * 32, b"\\x02" * 32, zip_mode="strict")
 print(json.dumps({"ok": ok, "modules": modules, "zip": zip_out}))
 """
 

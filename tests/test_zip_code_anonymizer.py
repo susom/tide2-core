@@ -93,7 +93,7 @@ def test_non_zip_is_rejected(bad: str) -> None:
         anonymize_zip(bad, MODE_STRICT, SMALL_TABLE)
 
 
-@pytest.mark.parametrize("mode", ["hips", "default", "", None, "strict", "relaxed"])
+@pytest.mark.parametrize("mode", ["hips", "default", "", None, "safe-harbor-strict", "safe-harbor-relaxed"])
 def test_invalid_mode_is_rejected(mode: Any) -> None:
     with pytest.raises(ValueError, match="zip mode"):
         anonymize_zip("94305", mode, SMALL_TABLE)
@@ -238,7 +238,7 @@ def test_non_zip_span_is_masked_in_a_note() -> None:
 
 
 def test_invalid_worker_mode_is_rejected() -> None:
-    for mode in ("strict", "hips"):
+    for mode in ("safe-harbor-strict", "hips"):
         with pytest.raises(ValueError, match="zip mode"):
             AnonymizerWorker(salt=SALT, key=KEY, zip_mode=mode)
 
@@ -281,7 +281,7 @@ def test_the_address_zip_is_not_a_random_real_zip_any_more() -> None:
     assert out.endswith("MA 02139")
 
 
-def test_address_with_a_malformed_zip_drops_it_and_is_degraded() -> None:
+def test_address_with_a_malformed_zip_is_masked_and_records_an_error() -> None:
     from tide2.anonymizers.guarded import end_note
     from tide2.anonymizers.guarded import start_note
     from tide2.anonymizers.guarded import summarize
@@ -297,9 +297,25 @@ def test_address_with_a_malformed_zip_drops_it_and_is_degraded() -> None:
         status = summarize(events)
     finally:
         end_note()
-    assert out.endswith(", IL")
+    assert out.endswith(", IL [ZIP_CODE]")
     assert "6280" not in out
-    assert status == ("degraded", "LOCATION")
+    assert status == ("failed", "ZIP_CODE:ValueError")
+
+
+def test_note_with_a_malformed_address_zip_is_failed_but_still_anonymized() -> None:
+    worker = AnonymizerWorker(salt=SALT, key=KEY)
+    address = "789 Pine Road, Springfield, IL 6280"
+    results = [{"entity_type": "LOCATION", "start": 0, "end": len(address), "score": 1.0}]
+    row = worker.process_note(
+        note_text=address,
+        original_text_hash=worker.compute_text_hash(address),
+        recognizer_results_json=results,
+        patient_id="FAKE-P0001",
+        jitter=5,
+    )
+    assert row["anonymized_note_text"].endswith(", IL [ZIP_CODE]")
+    assert row["stage_status"] == "failed"
+    assert row["stage_reason"] == "ZIP_CODE:ValueError"
 
 
 def test_hips_location_without_zip_mode_keeps_the_random_zip() -> None:
@@ -343,7 +359,7 @@ def test_cell_matches_process_note(mode: str, value: str) -> None:
 def test_cell_defaults_to_relaxed_and_rejects_invalid_modes() -> None:
     assert cell.anonymize_cell("02139", "ZIP_CODE", SALT, KEY) == "02139"
     assert cell.anonymize_cell("03601", "ZIP_CODE", SALT, KEY) == "036"
-    for mode in ("hips", "strict"):
+    for mode in ("hips", "safe-harbor-strict"):
         with pytest.raises(ValueError, match="zip mode"):
             cell.anonymize_cell("02139", "ZIP_CODE", SALT, KEY, zip_mode=mode)
     # Other entity types ignore zip_mode.
@@ -397,12 +413,12 @@ BASE_ARGS = ["run", "anonymizer", "-i", "in", "-o", "out", "--salt", "s", "--key
 
 
 def test_cli_zip_mode_default_and_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert _parse_run_args(monkeypatch, BASE_ARGS).zip_mode == "safe-harbor-relaxed"
-    args = _parse_run_args(monkeypatch, [*BASE_ARGS, "--zip-mode", "safe-harbor-strict"])
-    assert args.zip_mode == "safe-harbor-strict"
+    assert _parse_run_args(monkeypatch, BASE_ARGS).zip_mode == "relaxed"
+    args = _parse_run_args(monkeypatch, [*BASE_ARGS, "--zip-mode", "strict"])
+    assert args.zip_mode == "strict"
 
 
-@pytest.mark.parametrize("mode", ["strict", "relaxed", "hips", "default"])
+@pytest.mark.parametrize("mode", ["safe-harbor-strict", "safe-harbor-relaxed", "hips", "default"])
 def test_cli_rejects_an_unknown_zip_mode(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
     monkeypatch.setattr(sys, "argv", ["tide2-runner", *BASE_ARGS, "--zip-mode", mode])
     with pytest.raises(SystemExit):
@@ -411,16 +427,16 @@ def test_cli_rejects_an_unknown_zip_mode(monkeypatch: pytest.MonkeyPatch, mode: 
 
 def test_yaml_zip_mode_backfills_and_cli_wins(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     config = tmp_path / "runner.yaml"
-    config.write_text("zip_mode: safe-harbor-relaxed\n")
+    config.write_text("zip_mode: relaxed\n")
     args = _parse_run_args(monkeypatch, [*BASE_ARGS, "--config", str(config)])
-    assert args.zip_mode == "safe-harbor-relaxed"
-    args = _parse_run_args(monkeypatch, [*BASE_ARGS, "--config", str(config), "--zip-mode", "safe-harbor-strict"])
-    assert args.zip_mode == "safe-harbor-strict"
+    assert args.zip_mode == "relaxed"
+    args = _parse_run_args(monkeypatch, [*BASE_ARGS, "--config", str(config), "--zip-mode", "strict"])
+    assert args.zip_mode == "strict"
 
 
 def test_yaml_invalid_zip_mode_exits(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     config = tmp_path / "runner.yaml"
-    config.write_text("zip_mode: strict\n")
+    config.write_text("zip_mode: safe-harbor-strict\n")
     monkeypatch.setattr(sys, "argv", ["tide2-runner", *BASE_ARGS, "--config", str(config)])
     with pytest.raises(SystemExit):
         cli.main()
@@ -445,9 +461,7 @@ class _FakeRunner:
 
 
 @pytest.mark.parametrize("job", ["anonymizer", "pipeline"])
-@pytest.mark.parametrize(
-    ("flag", "expected"), [(["--zip-mode", "safe-harbor-strict"], "safe-harbor-strict"), ([], "safe-harbor-relaxed")]
-)
+@pytest.mark.parametrize(("flag", "expected"), [(["--zip-mode", "strict"], "strict"), ([], "relaxed")])
 def test_cli_forwards_zip_mode(monkeypatch: pytest.MonkeyPatch, job: str, flag: list[str], expected: str) -> None:
     _FakeRunner.calls = {}
     monkeypatch.setattr(local_runner, "LocalJobRunner", _FakeRunner)
@@ -460,7 +474,7 @@ def test_cli_forwards_zip_mode(monkeypatch: pytest.MonkeyPatch, job: str, flag: 
 
 
 def test_runner_validates_zip_mode_before_starting_ray() -> None:
-    bad_modes: list[Any] = ["strict", "hips", "", None]
+    bad_modes: list[Any] = ["safe-harbor-strict", "hips", "", None]
     for mode in bad_modes:
         with pytest.raises(ValueError, match="Invalid zip_mode"):
             local_runner._validate_zip_mode(mode)

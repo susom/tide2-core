@@ -151,7 +151,7 @@ def anonymize_cell(
         key: 32-byte key.
         patient_id: Patient identifier used to derive the date jitter.
         jitter: Explicit date jitter in days; wins over ``patient_id``.
-        zip_mode: ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"`` (the default, as in ``AnonymizerWorker``);
+        zip_mode: ``"strict"`` or ``"relaxed"`` (the default, as in ``AnonymizerWorker``);
             used for ``ZIP_CODE`` only. An integer ZIP is padded to 5 digits (see ``ZipCodeAnonymizer``).
 
     Returns:

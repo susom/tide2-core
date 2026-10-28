@@ -6,9 +6,9 @@ than 20,000 people. The initial three digits of every area with 20,000 or fewer 
 
 Two modes:
 
-- ``safe-harbor-strict``: the regulation as written. A ZIP becomes its 3-digit prefix, or ``000`` when the prefix
-  area has 20,000 people or fewer.
-- ``safe-harbor-relaxed`` (the default): **not Safe Harbor compliant.** A ZIP in a prefix area with more than 20,000
+- ``strict``: the regulation as written (HIPAA Safe Harbor). A ZIP becomes its 3-digit prefix, or ``000`` when the
+  prefix area has 20,000 people or fewer.
+- ``relaxed`` (the default): **not Safe Harbor compliant.** A ZIP in a prefix area with more than 20,000
   people is kept as its 5 digits; otherwise it becomes its real 3-digit prefix. Use it only under an expert
   determination or a data use agreement that allows 5-digit ZIPs.
 
@@ -38,8 +38,8 @@ from tide2.utils.resource_utils import get_resource_path
 
 __docformat__ = "google"
 
-MODE_STRICT = "safe-harbor-strict"
-MODE_RELAXED = "safe-harbor-relaxed"
+MODE_STRICT = "strict"
+MODE_RELAXED = "relaxed"
 ZIP_MODES: tuple[str, ...] = (MODE_STRICT, MODE_RELAXED)
 # The mode used when none is given. It is not Safe Harbor compliant: pass MODE_STRICT for that.
 DEFAULT_ZIP_MODE = MODE_RELAXED
@@ -81,7 +81,7 @@ def anonymize_zip(zip_text: str, mode: str, population: dict[str, int] | None = 
     Args:
         zip_text: A 5-digit ZIP, optionally followed by a ZIP+4 suffix (``-1234``, `` 1234`` or ``1234``).
             Surrounding whitespace is ignored.
-        mode: ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"``.
+        mode: ``"strict"`` or ``"relaxed"``.
         population: Population by 3-digit prefix; defaults to the bundled 2020 Census table.
 
     Returns:

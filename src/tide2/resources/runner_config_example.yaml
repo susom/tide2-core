@@ -63,7 +63,7 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # acc_num_salt: "your-salt-here"
 # acc_num_study_id: "your-study-id-here"
 # jitter_required: false
-# zip_mode: safe-harbor-relaxed  # or safe-harbor-strict (relaxed is NOT HIPAA Safe Harbor compliant)
+# zip_mode: relaxed  # or strict (HIPAA Safe Harbor); relaxed is NOT HIPAA Safe Harbor compliant
 
 # =========================================================================
 # Transformer-specific

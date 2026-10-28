@@ -1456,7 +1456,7 @@ class LocalJobRunner:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
-        zip_mode: str = "safe-harbor-relaxed",  # DEFAULT_ZIP_MODE; not imported here to keep this module light
+        zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE; not imported here to keep this module light
         worker_num_cpus: int | float | None = None,
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
@@ -1491,8 +1491,8 @@ class LocalJobRunner:
             acc_num_study_id: Study ID for accession number hashing
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically
-            zip_mode: ``"safe-harbor-relaxed"`` (default; not Safe Harbor compliant) or
-                ``"safe-harbor-strict"`` (see ``ZipCodeAnonymizer``)
+            zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
+                ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
             worker_num_cpus: CPUs reserved for each actor (None = 1.0); lower it to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
@@ -2159,7 +2159,7 @@ class LocalJobRunner:
         t_kw = dict(transformer_kwargs or {})
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
-        _validate_zip_mode(a_kw.get("zip_mode", "safe-harbor-relaxed"))
+        _validate_zip_mode(a_kw.get("zip_mode", "relaxed"))
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------
@@ -2704,7 +2704,7 @@ class LocalJobRunner:
                 acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
                 acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
                 jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
-                zip_mode=anonymizer_kwargs.get("zip_mode", "safe-harbor-relaxed"),
+                zip_mode=anonymizer_kwargs.get("zip_mode", "relaxed"),
             )
             ds = self.build_anonymizer_stage(
                 ds,
