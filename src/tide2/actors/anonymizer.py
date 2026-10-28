@@ -52,7 +52,6 @@ from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
 from tide2.cryptographic.date_jitter import derive_date_jitter
-from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
@@ -120,9 +119,6 @@ class AnonymizerWorker:
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
         self.jitter_required = jitter_required
-
-        # Suppress short input warnings in batch processing (reduces log noise)
-        FormatPreservingEncryption.suppress_short_input_warnings = True
 
         # Initialize Presidio AnonymizerEngine
         self.anonymizer_engine = AnonymizerEngine()

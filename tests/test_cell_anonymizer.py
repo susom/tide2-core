@@ -89,6 +89,14 @@ def test_numeric_value_is_stringified() -> None:
     assert cell.anonymize_cell(48291037, "MRN", SALT, KEY) == cell.anonymize_cell("48291037", "MRN", SALT, KEY)
 
 
+@pytest.mark.parametrize("value", [1, 7, 604821, 48291037, 9182736455463728191])
+def test_int64_style_value_round_trips_through_int_without_losing_a_digit(value: int) -> None:
+    out = cell.anonymize_cell(str(value), "ID", SALT, KEY)
+    assert not out.startswith("0")
+    assert len(out) == len(str(value))
+    assert len(str(int(out))) == len(str(value))
+
+
 @pytest.mark.parametrize("entity_type", ["PERSON", "ACC_NUM", "", None])
 def test_unsupported_entity_type_raises(entity_type: str | None) -> None:
     with pytest.raises(ValueError, match="Unsupported entity_type"):

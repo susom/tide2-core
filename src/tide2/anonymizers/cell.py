@@ -25,7 +25,6 @@ from tide2.anonymizers.guarded import mask
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
 from tide2.cryptographic.date_jitter import derive_date_jitter
-from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
 
 __docformat__ = "google"
@@ -58,7 +57,6 @@ def _operators() -> tuple[Operator, Operator]:
 
     Keys travel in the per-call params, so the instances do not depend on them.
     """
-    FormatPreservingEncryption.suppress_short_input_warnings = True
     return guarded(HipsAlphaNumericAnonymizer)(), guarded(DateJitterAnonymizer)()
 
 
