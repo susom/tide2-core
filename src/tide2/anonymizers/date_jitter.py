@@ -176,6 +176,8 @@ class DateJitterAnonymizer(Operator):
             f"{_START}{_MON}{_SEP}{_DAY}(?P=sep){_YEAR}{_END}",
             # mm/dd/yy
             f"{_START}{_MON}{_SEP}{_DAY}(?P=sep)(?P<year>[0-9]{{2}}){_END}",
+            # dd/mm/yy (numeric, day-first): only when the leading number is 13-31
+            f"{_START}{_DAY_FIRST}{_SEP}{_MON}(?P=sep)(?P<year>[0-9]{{2}}){_END}",
             # January 1st, 2010
             f"{_START}{_MONTH} +{_DAY}{_DAY_SUFFIX}[,\\s]+{_YEAR}{_END}",
             # mm/yyyy

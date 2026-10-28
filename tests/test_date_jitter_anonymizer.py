@@ -348,6 +348,20 @@ class TestDateJitterAnonymizer:
         # 03/04/2010 is read as March 4th (mm/dd/yyyy); +10 days = March 14th.
         assert self.anonymizer.operate("03/04/2010", {"entity_type": "DATE", "jitter": 10}) == "03/14/2010"
 
+    @pytest.mark.parametrize(
+        ("value", "jitter", "expected"),
+        [
+            ("31/12/99", 5, "05/01/00"),
+            ("28/02/23", 5, "05/03/23"),
+            ("31-12-99", 5, "05-01-00"),
+            ("13/05/21", 3, "16/05/21"),
+            ("13/05/21", -3, "10/05/21"),
+        ],
+    )
+    def test_day_first_two_digit_year_uses_the_year(self, value, jitter, expected):
+        """A day-first date with a two-digit year must shift with its year, not as a yearless dd/mm."""
+        assert self.anonymizer.operate(value, {"entity_type": "DATE", "jitter": jitter}) == expected
+
     def test_separator_preserved_across_instances(self):
         """The dash separator must survive on a second instance."""
         first = DateJitterAnonymizer()

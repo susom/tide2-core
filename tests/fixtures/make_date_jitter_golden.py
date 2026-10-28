@@ -111,6 +111,8 @@ def _formats(d: date) -> list[str]:
         f"{month}/{day}/{year % 100:02d}",
         f"{month:02d}/{day:02d}/{year % 100:02d}",
         f"{month:02d}-{day:02d}-{year % 100:02d}",
+        f"{day:02d}/{month:02d}/{year % 100:02d}",
+        f"{day:02d}-{month:02d}-{year % 100:02d}",
         f"{year}{month:02d}{day:02d}",
         f"{year}{month:02d}{day:02d}103000",
         f"{name} {day}, {year}",
