@@ -1,0 +1,26 @@
+# Ray Data logging config used via RAY_DATA_LOGGING_CONFIG (see tide2.utils.logging).
+# Identical to Ray Data's default except the console handler is the tide2 split-stream
+# handler: records below WARNING go to stdout, WARNING and above go to stderr.
+version: 1
+disable_existing_loggers: false
+formatters:
+  ray:
+    format: "%(asctime)s\t%(levelname)s %(filename)s:%(lineno)s -- %(message)s"
+filters:
+  console_filter:
+    (): ray.data._internal.logging.HiddenRecordFilter
+handlers:
+  file:
+    class: ray.data._internal.logging.SessionFileHandler
+    formatter: ray
+    filename: ray-data.log
+  console:
+    class: tide2.utils.logging.SplitStreamHandler
+    formatter: ray
+    level: INFO
+    filters: [console_filter]
+loggers:
+  ray.data:
+    level: DEBUG
+    handlers: [file, console]
+    propagate: false

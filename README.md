@@ -396,6 +396,17 @@ hash of `row_id`.
 location also grants access to the key material. The `transformer_output` and `recognizer_output`
 intermediates contain raw notes and need the same retention rules as the input.
 
+#### Log streams (stdout vs stderr)
+
+Platforms such as GCP Batch assign log severity from the output stream (stdout → INFO,
+stderr → ERROR). Ray and the CLI log everything to stderr by default, so tide2 installs a
+split handler (`tide2.utils.logging.SplitStreamHandler`) on the `ray` and `ray.data` loggers
+(driver and Ray workers) and in the runner CLI: records below `WARNING` go to stdout,
+`WARNING` and above go to stderr. Levels, messages, the root logger of host applications,
+and Ray's log files are unchanged. Opt out with `LocalJobRunner(configure_logging=False)`,
+`init_ray_local(configure_logging=False)`, or `TIDE2_SPLIT_LOG_STREAMS=0`. If you set
+`RAY_DATA_LOGGING_CONFIG` yourself, tide2 leaves Ray Data's config alone.
+
 #### Why small boxes deadlock (and how to size knobs by hardware)
 
 This section is about **`discrete` mode**, which is fully supported on ≲4-CPU
