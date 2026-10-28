@@ -187,6 +187,15 @@ def _validate_id_column(id_column: str) -> None:
         raise ValueError(f"Invalid _id_column: {id_column!r}. Must be one of {SUPPORTED_ID_COLUMNS}.")
 
 
+def _validate_zip_mode(zip_mode: str) -> None:
+    """Fail before Ray starts if ``zip_mode`` is not ``"hips"`` or a Safe Harbor mode."""
+    from tide2.anonymizers.zip_code import ZIP_MODE_HIPS
+    from tide2.anonymizers.zip_code import ZIP_MODES
+
+    if zip_mode != ZIP_MODE_HIPS and zip_mode not in ZIP_MODES:
+        raise ValueError(f"Invalid zip_mode: {zip_mode!r}. Must be one of {(ZIP_MODE_HIPS, *ZIP_MODES)}.")
+
+
 DEFAULT_ROW_ID_PATIENT_ID = "None"
 
 
@@ -1448,6 +1457,7 @@ class LocalJobRunner:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        zip_mode: str = "hips",
         worker_num_cpus: int | float | None = None,
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
@@ -1482,6 +1492,8 @@ class LocalJobRunner:
             acc_num_study_id: Study ID for accession number hashing
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically
+            zip_mode: ``"hips"`` (default: a random real ZIP), ``"safe-harbor-strict"`` or
+                ``"safe-harbor-relaxed"`` (see ``ZipCodeAnonymizer``)
             worker_num_cpus: CPUs reserved for each actor (None = 1.0); lower it to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
@@ -1516,6 +1528,7 @@ class LocalJobRunner:
         """
         from tide2.actors import create_anonymizer_actor_class
 
+        _validate_zip_mode(zip_mode)
         _validate_id_column(_id_column)
         self._init_ray()
 
@@ -1582,6 +1595,7 @@ class LocalJobRunner:
             acc_num_salt=acc_num_salt,
             acc_num_study_id=acc_num_study_id,
             jitter_required=jitter_required,
+            zip_mode=zip_mode,
         )
 
         try:
@@ -2146,6 +2160,7 @@ class LocalJobRunner:
         t_kw = dict(transformer_kwargs or {})
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
+        _validate_zip_mode(a_kw.get("zip_mode", "hips"))
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------
@@ -2690,6 +2705,7 @@ class LocalJobRunner:
                 acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
                 acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
                 jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
+                zip_mode=anonymizer_kwargs.get("zip_mode", "hips"),
             )
             ds = self.build_anonymizer_stage(
                 ds,

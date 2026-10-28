@@ -14,6 +14,8 @@ root, and must not import heavy modules (``faker``, ``usaddress``, ``tide2.actor
 from __future__ import annotations
 
 import functools
+import logging
+import numbers
 import secrets
 from typing import Any
 
@@ -29,6 +31,8 @@ from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
 
 __docformat__ = "google"
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_JITTER_DAYS = 180
 DEFAULT_MIN_JITTER_DAYS = 3
@@ -49,7 +53,41 @@ FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     }
 )
 DATE_ENTITY_TYPES: frozenset[str] = frozenset({"DATE", "DATE_TIME"})
-SUPPORTED_ENTITY_TYPES: frozenset[str] = FPE_ENTITY_TYPES | DATE_ENTITY_TYPES
+ZIP_ENTITY_TYPES: frozenset[str] = frozenset({"ZIP_CODE"})
+SUPPORTED_ENTITY_TYPES: frozenset[str] = FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | ZIP_ENTITY_TYPES
+
+MAX_ZIP5 = 99999
+_warned_integer_zip = False
+
+
+@functools.cache
+def _zip_operator() -> Operator:
+    """Return the guarded ZIP operator, built once per process.
+
+    ``zip_code`` is imported here, not at module level, so a bundle that has no ZIP module or population file
+    still runs every other entity type.
+    """
+    from tide2.anonymizers.zip_code import ZipCodeAnonymizer
+
+    return guarded(ZipCodeAnonymizer)()
+
+
+def _zip_text(value: Any) -> str:
+    """Return the text of a ZIP cell, restoring the leading zeros an integer column has lost.
+
+    A ZIP stored as an integer (``2139`` for ``02139``) is left-padded to 5 digits and a warning is logged once
+    per process. Any other value is returned as text; a value that is not a ZIP is masked by the operator.
+    """
+    global _warned_integer_zip  # noqa: PLW0603 # one warning per process
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool) and 0 <= value <= MAX_ZIP5:
+        if not _warned_integer_zip:
+            _warned_integer_zip = True
+            logger.warning(
+                "ZIP code given as an integer: padding to 5 digits. The column lost its leading zeros upstream; "
+                "store ZIP codes as strings."
+            )
+        return f"{int(value):05d}"
+    return str(value)
 
 
 @functools.cache
@@ -102,6 +140,7 @@ def anonymize_cell(
     key: bytes,
     patient_id: Any = None,
     jitter: int | None = None,
+    zip_mode: str | None = None,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -112,27 +151,37 @@ def anonymize_cell(
         key: 32-byte key.
         patient_id: Patient identifier used to derive the date jitter.
         jitter: Explicit date jitter in days; wins over ``patient_id``.
+        zip_mode: ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"``; required for ``ZIP_CODE``, ignored
+            for other types. An integer ZIP is padded to 5 digits (see ``ZipCodeAnonymizer``).
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
         when the operator cannot handle the value.
 
     Raises:
-        ValueError: If ``entity_type`` is missing or not supported.
+        ValueError: If ``entity_type`` is missing or not supported, or ``entity_type`` is ``ZIP_CODE`` and
+            ``zip_mode`` is missing or invalid.
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
+    if entity_type in ZIP_ENTITY_TYPES:
+        from tide2.anonymizers.zip_code import validate_zip_mode  # see _zip_operator
+
+        validate_zip_mode(zip_mode)
 
     if is_null(value):
         return None
 
-    text = str(value)
+    text = _zip_text(value) if entity_type in ZIP_ENTITY_TYPES else str(value)
     if text == "":
         return ""
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
     if safe_entity_type(entity_type, text) != entity_type:
         return mask("ENTITY")
+
+    if entity_type in ZIP_ENTITY_TYPES:
+        return _zip_operator().operate(text, {"mode": zip_mode, "entity_type": entity_type})
 
     fpe, date_jitter = _operators()
     if entity_type in DATE_ENTITY_TYPES:

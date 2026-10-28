@@ -24,6 +24,10 @@ from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
 
+# Mirrors ZIP_MODE_HIPS + ZIP_MODES in tide2.anonymizers.zip_code, which is not imported here to keep --help fast
+# (tests/test_zip_code_anonymizer.py checks they agree).
+ZIP_MODE_CHOICES = ("hips", "safe-harbor-strict", "safe-harbor-relaxed")
+
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Run a job."""
@@ -109,6 +113,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 acc_num_salt=args.acc_num_salt,
                 acc_num_study_id=args.acc_num_study_id,
                 jitter_required=getattr(args, "jitter_required", False),
+                zip_mode=getattr(args, "zip_mode", "hips"),
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -229,6 +234,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw: dict = {}
             if getattr(args, "jitter_required", False):
                 a_kw["jitter_required"] = True
+            if getattr(args, "zip_mode", "hips") != "hips":
+                a_kw["zip_mode"] = args.zip_mode
             for attr, key in [
                 ("num_actors", "num_actors"),
                 ("batch_size", "batch_size"),
@@ -483,6 +490,17 @@ Examples:
         action="store_true",
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
     )
+    run_p.add_argument(
+        "--zip-mode",
+        choices=ZIP_MODE_CHOICES,
+        default="hips",
+        help=(
+            "How ZIP codes are anonymized (anonymizer/pipeline jobs). 'hips' (default): a random real ZIP. "
+            "'safe-harbor-strict': HIPAA Safe Harbor, the 3-digit prefix or 000 when its area has 20,000 people or "
+            "fewer (2020 Census). 'safe-harbor-relaxed': keep all 5 digits when the area has more than 20,000 people, "
+            "else the 3-digit prefix; NOT Safe Harbor compliant"
+        ),
+    )
     # Pipeline-specific arguments
     run_p.add_argument("--salt-hex", default="00" * 32, help="Hex-encoded FPE salt (pipeline jobs)")
     run_p.add_argument("--key-hex", default="11" * 32, help="Hex-encoded FPE key (pipeline jobs)")
@@ -599,6 +617,11 @@ Examples:
     # If --config provided on the 'run' command, load YAML and backfill unset args
     if args.command == "run" and getattr(args, "config", None):
         _apply_config(args, run_p, argv)
+
+    # argparse checks the flag, but a value from --config YAML bypasses its choices
+    if args.command == "run" and getattr(args, "zip_mode", "hips") not in ZIP_MODE_CHOICES:
+        print(f"Error: invalid zip_mode {args.zip_mode!r}; choose from {', '.join(ZIP_MODE_CHOICES)}")
+        sys.exit(1)
 
     args.func(args)
 

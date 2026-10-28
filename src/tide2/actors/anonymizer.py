@@ -44,6 +44,7 @@ from tide2.anonymizers import HipsAlphaNumericAnonymizer
 from tide2.anonymizers import HipsLocationAnonymizer
 from tide2.anonymizers import HipsNamesAnonymizer
 from tide2.anonymizers import MaskingAnonymizer
+from tide2.anonymizers import ZipCodeAnonymizer
 from tide2.anonymizers import presidio_patches
 from tide2.anonymizers.guarded import end_note
 from tide2.anonymizers.guarded import guarded
@@ -51,6 +52,9 @@ from tide2.anonymizers.guarded import record_error
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
+from tide2.anonymizers.zip_code import ZIP_ENTITY_ALIASES
+from tide2.anonymizers.zip_code import ZIP_MODE_HIPS
+from tide2.anonymizers.zip_code import validate_zip_mode
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
@@ -89,6 +93,7 @@ class AnonymizerWorker:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        zip_mode: str = ZIP_MODE_HIPS,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -100,6 +105,8 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
+            zip_mode: How ZIP codes are anonymized: ``"hips"`` (default, a random real ZIP),
+                ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"`` (see ``ZipCodeAnonymizer``).
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -109,6 +116,9 @@ class AnonymizerWorker:
 
         if len(key) != REQUIRED_KEY_SIZE:
             raise ValueError(f"key must be {REQUIRED_KEY_SIZE} bytes, got {len(key)}")
+
+        if zip_mode != ZIP_MODE_HIPS:
+            validate_zip_mode(zip_mode)
 
         # Apply Presidio patches - must be done in __init__ (not module level)
         # for Ray workers since they are separate processes.
@@ -120,6 +130,7 @@ class AnonymizerWorker:
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
         self.jitter_required = jitter_required
+        self.zip_mode = zip_mode
 
         # Suppress short input warnings in batch processing (reduces log noise)
         FormatPreservingEncryption.suppress_short_input_warnings = True
@@ -135,6 +146,7 @@ class AnonymizerWorker:
             HipsAlphaNumericAnonymizer,
             HipsLocationAnonymizer,
             AgeGroupAnonymizer,
+            ZipCodeAnonymizer,
         ):
             self.anonymizer_engine.add_anonymizer(guarded(operator_cls))
         self.anonymizer_engine.add_anonymizer(MaskingAnonymizer)
@@ -151,7 +163,7 @@ class AnonymizerWorker:
 
     def _create_base_operators(self) -> dict[str, OperatorConfig]:
         """Create base operator configuration with the provided keys."""
-        return {
+        operators = {
             # Unknown entity types get a visible placeholder (recorded as a fallback), never a deletion.
             "DEFAULT": OperatorConfig("masking", {"fallback": True}),
             "OTHER": OperatorConfig("masking"),
@@ -229,6 +241,10 @@ class AnonymizerWorker:
                 {"salt": self.salt, "key": self.key},
             ),
         }
+        if self.zip_mode != ZIP_MODE_HIPS:
+            zip_operator = OperatorConfig("zip_code_safe_harbor", {"mode": self.zip_mode})
+            operators.update(dict.fromkeys(("ZIP_CODE", *ZIP_ENTITY_ALIASES), zip_operator))
+        return operators
 
     def _create_operators_for_note(
         self,
@@ -688,6 +704,7 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
+    zip_mode: str = ZIP_MODE_HIPS,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -702,6 +719,8 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
+        zip_mode: ``"hips"`` (default), ``"safe-harbor-strict"`` or ``"safe-harbor-relaxed"``;
+            see ``AnonymizerWorker``
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -730,6 +749,7 @@ def create_anonymizer_actor(
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
                 jitter_required=jitter_required,
+                zip_mode=zip_mode,
             )
 
     return ConfiguredAnonymizerActor

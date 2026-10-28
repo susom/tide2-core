@@ -19,7 +19,10 @@ for name, sub in (("tide2", ""), ("tide2.anonymizers", "anonymizers")):
 
 import tide2.anonymizers.cell as cell
 
-print(json.dumps({"ok": cell.anonymize_cell("48291037", "MRN", b"\\x01" * 32, b"\\x02" * 32), "modules": sorted(sys.modules)}))
+ok = cell.anonymize_cell("48291037", "MRN", b"\\x01" * 32, b"\\x02" * 32)
+modules = sorted(sys.modules)  # before any ZIP call: the ZIP module must load lazily
+zip_out = cell.anonymize_cell("02139", "ZIP_CODE", b"\\x01" * 32, b"\\x02" * 32, zip_mode="safe-harbor-strict")
+print(json.dumps({"ok": ok, "modules": modules, "zip": zip_out}))
 """
 
 
@@ -28,6 +31,8 @@ def test_cell_loads_without_package_roots_or_heavy_modules() -> None:
     assert proc.returncode == 0, proc.stderr[-2000:]
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert result["ok"]
+    assert result["zip"] == "021"
     loaded = result["modules"]
+    assert "tide2.anonymizers.zip_code" not in loaded
     for forbidden in FORBIDDEN:
         assert not any(m == forbidden or m.startswith(forbidden + ".") for m in loaded), forbidden
