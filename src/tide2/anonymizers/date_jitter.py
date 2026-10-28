@@ -1,18 +1,18 @@
 """Privacy-preserving date shifting operator.
 
-Adds deterministic per-patient jitter to dates, supporting multiple date formats
-and optional per-patient consistency via cryptographic derivation. Standalone
-weekdays are rotated by the same per-patient jitter, so the whole operator is a
-deterministic function of the jitter.
+Adds a deterministic per-patient jitter (whole days) to every date in a value. The
+date tokens are rewritten in place, so the input style survives: numeric or named
+month, full or abbreviated name, case, zero padding, ordinal suffix, the word
+``of`` and the separators. Everything that is not part of the date (time of day,
+the ``T`` separator, timezone, surrounding text) is kept verbatim, except weekday
+names, which are rotated by the same jitter so they never reveal the original
+weekday. The result depends only on the input and the jitter, never on the clock.
 """
 
-import contextlib
-import inspect
 import re
-from collections.abc import Callable
-from datetime import UTC
-from datetime import datetime
+from datetime import date
 from datetime import timedelta
+from re import Match
 from re import Pattern
 
 from presidio_anonymizer.operators import Operator
@@ -20,62 +20,83 @@ from presidio_anonymizer.operators import OperatorType
 
 from tide2.anonymizers.guarded import record_fallback
 
-# --- Date-parsing constants (named to avoid magic values in comparisons) ---
 # Ordinal suffix: 11th-13th (and the 10-20 band) always take "th".
 _ORDINAL_TEEN_LOW = 10
 _ORDINAL_TEEN_HIGH = 20
-# Length thresholds used while normalizing matched month/year groups.
-_MONTH_ABBREV_LEN = 3
-_TWO_DIGIT_YEAR_LEN = 2
-# Minimum absolute jitter required for date anonymization.
 _MIN_JITTER = 3
+_DAYS_IN_WEEK = 7
+_PADDED_LEN = 2
+_TWO_DIGIT_YEAR_LEN = 2
+_ABBREV_LEN = 3
+_SEPTEMBER = 9
+# Month-only dates (e.g. "2023-03") are shifted from the middle of the month.
+_MONTH_ONLY_DAY = 15
+# Leap year used for dates with no year, so that "Feb 29" always parses. It never
+# appears in the output because a yearless input produces a yearless output.
+_REFERENCE_LEAP_YEAR = 2000
+# Two-digit years below the pivot are 20xx, the rest 19xx (00-29 -> 20xx, 30-99 -> 19xx).
+_DEFAULT_TWO_DIGIT_YEAR_PIVOT = 30
+_MAX_TWO_DIGIT_YEAR_PIVOT = 100
 
-# --- Regular-expression grammar components (module-level constants) ---
-_PRECEDING = r"(?:\b)"
-_FOLLOWING = r"(?:\b)"
-_FOLLOWING_TO_CUTOFF_NUM = r"(?=(?:[^0-9]*\b))"
-
-_MON = r"(?P<month>1|2|3|4|5|6|7|8|9|01|02|03|04|05|06|07|08|09|10|11|12)"
-_MONTH = r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
-_DAY = r"(?P<day>1|2|3|4|5|6|7|8|9|01|02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)"
+# Alternations are ordered longest-first so backtracking never settles for a prefix.
+_MON = r"(?P<month>1[0-2]|0[1-9]|[1-9])"
+_MONTH = (
+    r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December"
+    r"|Sept|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+)
+_DAY = r"(?P<day>3[01]|[12][0-9]|0[1-9]|[1-9])"
 # Unambiguous day-first value (13-31): too large to be a month, so a numeric
 # date starting with it must be dd/mm, not mm/dd. Ambiguous leading values
 # (01-12) keep the US mm/dd interpretation handled by the _MON patterns.
-_DAY_FIRST = r"(?P<day>13|14|15|16|17|18|19|20|21|22|23|24|25|26|27|28|29|30|31)"
-_DAY_SUFFIX = r"(?i:st|nd|rd|th)?"
+_DAY_FIRST = r"(?P<day>1[3-9]|2[0-9]|3[01])"
+_DAY_SUFFIX = r"(?P<suffix>st|nd|rd|th)?"
 _YEAR = r"(?P<year>(?:19|20)[0-9][0-9])"
+_SEP = r"(?P<sep>[/-])"
+_START = r"\b"
+# A date may be directly followed by the "T" of an ISO timestamp.
+_END = r"(?:\b|(?=T))"
+# Compact dates may be followed by an HHMMSS time (yyyymmddHHMMSS); any other trailing digit is not allowed.
+_COMPACT_END = r"(?:(?![0-9])|(?=(?:[01][0-9]|2[0-3])[0-5][0-9][0-5][0-9](?![0-9])))"
 
-_HOUR = r"(?P<hour>1|2|3|4|5|6|7|8|9|01|02|03|04|05|06|07|08|09|10|11|12|13|14|15|16|17|18|19|20|21|22|23)"
-_MINUTE = r"(?P<minute>[0-5][0-9])"
-_SECOND = r"(?P<second>[0-5][0-9])"
-_AMPM = r"(?P<ampm>AM|A|PM|P)"
-_TIMEZONE = r"(?i:CT)"
-_TIME = f"(?P<time>{_HOUR}:{_MINUTE}(?::{_SECOND})?(?i:\\s*{_AMPM})?(?:\\s*{_TIMEZONE})?(?i:\\s*h)?)"
+_DAY_OF_WEEK = r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b"
+_WEEKDAY_PATTERN = re.compile(_DAY_OF_WEEK, re.IGNORECASE)
 
-# Day of week pattern (both full and abbreviated)
-_DAY_OF_WEEK = r"(?P<day_of_week>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+# Times of day and UTC offsets are hidden from date matching so that, for
+# example, the "30-05" in "10:30-05:30" is never read as dd-mm.
+_TIME_PATTERN = re.compile(
+    r"[0-9]{1,2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:[+-][0-9]{2}:[0-9]{2}|[+-][0-9]{4}(?![0-9]))?"
+)
+
+_MONTH_NUMBERS = {
+    name: number
+    for number, name in enumerate(
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1
+    )
+}
 
 
 class DateJitterAnonymizer(Operator):
-    """
-    Anonymizer that detects date format and replaces with a data with a jitter of the same format.
-    """
+    """Anonymizer that shifts every date in a value by a jitter, keeping its format.
 
-    # Pre-computed separator acceptance for format functions (class-level for efficiency)
-    _separator_acceptance: dict | None = None
+    Dates are found with an ordered list of patterns (the first pattern that matches
+    wins; further dates in the same value are shifted too). Month-only dates are
+    shifted from the 15th of the month, and year-only values pass through unchanged
+    (Safe Harbor allows the year). Values that hold no valid date become ``[DATE]``.
+
+    Two-digit years follow a fixed pivot (00-29 is 20xx, 30-99 is 19xx) that can be
+    changed with ``two_digit_year_pivot``. A shifted two-digit year keeps two digits,
+    so a result that crosses the pivot (Dec 2029 to Jan 2030) reads in the other
+    century. Dates without a year are shifted in a leap year, so a yearless result
+    can differ by one day from a shift in a non-leap year across 29 February.
+    """
 
     def __init__(self):
         """Initialize the date jitter anonymizer."""
         super().__init__()
 
-        self.substitutions = self._compile_patterns()
+        self.patterns = self._compile_patterns()
         self.default_replacement = "[DATE]"
 
-        # Pre-compute which format functions accept 'separator' parameter (once per class)
-        if DateJitterAnonymizer._separator_acceptance is None:
-            DateJitterAnonymizer._separator_acceptance = self._compute_separator_acceptance()
-
-        # Month mappings
         self.month_names = {
             1: "January",
             2: "February",
@@ -106,276 +127,84 @@ class DateJitterAnonymizer(Operator):
             12: "Dec",
         }
 
-        # Day of week names (full and abbreviated)
         self.days_of_week_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
         self.days_of_week_abbrev = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
         self.supported_entity_types = ["DATE_TIME", "DATE"]
 
     @staticmethod
-    def _get_day_suffix(day):
-        """Generate ordinal suffix for day (st, nd, rd, th)"""
+    def _get_day_suffix(day: int) -> str:
+        """Return the ordinal suffix for a day of the month (st, nd, rd, th)."""
         if _ORDINAL_TEEN_LOW <= day % 100 <= _ORDINAL_TEEN_HIGH:
             return "th"
         return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
     @staticmethod
-    def _pad_zero(num):
-        """Add leading zero if single digit"""
-        return f"{num:02d}"
+    def _compile_patterns() -> list[Pattern]:
+        """Compile the date patterns in priority order (the first pattern that matches wins).
 
-    # Pattern 1: dd/mm/yyyy or dd-mm-yyyy
-    def _format_dd_mm_yyyy(self, month, day, year, separator="/"):
-        """Format as dd/mm/yyyy or dd-mm-yyyy"""
-        return f"{self._pad_zero(day)}{separator}{self._pad_zero(month)}{separator}{year}"
-
-    # Pattern 2: yyyy-mm-dd or yyyy/mm/dd
-    def _format_yyyy_mm_dd(self, month, day, year, separator="/"):
-        """Format as yyyy-mm-dd or yyyy/mm/dd"""
-        return f"{year}{separator}{self._pad_zero(month)}{separator}{self._pad_zero(day)}"
-
-    # Pattern 3: Month/Day/Year (full month name)
-    def _format_month_day_year_full(self, month, day, year, separator="/"):
-        """Format as Month/Day/Year with full month name"""
-        month_name = self.month_names[month]
-        return f"{month_name}{separator}{day}{separator}{year}"
-
-    # Pattern 4: mm/dd/yyyy
-    def _format_mm_dd_yyyy(self, month, day, year, separator="/"):
-        """Format as mm/dd/yyyy"""
-        return f"{self._pad_zero(month)}{separator}{self._pad_zero(day)}{separator}{year}"
-
-    # Pattern 5: mm/dd/yy (00-29) - assumes 2000s
-    def _format_mm_dd_yy_2000s(self, month, day, year, separator="/"):
-        """Format as mm/dd/yy for years 2000-2029"""
-        year_suffix = str(year)[-2:]  # Get last 2 digits
-        return f"{self._pad_zero(month)}{separator}{self._pad_zero(day)}{separator}{year_suffix}"
-
-    # Pattern 6: mm/dd/yy (30-99) - assumes 1900s
-    def _format_mm_dd_yy_1900s(self, month, day, year, separator="/"):
-        """Format as mm/dd/yy for years 1930-1999"""
-        year_suffix = str(year)[-2:]  # Get last 2 digits
-        return f"{self._pad_zero(month)}{separator}{self._pad_zero(day)}{separator}{year_suffix}"
-
-    # Pattern 7: January 1st, 2010
-    def _format_month_day_suffix_year(self, month, day, year):
-        """Format as 'January 1st, 2010'"""
-        month_name = self.month_names[month]
-        day_suffix = self._get_day_suffix(day)
-        return f"{month_name} {day}{day_suffix}, {year}"
-
-    # Pattern 8: mm/yyyy
-    def _format_mm_yyyy(self, month, day, year, separator="/"):
-        """Format as mm/yyyy"""
-        return f"{self._pad_zero(month)}{separator}{year}"
-
-    # Pattern 9: March of 2010
-    def _format_month_of_year(self, month, day, year):
-        """Format as 'March of 2010'"""
-        month_name = self.month_names[month]
-        return f"{month_name} of {year}"
-
-    # Pattern 10: March 10
-    def _format_month_day(self, month, day, year, with_suffix=False):
-        """Format as 'March 10' or 'March 10th'"""
-        month_name = self.month_names[month]
-        if with_suffix:
-            day_suffix = self._get_day_suffix(day)
-            return f"{month_name} {day}{day_suffix}"
-        return f"{month_name} {day}"
-
-    # Pattern 13: mm/dd (month/day without year)
-    def _format_mm_dd(self, month, day, year, separator="/"):
-        """Format as mm/dd"""
-        return f"{self._pad_zero(month)}{separator}{self._pad_zero(day)}"
-
-    # Pattern 13b: dd/mm (day/month without year, day-first)
-    def _format_dd_mm(self, month, day, year, separator="/"):
-        """Format as dd/mm"""
-        return f"{self._pad_zero(day)}{separator}{self._pad_zero(month)}"
-
-    # Pattern 14: yyyy/mm (year/month without day)
-    def _format_yyyy_mm(self, month, day, year, separator="/"):
-        """Format as yyyy/mm"""
-        return f"{year}{separator}{self._pad_zero(month)}"
-
-    # Pattern 11: 2008-08-09T15:11:00 (ISO format)
-    def _format_iso_date(self, month, day, year, separator="-"):
-        """Format as ISO date: yyyy-mm-dd"""
-        return f"{year}{separator}{self._pad_zero(month)}{separator}{self._pad_zero(day)}"
-
-    # Pattern 12: 20080809151100 (compact format)
-    def _format_compact_date(self, month, day, year):
-        """Format as compact date: yyyymmdd"""
-        return f"{year}{self._pad_zero(month)}{self._pad_zero(day)}"
-
-    # Pattern 15: Day of week replacement
-    def _format_day_of_week(self, original_day, jitter):
-        """Replace a day of the week by rotating it ``jitter`` positions.
-
-        Deterministic: the same ``jitter`` always maps a given weekday to the
-        same replacement, matching the numeric date path. The weekday can map to
-        itself when ``jitter % 7 == 0``; this is intended, unbiased behavior.
-
-        Python's ``%`` returns a non-negative result for negative operands
-        (``(0 + -10) % 7 == 4``), so negative jitter is handled with no
-        special-casing.
+        The patterns only cover the date itself; the formatting is read back from the
+        named groups (``month``, ``day``, ``year``, ``suffix``, ``sep``).
         """
-        original_day_normalized = original_day.strip().title()
-
-        if original_day_normalized in self.days_of_week_abbrev:
-            table = self.days_of_week_abbrev
-        elif original_day_normalized in self.days_of_week_full:
-            table = self.days_of_week_full
-        else:
-            # Unreachable in practice: this method is only invoked after the
-            # day_of_week regex group matched an exact day name. If it is ever
-            # reached (e.g. a future refactor routes unrecognized input here),
-            # return the input unchanged rather than fabricating a weekday.
-            return original_day
-
-        idx = table.index(original_day_normalized)
-        replacement = table[(idx + jitter) % len(table)]
-
-        # Preserve original casing
-        if original_day.isupper():
-            return replacement.upper()
-        if original_day.islower():
-            return replacement.lower()
-        return replacement
-
-    def _compile_patterns(self) -> list[tuple[Pattern, Callable]]:
-        """
-        Compile all date patterns used for matching.
-        Returns a list of tuples containing (compiled_pattern, format_function),
-        where format_function is a bound formatter method (e.g. _format_mm_dd_yyyy)
-        that builds the jittered replacement string for a match.
-        """
-
         patterns = [
-            # Day of week (standalone) - should be checked first
-            (
-                f"{_PRECEDING}{_DAY_OF_WEEK}{_FOLLOWING}",
-                self._format_day_of_week,
-            ),
-            # dd/mm/yyyy or dd-mm-yyyy (full month name)
-            (
-                f"{_PRECEDING}{_DAY}(/|-){_MONTH}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING}",
-                self._format_dd_mm_yyyy,
-            ),
-            # dd/mm/yyyy or dd-mm-yyyy (numeric, day-first). Only matches when the
-            # leading number is 13-31 so it cannot be confused with mm/dd/yyyy.
-            (
-                f"{_PRECEDING}{_DAY_FIRST}(/|-){_MON}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING}",
-                self._format_dd_mm_yyyy,
-            ),
-            # 2008-08-09T15:11:00 (ISO format). Checked before the plain
-            # yyyy-mm-dd / yyyy-mm patterns so the 'T'-separated time does not
-            # get truncated by an earlier, shorter match.
-            (
-                f"{_PRECEDING}{_YEAR}(/|-){_MON}\\2{_DAY}(?:T\\s*{_TIME})?{_FOLLOWING}",
-                self._format_iso_date,
-            ),
-            # yyyy-mm-dd or yyyy/mm/dd
-            (
-                f"{_PRECEDING}{_YEAR}(/|-){_MON}\\2{_DAY}(?:\\s*{_TIME})?{_FOLLOWING}",
-                self._format_yyyy_mm_dd,
-            ),
-            # Month/Day/Year (full month name)
-            (
-                f"{_PRECEDING}{_MONTH}(/|-){_DAY}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING_TO_CUTOFF_NUM}",
-                self._format_month_day_year_full,
-            ),
+            # dd/Month/yyyy, dd-Mon-yyyy
+            f"{_START}{_DAY}{_SEP}{_MONTH}(?P=sep){_YEAR}{_END}",
+            # dd Month yyyy, dd Mon yyyy, 1st March, 2023
+            f"{_START}{_DAY}{_DAY_SUFFIX}\\s+{_MONTH},?\\s+{_YEAR}{_END}",
+            # dd/mm/yyyy or dd-mm-yyyy (numeric, day-first): only when the leading number is 13-31
+            f"{_START}{_DAY_FIRST}{_SEP}{_MON}(?P=sep){_YEAR}{_END}",
+            # yyyy-mm-dd or yyyy/mm/dd, also followed by "T" and a time
+            f"{_START}{_YEAR}{_SEP}{_MON}(?P=sep){_DAY}{_END}",
+            # yyyymmdd (fixed width) and yyyymmddHHMMSS
+            f"{_START}{_YEAR}(?P<month>0[1-9]|1[0-2])(?P<day>0[1-9]|[12][0-9]|3[01]){_COMPACT_END}",
+            # Month/Day/Year (month name)
+            f"{_START}{_MONTH}{_SEP}{_DAY}(?P=sep){_YEAR}{_END}",
             # mm/dd/yyyy
-            (
-                f"{_PRECEDING}{_MON}(/|-){_DAY}\\2{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING_TO_CUTOFF_NUM}",
-                self._format_mm_dd_yyyy,
-            ),
-            # mm/dd/yy (00-29) - assumes 2000s
-            (
-                f"{_PRECEDING}{_MON}(/|-){_DAY}\\2(?P<year>[0-2][0-9])(?:\\s*{_TIME})?{_FOLLOWING_TO_CUTOFF_NUM}",
-                self._format_mm_dd_yy_2000s,
-            ),
-            # mm/dd/yy (30-99) - assumes 1900s
-            (
-                f"{_PRECEDING}{_MON}(/|-){_DAY}\\2(?P<year>[3-9][0-9])(?:\\s*{_TIME})?{_FOLLOWING}",
-                self._format_mm_dd_yy_1900s,
-            ),
+            f"{_START}{_MON}{_SEP}{_DAY}(?P=sep){_YEAR}{_END}",
+            # mm/dd/yy
+            f"{_START}{_MON}{_SEP}{_DAY}(?P=sep)(?P<year>[0-9]{{2}}){_END}",
             # January 1st, 2010
-            (
-                f"{_PRECEDING}{_MONTH} +{_DAY}{_DAY_SUFFIX}(,|\\s)+{_YEAR}(?:\\s*{_TIME})?{_FOLLOWING}",
-                self._format_month_day_suffix_year,
-            ),
+            f"{_START}{_MONTH} +{_DAY}{_DAY_SUFFIX}[,\\s]+{_YEAR}{_END}",
             # mm/yyyy
-            (f"{_PRECEDING}{_MON}(/|-){_YEAR}{_FOLLOWING}", self._format_mm_yyyy),
+            f"{_START}{_MON}{_SEP}{_YEAR}{_END}",
             # March of 2010 / March 2010 / March2010
-            (f"{_PRECEDING}{_MONTH}\\s*(?:of\\s+)?{_YEAR}", self._format_month_of_year),
-            # March 10
-            (f"{_PRECEDING}{_MONTH}\\s+{_DAY}{_DAY_SUFFIX}?\\b", self._format_month_day),
-            # dd/mm (day/month without year, day-first). Leading 13-31 only, so it
-            # cannot collide with the mm/dd interpretation below.
-            (f"{_PRECEDING}{_DAY_FIRST}(/|-){_MON}\\b", self._format_dd_mm),
-            # mm/dd (month/day without year)
-            (f"{_PRECEDING}{_MON}(/|-){_DAY}\\b", self._format_mm_dd),
-            # yyyy/mm (year/month without day)
-            (f"{_PRECEDING}{_YEAR}(/|-){_MON}\\b", self._format_yyyy_mm),
-            # 20080809151100 (compact format)
-            (f"{_PRECEDING}{_YEAR}{_MON}{_DAY}(?:\\s*{_TIME})?", self._format_compact_date),
+            f"{_START}{_MONTH}\\s*(?:of\\s+)?{_YEAR}{_END}",
+            # March 10, March 10th
+            f"{_START}{_MONTH}\\s+{_DAY}{_DAY_SUFFIX}\\b",
+            # dd/mm (day-first, no year): only when the leading number is 13-31
+            f"{_START}{_DAY_FIRST}{_SEP}{_MON}\\b",
+            # mm/dd (no year)
+            f"{_START}{_MON}{_SEP}{_DAY}\\b",
+            # yyyy/mm (no day)
+            f"{_START}{_YEAR}{_SEP}{_MON}\\b",
         ]
-
-        return [(re.compile(pattern, re.IGNORECASE), replacement) for pattern, replacement in patterns]
-
-    def _compute_separator_acceptance(self) -> dict:
-        """
-        Pre-compute which format functions accept 'separator' parameter.
-
-        This avoids calling inspect.signature() in the hot path of operate().
-
-        Keyed by the underlying function (``__func__``) rather than the bound
-        method: this cache is class-level and shared across instances, but a
-        bound method is unique per instance, so keying by the bound method would
-        make every instance after the first miss the cache and silently lose the
-        date separator.
-        """
-        acceptance = {}
-        for _pattern, replacement in self.substitutions:
-            key = replacement.__func__
-            if key not in acceptance:
-                sig = inspect.signature(replacement)
-                acceptance[key] = "separator" in sig.parameters
-        return acceptance
-
-    def _get_jittered_date(self, jitter: int, date_of_service: datetime) -> dict[str, int]:
-        """
-        Apply jitter to date of service and return date components as dictionary.
-
-        Returns:
-            Dict with keys 'day', 'month', 'year' containing integer values
-        """
-        new_date = date_of_service + timedelta(days=jitter)
-        return {"day": new_date.day, "month": new_date.month, "year": new_date.year}
+        return [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
 
     def operate(self, text: str, params: dict) -> str:
-        """Anonymize a date string by shifting it by a deterministic jitter.
+        """Anonymize a date string by shifting every date in it by a deterministic jitter.
 
         Args:
-            text: The original date text in any supported format.
+            text: The original date text in any supported format. It may carry a time,
+                timezone, weekday or other surrounding text.
             params: Operator parameters. Required/supported keys:
                 - jitter (int): Number of days to shift the date. Required.
                 - entity_type (str): Entity type label. Required: must be one of
                   the supported types ("DATE_TIME", "DATE"). Any other value
                   (including the absent default) raises ValueError.
+                - two_digit_year_pivot (int): Two-digit years below this value are
+                  20xx, the rest 19xx. Optional, default 30.
 
         Raises:
-            ValueError: If ``jitter`` is missing or ``entity_type`` is not a
-                supported type.
+            ValueError: If ``jitter`` is missing, ``entity_type`` is not a
+                supported type, or ``two_digit_year_pivot`` is out of range.
 
         Returns:
-            The date-shifted text preserving the original format, or the
-            original text unchanged for non-date values (standalone months,
-            years, gestational ages, single characters).
+            The text with each date shifted and its format kept, time and
+            surrounding text unchanged and weekday names rotated by the same
+            jitter. Non-date values (standalone months, years, gestational ages,
+            single characters) are returned unchanged. A value with no valid date
+            becomes ``[DATE]``.
         """
-
         entity_type = params.get("entity_type", "DEFAULT")
 
         try:
@@ -387,48 +216,140 @@ class DateJitterAnonymizer(Operator):
         if entity_type not in self.supported_entity_types:
             raise ValueError(f"Entity type '{entity_type}' is not supported for date anonymization.")
 
+        pivot = int(params.get("two_digit_year_pivot", _DEFAULT_TWO_DIGIT_YEAR_PIVOT))
+        if not 0 <= pivot <= _MAX_TWO_DIGIT_YEAR_PIVOT:
+            raise ValueError("two_digit_year_pivot must be between 0 and 100.")
+
         if self._is_passthrough(text):
             return text
 
-        # Return the result for the first pattern that matches; non-date input
-        # that matches nothing falls through to the default replacement.
-        for pattern, replacement in self.substitutions:
-            match = pattern.search(text)
-            if not match:
-                continue
-            # The day-of-week pattern is a "standalone" fast-path: only take it
-            # when the weekday is the only date content in the value. Otherwise a
-            # weekday embedded in a longer date (e.g. "Monday, 2023-03-15") would
-            # match here and drop the rest of the string, so keep scanning.
-            if self._matched_day_of_week(match) and not self._is_standalone_weekday(match, text):
-                continue
-            result = self._replace_match(match, replacement, jitter)
-            if result == self.default_replacement:
-                record_fallback(entity_type)
-            return result
+        matches = self._find_dates(text)
+        if not matches:
+            weekday = self._standalone_weekday(text)
+            if weekday is not None:
+                return self._rotate_weekday(weekday, jitter)
+            record_fallback(entity_type)
+            return self.default_replacement
 
-        record_fallback(entity_type)
-        return self.default_replacement
-
-    @staticmethod
-    def _matched_day_of_week(match: re.Match) -> bool:
-        """Return True if this match captured a standalone day-of-week group."""
         try:
-            return match.group("day_of_week") is not None
-        except (IndexError, AttributeError):
-            return False
+            edits = [edit for match in matches for edit in self._date_edits(match, jitter, pivot)]
+        except (ValueError, OverflowError):
+            record_fallback(entity_type)
+            return self.default_replacement
+
+        edits.extend(
+            (weekday.start(), weekday.end(), self._rotate_weekday(weekday.group(), jitter))
+            for weekday in _WEEKDAY_PATTERN.finditer(text)
+        )
+        for start, end, replacement in sorted(edits, reverse=True):
+            text = text[:start] + replacement + text[end:]
+        return text
+
+    def _find_dates(self, text: str) -> list[Match]:
+        """Return the non-overlapping date matches in ``text``, highest-priority pattern first."""
+        scan = _TIME_PATTERN.sub(lambda match: " " * len(match.group()), text)
+        found: list[Match] = []
+        while True:
+            match = next((m for m in (pattern.search(scan) for pattern in self.patterns) if m), None)
+            if match is None:
+                return found
+            found.append(match)
+            scan = scan[: match.start()] + " " * (match.end() - match.start()) + scan[match.end() :]
+
+    def _date_edits(self, match: Match, jitter: int, pivot: int) -> list[tuple[int, int, str]]:
+        """Return the (start, end, replacement) edits that shift one matched date.
+
+        Raises:
+            ValueError: If the matched tokens are not a real calendar date.
+            OverflowError: If the shifted date is out of range.
+        """
+        tokens = match.groupdict()
+        month_text = tokens["month"]
+        day_text = tokens.get("day")
+        year_text = tokens.get("year")
+
+        month = int(month_text) if month_text.isdigit() else _MONTH_NUMBERS[month_text[:_ABBREV_LEN].lower()]
+        day = int(day_text) if day_text is not None else _MONTH_ONLY_DAY
+        if year_text is None:
+            year = _REFERENCE_LEAP_YEAR
+        elif len(year_text) == _TWO_DIGIT_YEAR_LEN:
+            year = 2000 + int(year_text) if int(year_text) < pivot else 1900 + int(year_text)
+        else:
+            year = int(year_text)
+        shifted = date(year, month, day) + timedelta(days=jitter)
+
+        numeric_tokens = [token for token in (month_text, day_text) if token is not None and token.isdigit()]
+        pad = all(len(token) == _PADDED_LEN for token in numeric_tokens)
+
+        replacements = {}
+        if month_text.isdigit():
+            replacements["month"] = f"{shifted.month:02d}" if pad else str(shifted.month)
+        else:
+            replacements["month"] = self._format_month_name(month_text, shifted.month, "sep" in tokens)
+        if day_text is not None:
+            padded = pad if month_text.isdigit() else day_text.startswith("0")
+            replacements["day"] = f"{shifted.day:02d}" if padded else str(shifted.day)
+        if year_text is not None:
+            two_digit = len(year_text) == _TWO_DIGIT_YEAR_LEN
+            replacements["year"] = f"{shifted.year % 100:02d}" if two_digit else str(shifted.year)
+        if tokens.get("suffix"):
+            suffix = self._get_day_suffix(shifted.day)
+            replacements["suffix"] = suffix.upper() if tokens["suffix"].isupper() else suffix
+
+        return [(*match.span(group), value) for group, value in replacements.items()]
+
+    def _format_month_name(self, token: str, month: int, separated: bool) -> str:
+        """Return ``month`` as a name in the full/abbreviated form and case of ``token``.
+
+        "May" is both a full name and an abbreviation, so it counts as abbreviated
+        only inside separator-delimited dates such as ``15-May-2023``.
+        """
+        lowered = token.lower()
+        full = len(lowered) > _ABBREV_LEN and lowered != "sept"
+        if lowered == "may":
+            full = not separated
+        if full:
+            name = self.month_names[month]
+        elif lowered == "sept" and month == _SEPTEMBER:
+            name = "Sept"
+        else:
+            name = self.month_abbrev[month]
+
+        if token.isupper():
+            return name.upper()
+        if token.islower():
+            return name.lower()
+        return name
+
+    def _rotate_weekday(self, token: str, jitter: int) -> str:
+        """Rotate a weekday name by ``jitter`` days, keeping full/abbreviated form and case.
+
+        Python's ``%`` returns a non-negative result for negative operands, so a
+        negative jitter needs no special case. The weekday maps to itself when
+        ``jitter % 7 == 0``, which is intended.
+        """
+        normalized = token.title()
+        table = self.days_of_week_abbrev if len(normalized) == _ABBREV_LEN else self.days_of_week_full
+        replacement = table[(table.index(normalized) + jitter) % _DAYS_IN_WEEK]
+
+        if token.isupper():
+            return replacement.upper()
+        if token.islower():
+            return replacement.lower()
+        return replacement
 
     @staticmethod
-    def _is_standalone_weekday(match: re.Match, text: str) -> bool:
-        """Return True if the weekday match is the only date content in ``text``.
+    def _standalone_weekday(text: str) -> str | None:
+        """Return the weekday when it is the only alphanumeric content of ``text``.
 
-        The text outside the matched span may contain whitespace or punctuation
-        (e.g. "Monday," or " Monday ") and still count as standalone; what must
-        NOT appear is any other alphanumeric content, which would indicate the
-        weekday is embedded in a longer value (e.g. "Monday, 2023-03-15").
+        Whitespace and punctuation around it (e.g. "Monday," or " Monday ") are
+        allowed; a weekday inside a longer value is not standalone.
         """
-        outside = text[: match.start()] + text[match.end() :]
-        return not any(char.isalnum() for char in outside)
+        weekday = _WEEKDAY_PATTERN.search(text)
+        if weekday is None:
+            return None
+        outside = text[: weekday.start()] + text[weekday.end() :]
+        return None if any(char.isalnum() for char in outside) else weekday.group()
 
     def _is_passthrough(self, text: str) -> bool:
         """Return True for values that should be returned unchanged (non-PHI)."""
@@ -446,93 +367,6 @@ class DateJitterAnonymizer(Operator):
             return True
         # Single character — NER noise (e.g., "w", "-", "/", single digit)
         return len(stripped) <= 1
-
-    def _replace_match(self, match: re.Match, replacement, jitter: int) -> str:
-        """Build the jittered replacement string for a single regex match."""
-        # Standalone day of week: rotate directly (it carries no numeric date).
-        if self._matched_day_of_week(match):
-            return self._format_day_of_week(match.group("day_of_week"), jitter)
-
-        month, month_format_str = self._extract_month(match)
-        year_str = self._extract_year(match)
-        day_str = self._extract_day(match)
-
-        try:
-            # Parse date. The result is intentionally naive: it is only used for
-            # day/month/year arithmetic, so attaching a timezone would be
-            # meaningless (hence the DTZ007 suppression).
-            date_str = f"{month}/{day_str}/{year_str}"
-            date_of_svc = datetime.strptime(date_str, f"{month_format_str}/%d/%Y")  # noqa: DTZ007
-        except ValueError:
-            return self.default_replacement
-
-        jittered = self._get_jittered_date(jitter, date_of_svc)
-        format_params = {
-            "month": jittered["month"],
-            "day": jittered["day"],
-            "year": jittered["year"],
-        }
-        # Add separator only if the format function accepts it (pre-computed
-        # lookup keyed by the underlying function, see _compute_separator_acceptance).
-        if self._separator_acceptance.get(replacement.__func__, False):
-            format_params["separator"] = self._extract_separator(match)
-
-        return replacement(**format_params)
-
-    @staticmethod
-    def _extract_month(match: re.Match) -> tuple[str, str]:
-        """Return (month string, strptime format) for the matched month group."""
-        try:
-            month = match.group("month")
-        except IndexError:
-            return "01", "%B"  # Default to January
-
-        # Set month format for datetime parsing
-        if len(month) < _MONTH_ABBREV_LEN:
-            return month, "%m"
-        if len(month) == _MONTH_ABBREV_LEN:
-            return month, "%b"
-        return month[:_MONTH_ABBREV_LEN], "%b"
-
-    @staticmethod
-    def _extract_year(match: re.Match) -> str:
-        """Return a 4-digit year string for the matched year group."""
-        try:
-            year_str = match.group("year")
-        except IndexError:
-            return str(datetime.now(tz=UTC).year)
-
-        # Expand 2-digit years using a sliding window around the current year.
-        if len(year_str) == _TWO_DIGIT_YEAR_LEN:
-            current_year = datetime.now(tz=UTC).year % 100
-            year = int(year_str)
-            return f"20{year_str}" if year <= current_year else f"19{year_str}"
-        return year_str
-
-    @staticmethod
-    def _extract_day(match: re.Match) -> str:
-        """Return the matched day group, defaulting to the middle of the month."""
-        try:
-            return match.group("day")
-        except IndexError:
-            return "15"
-
-    @staticmethod
-    def _extract_separator(match: re.Match) -> str:
-        """Return the date separator captured by the pattern (defaults to '/').
-
-        Only ``/`` and ``-`` are valid separators in the grammar. ``match.group``
-        can return ``None`` for a non-participating group, and the group may hold
-        a non-separator value; in either case we fall back to ``/`` so the
-        separator can never leak a literal ``None`` or a date component into the
-        output.
-        """
-        with contextlib.suppress(IndexError):
-            # The separator is captured in group 2 for every separator pattern.
-            candidate = match.group(2)
-            if candidate in ("/", "-"):
-                return candidate
-        return "/"
 
     def validate(self, params: dict) -> None:
         """Validate operator parameters."""

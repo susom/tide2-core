@@ -641,6 +641,49 @@ release. `patient_id` is written as a string, whatever its input type.
   titles and suffixes without a name, standalone months and years, gestational
   ages and single characters. A standalone birth year over 89 passes through.
 
+### Date formats
+
+Dates are shifted by the per-patient `jitter` (whole days) and keep the format of
+the input: numeric or named month, full or abbreviated name, case, zero padding,
+ordinal suffix, the word `of` and the separators. The time of day, the `T`
+separator, the timezone and the surrounding text are kept as they are. A weekday
+name is rotated by the same jitter, so it stays consistent with the shifted date
+and does not reveal the original weekday. Every date in a value is shifted.
+
+> **Output changed in this release.** Earlier versions rewrote the format and
+> mis-shifted some inputs: compact `yyyymmdd` dates were read as the wrong
+> month and day, `15 March 2023` lost its day, the time, timezone, weekday and
+> surrounding text were dropped, and yearless or two-digit-year dates depended on
+> the run date. Date output for those inputs differs from earlier versions. Plain
+> `YYYY-MM-DD` output is unchanged.
+
+| Input | Jitter | Output | Note |
+|---|---|---|---|
+| `2023-03-15` | +5 | `2023-03-20` | ISO dates are shifted exactly |
+| `2023-03-15T23:30:00-07:00` | +5 | `2023-03-20T23:30:00-07:00` | time and timezone are kept |
+| `2023-03-15 10:30` | +5 | `2023-03-20 10:30` | time of day is kept |
+| `Wed 2023-03-15` | +5 | `Mon 2023-03-20` | weekday rotated by the jitter, form and case kept |
+| `Visit on 2023-03-15 at noon` | +5 | `Visit on 2023-03-20 at noon` | surrounding text is kept |
+| `20231105` | +5 | `20231110` | compact `yyyymmdd` |
+| `3/5/2023` | +5 | `3/10/2023` | padding follows the input |
+| `03/05/2023` | +5 | `03/10/2023` | |
+| `15 March 2023` | +5 | `20 March 2023` | day-first with a month name |
+| `15-MAR-2023` | +5 | `20-MAR-2023` | month form and case are kept |
+| `MARCH 15, 2023` | +5 | `MARCH 20, 2023` | |
+| `March 15th, 2023` | +5 | `March 20th, 2023` | the ordinal suffix appears only when present |
+| `March of 2023` | +112 | `July of 2023` | `of` appears only when present |
+| `12/31/99` | +5 | `01/05/00` | two-digit years: 00-29 is 20xx, 30-99 is 19xx |
+| `Feb 29` | +5 | `Mar 5` | no year in the output; a leap year is used to shift |
+| `2023-03` | +112 | `2023-07` | month-only dates are shifted from the 15th of the month, by design |
+| `2023` | +5 | `2023` | a year alone is not shifted, by design (Safe Harbor allows the year) |
+| `13/45/2020` | +5 | `[DATE]` | not a date: `[DATE]`, and the row is `degraded` |
+
+A numeric date that starts with 01-12 is read as month first (`mm/dd/yyyy`); a
+leading 13-31 is read as day first. A shifted two-digit year keeps two digits, so a
+result that crosses the 29/30 pivot (December 2029 to January 2030) reads in the
+other century. The pivot can be changed with the `two_digit_year_pivot` operator
+parameter.
+
 ### What happens when a run wedges
 
 Hang protection operates at the Ray Data execution level via `NoProgressGuard`:

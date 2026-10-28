@@ -9,10 +9,10 @@ Tests cover date jittering functionality with various formats including:
 - Date with time components
 - Month/year only formats
 - Jitter validation
-"""
 
-from datetime import datetime
-from datetime import timedelta
+The format-fidelity, context, golden and property tests live in
+test_date_jitter_format.py.
+"""
 
 import pytest
 
@@ -31,7 +31,7 @@ class TestDateJitterAnonymizer:
         assert self.anonymizer.supported_entity_types == ["DATE_TIME", "DATE"]
         assert hasattr(self.anonymizer, "month_names")
         assert hasattr(self.anonymizer, "month_abbrev")
-        assert hasattr(self.anonymizer, "substitutions")
+        assert hasattr(self.anonymizer, "patterns")
         assert self.anonymizer.default_replacement == "[DATE]"
 
     def test_operator_name(self):
@@ -116,168 +116,6 @@ class TestDateJitterAnonymizer:
             result = DateJitterAnonymizer._get_day_suffix(day)
             assert result == expected, f"Failed for day {day}"
 
-    def test_pad_zero(self):
-        """Test _pad_zero static method."""
-        test_cases = [(1, "01"), (9, "09"), (10, "10"), (12, "12")]
-        for num, expected in test_cases:
-            result = DateJitterAnonymizer._pad_zero(num)
-            assert result == expected, f"Failed for number {num}"
-
-    # Test date formatting methods
-    def test_format_dd_mm_yyyy(self):
-        """Test _format_dd_mm_yyyy method."""
-        result = self.anonymizer._format_dd_mm_yyyy(3, 15, 2023, "/")
-        assert result == "15/03/2023"
-
-        result = self.anonymizer._format_dd_mm_yyyy(12, 5, 2022, "-")
-        assert result == "05-12-2022"
-
-    def test_format_yyyy_mm_dd(self):
-        """Test _format_yyyy_mm_dd method."""
-        result = self.anonymizer._format_yyyy_mm_dd(3, 15, 2023, "/")
-        assert result == "2023/03/15"
-
-        result = self.anonymizer._format_yyyy_mm_dd(12, 5, 2022, "-")
-        assert result == "2022-12-05"
-
-    def test_format_month_day_year_full(self):
-        """Test _format_month_day_year_full method."""
-        result = self.anonymizer._format_month_day_year_full(3, 15, 2023, "/")
-        assert result == "March/15/2023"
-
-        result = self.anonymizer._format_month_day_year_full(12, 5, 2022, "-")
-        assert result == "December-5-2022"
-
-    def test_format_mm_dd_yyyy(self):
-        """Test _format_mm_dd_yyyy method."""
-        result = self.anonymizer._format_mm_dd_yyyy(3, 15, 2023, "/")
-        assert result == "03/15/2023"
-
-        result = self.anonymizer._format_mm_dd_yyyy(12, 5, 2022, "-")
-        assert result == "12-05-2022"
-
-    def test_format_mm_dd_yy_2000s(self):
-        """Test _format_mm_dd_yy_2000s method."""
-        result = self.anonymizer._format_mm_dd_yy_2000s(3, 15, 2023, "/")
-        assert result == "03/15/23"
-
-        result = self.anonymizer._format_mm_dd_yy_2000s(12, 5, 2009, "-")
-        assert result == "12-05-09"
-
-    def test_format_mm_dd_yy_1900s(self):
-        """Test _format_mm_dd_yy_1900s method."""
-        result = self.anonymizer._format_mm_dd_yy_1900s(3, 15, 1985, "/")
-        assert result == "03/15/85"
-
-        result = self.anonymizer._format_mm_dd_yy_1900s(12, 5, 1999, "-")
-        assert result == "12-05-99"
-
-    def test_format_month_day_suffix_year(self):
-        """Test _format_month_day_suffix_year method."""
-        result = self.anonymizer._format_month_day_suffix_year(3, 15, 2023)
-        assert result == "March 15th, 2023"
-
-        result = self.anonymizer._format_month_day_suffix_year(1, 1, 2022)
-        assert result == "January 1st, 2022"
-
-        result = self.anonymizer._format_month_day_suffix_year(5, 22, 2024)
-        assert result == "May 22nd, 2024"
-
-    def test_format_mm_yyyy(self):
-        """Test _format_mm_yyyy method."""
-        result = self.anonymizer._format_mm_yyyy(3, 15, 2023, "/")
-        assert result == "03/2023"
-
-        result = self.anonymizer._format_mm_yyyy(12, 5, 2022, "-")
-        assert result == "12-2022"
-
-    def test_format_month_of_year(self):
-        """Test _format_month_of_year method."""
-        result = self.anonymizer._format_month_of_year(3, 15, 2023)
-        assert result == "March of 2023"
-
-        result = self.anonymizer._format_month_of_year(12, 5, 2022)
-        assert result == "December of 2022"
-
-    def test_format_month_day(self):
-        """Test _format_month_day method."""
-        result = self.anonymizer._format_month_day(3, 15, 2023, False)
-        assert result == "March 15"
-
-        result = self.anonymizer._format_month_day(3, 15, 2023, True)
-        assert result == "March 15th"
-
-    def test_format_mm_dd(self):
-        """Test _format_mm_dd method."""
-        result = self.anonymizer._format_mm_dd(3, 15, 2023, "/")
-        assert result == "03/15"
-
-        result = self.anonymizer._format_mm_dd(12, 5, 2022, "-")
-        assert result == "12-05"
-
-    def test_format_dd_mm(self):
-        """Test _format_dd_mm method (day-first, no year)."""
-        result = self.anonymizer._format_dd_mm(3, 15, 2023, "/")
-        assert result == "15/03"
-
-        result = self.anonymizer._format_dd_mm(12, 5, 2022, "-")
-        assert result == "05-12"
-
-    def test_format_yyyy_mm(self):
-        """Test _format_yyyy_mm method."""
-        result = self.anonymizer._format_yyyy_mm(3, 15, 2023, "/")
-        assert result == "2023/03"
-
-        result = self.anonymizer._format_yyyy_mm(12, 5, 2022, "-")
-        assert result == "2022-12"
-
-    def test_format_iso_date(self):
-        """Test _format_iso_date method."""
-        result = self.anonymizer._format_iso_date(3, 15, 2023, "-")
-        assert result == "2023-03-15"
-
-        result = self.anonymizer._format_iso_date(12, 5, 2022, "/")
-        assert result == "2022/12/05"
-
-    def test_format_compact_date(self):
-        """Test _format_compact_date method."""
-        result = self.anonymizer._format_compact_date(3, 15, 2023)
-        assert result == "20230315"
-
-        result = self.anonymizer._format_compact_date(12, 5, 2022)
-        assert result == "20221205"
-
-    # Test _get_jittered_date method
-    def test_get_jittered_date_positive_jitter(self):
-        """Test _get_jittered_date with positive jitter."""
-        date_of_service = datetime(2023, 3, 15)
-        jitter = 10
-
-        result = self.anonymizer._get_jittered_date(jitter, date_of_service)
-
-        expected_date = date_of_service + timedelta(days=10)
-        assert result == {"day": expected_date.day, "month": expected_date.month, "year": expected_date.year}
-
-    def test_get_jittered_date_negative_jitter(self):
-        """Test _get_jittered_date with negative jitter."""
-        date_of_service = datetime(2023, 3, 15)
-        jitter = -10
-
-        result = self.anonymizer._get_jittered_date(jitter, date_of_service)
-
-        expected_date = date_of_service + timedelta(days=-10)
-        assert result == {"day": expected_date.day, "month": expected_date.month, "year": expected_date.year}
-
-    def test_get_jittered_date_cross_month_boundary(self):
-        """Test _get_jittered_date crossing month boundary."""
-        date_of_service = datetime(2023, 3, 28)
-        jitter = 10
-
-        result = self.anonymizer._get_jittered_date(jitter, date_of_service)
-
-        expected_date = datetime(2023, 4, 7)  # Should cross into April
-        assert result == {"day": expected_date.day, "month": expected_date.month, "year": expected_date.year}
-
     # Test operate method with missing jitter
     def test_operate_missing_jitter(self):
         """Test operate method when jitter parameter is missing."""
@@ -298,36 +136,19 @@ class TestDateJitterAnonymizer:
         """Test operate method with ISO date format."""
         params = {"entity_type": "DATE", "jitter": 10}
 
-        # Test with real date jittering logic
-        input_date = "2023-03-15"
-        result = self.anonymizer.operate(input_date, params)
-
-        # Result should be a date string (possibly jittered)
-        assert isinstance(result, str)
-        assert len(result) > 0
-        # The result might be in the same ISO format or different depending on implementation
+        assert self.anonymizer.operate("2023-03-15", params) == "2023-03-25"
 
     def test_operate_no_pattern_match(self):
         """Test operate method when no pattern matches."""
         params = {"entity_type": "DATE", "jitter": 10}
 
-        # Test with text that doesn't contain a recognizable date pattern
-        result = self.anonymizer.operate("invalid date text", params)
-
-        # Should return default replacement or handle gracefully
-        assert isinstance(result, str)
-        # Might return the default replacement "[DATE]" or the original text
+        assert self.anonymizer.operate("invalid date text", params) == "[DATE]"
 
     def test_operate_datetime_parsing_error(self):
         """Test operate method when datetime parsing fails."""
         params = {"entity_type": "DATE", "jitter": 10}
 
-        # Test with an invalid date that might cause parsing errors
-        result = self.anonymizer.operate("2023-13-32", params)  # Invalid month and day
-
-        # Should handle the error gracefully
-        assert isinstance(result, str)
-        # Might return default replacement, original text, or some error handling
+        assert self.anonymizer.operate("2023-13-32", params) == "[DATE]"
 
     def test_operate_with_default_entity_type(self):
         """Test operate method with default entity type."""
@@ -339,14 +160,13 @@ class TestDateJitterAnonymizer:
 
     # Test pattern compilation
     def test_compile_patterns_returns_list(self):
-        """Test that _compile_patterns returns a list of tuples."""
+        """Test that _compile_patterns returns a list of compiled regexes."""
         patterns = self.anonymizer._compile_patterns()
         assert isinstance(patterns, list)
         assert len(patterns) > 0
 
-        for pattern, replacement in patterns:
+        for pattern in patterns:
             assert hasattr(pattern, "search")  # Should be compiled regex
-            assert callable(replacement)  # Should be callable function
 
     # Integration tests with real date patterns
     def test_integration_simple_date_formats(self):
@@ -367,50 +187,29 @@ class TestDateJitterAnonymizer:
             assert result == expected, f"{date_str} -> {result!r}, expected {expected!r}"
 
     def test_integration_month_year_formats(self):
-        """Integration test with month/year only formats."""
-        test_cases = [
-            ("03/2023", {"entity_type": "DATE", "jitter": 10}),
-            ("2023-03", {"entity_type": "DATE", "jitter": -5}),
-        ]
-
-        succeeded = 0
-        for date_str, params in test_cases:
-            try:
-                result = self.anonymizer.operate(date_str, params)
-                assert isinstance(result, str)
-                assert len(result) > 0
-                succeeded += 1
-            except ValueError:
-                # Acceptable if pattern doesn't match
-                pass
-
-        # At least one month/year format must be handled without raising.
-        assert succeeded > 0, "Expected at least one month/year date format to be handled"
+        """Month/year only dates are shifted from the 15th of the month."""
+        # 15 Mar 2023 + 10 days = 25 Mar 2023; 15 Mar 2023 - 5 days = 10 Mar 2023.
+        assert self.anonymizer.operate("03/2023", {"entity_type": "DATE", "jitter": 10}) == "03/2023"
+        assert self.anonymizer.operate("2023-03", {"entity_type": "DATE", "jitter": -5}) == "2023-03"
+        # 15 Mar 2023 + 112 days = 5 Jul 2023.
+        assert self.anonymizer.operate("2023-03", {"entity_type": "DATE", "jitter": 112}) == "2023-07"
 
     # Test edge cases
     def test_edge_case_leap_year(self):
         """Test jittering around leap year dates."""
-        jittered_dict = self.anonymizer._get_jittered_date(
-            1,
-            datetime(2024, 2, 29),  # Leap day
-        )
-
-        expected = datetime(2024, 3, 1)
-        assert jittered_dict == {"day": expected.day, "month": expected.month, "year": expected.year}
+        assert self.anonymizer.operate("2024-02-29", {"entity_type": "DATE", "jitter": 1}) == "2024-03-01"
 
     def test_edge_case_year_boundary(self):
         """Test jittering across year boundary."""
-        jittered_dict = self.anonymizer._get_jittered_date(10, datetime(2023, 12, 28))
-
-        expected = datetime(2024, 1, 7)  # Should cross into next year
-        assert jittered_dict == {"day": expected.day, "month": expected.month, "year": expected.year}
+        assert self.anonymizer.operate("2023-12-28", {"entity_type": "DATE", "jitter": 10}) == "2024-01-07"
 
     def test_edge_case_large_negative_jitter(self):
         """Test with large negative jitter."""
-        jittered_dict = self.anonymizer._get_jittered_date(-365, datetime(2023, 6, 15))
+        assert self.anonymizer.operate("2023-06-15", {"entity_type": "DATE", "jitter": -365}) == "2022-06-15"
 
-        expected = datetime(2022, 6, 15)  # Should go back a year
-        assert jittered_dict == {"day": expected.day, "month": expected.month, "year": expected.year}
+    def test_edge_case_overflow_falls_back(self):
+        """A jitter that pushes the date out of the supported range masks the date."""
+        assert self.anonymizer.operate("2023-06-15", {"entity_type": "DATE", "jitter": 10**9}) == "[DATE]"
 
     # Test day of week replacement
     def test_day_of_week_full_name(self):
@@ -547,28 +346,26 @@ class TestDateJitterAnonymizer:
         assert self.anonymizer.operate("03/04/2010", {"entity_type": "DATE", "jitter": 10}) == "03/14/2010"
 
     def test_separator_preserved_across_instances(self):
-        """The dash separator must survive on a second instance.
-
-        Regression for the class-level _separator_acceptance cache being keyed by
-        bound methods: a fresh instance used to miss the cache and silently fall
-        back to '/', so "15-03-2010" came out as "25/03/2010".
-        """
+        """The dash separator must survive on a second instance."""
         first = DateJitterAnonymizer()
-        first.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10})  # populate class cache
+        first.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10})
 
         second = DateJitterAnonymizer()
         assert second.operate("15-03-2010", {"entity_type": "DATE", "jitter": 10}) == "25-03-2010"
         assert second.operate("2023-03-15", {"entity_type": "DATE", "jitter": -5}) == "2023-03-10"
 
     def test_iso_datetime_with_time_jitters_date_component(self):
-        """ISO datetime (yyyy-mm-ddTHH:MM:SS) must jitter the date, not truncate.
+        """ISO datetime (yyyy-mm-ddTHH:MM:SS) must jitter the date and keep the time.
 
         Regression: the ISO pattern used ``(T?:...)`` which required a literal
         ':' after the optional 'T', so a real ``...T15:11:00`` value never
         matched the ISO branch and collapsed to ``yyyy-mm`` instead.
         """
-        # 2008-08-09 + 5 days = 2008-08-14 (date jittered; the ISO branch fires).
-        assert self.anonymizer.operate("2008-08-09T15:11:00", {"entity_type": "DATE_TIME", "jitter": 5}) == "2008-08-14"
+        # 2008-08-09 + 5 days = 2008-08-14; the time of day is kept.
+        assert (
+            self.anonymizer.operate("2008-08-09T15:11:00", {"entity_type": "DATE_TIME", "jitter": 5})
+            == "2008-08-14T15:11:00"
+        )
 
     def test_embedded_weekday_does_not_drop_rest_of_value(self):
         """A weekday embedded in a longer date must not short-circuit the scan.
@@ -576,11 +373,14 @@ class TestDateJitterAnonymizer:
         Regression: the standalone day-of-week fast-path used ``search`` and
         returned only the rotated weekday, dropping the trailing date (e.g.
         "Monday, 2023-03-15" became just a weekday). The fast-path now only fires
-        when the weekday IS the whole stripped value.
+        when the weekday IS the whole stripped value; an embedded weekday is
+        rotated in place by the same jitter as the date.
         """
-        # The embedded ISO date should jitter; the weekday must not hijack it.
-        # 2023-03-15 + 5 days = 2023-03-20.
-        assert self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5}) == "2023-03-20"
+        # 2023-03-15 + 5 days = 2023-03-20; Monday rotated by 5 days is Saturday.
+        assert (
+            self.anonymizer.operate("Monday, 2023-03-15", {"entity_type": "DATE_TIME", "jitter": 5})
+            == "Saturday, 2023-03-20"
+        )
 
     def test_standalone_weekday_with_trailing_punctuation_still_rotates(self):
         """A weekday-only entity with surrounding punctuation/space must rotate.
