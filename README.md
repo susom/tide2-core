@@ -132,7 +132,7 @@ Identifier entity types (`MRN`, `HAR`, `ID`, `CSN_ID`, `US_SSN`, `PHONE_NUMBER`,
 | S | digit string starting with `0` (two or more characters) | digit string starting with `0` |
 | A | contains a letter | contains a letter |
 
-Content shorter than FF1's minimum domain (fewer than 6 digits or 4 alphanumeric characters) is permuted with keyed tables built on first use; longer content uses FF1 with cycle-walking back into the same class. `FormatPreservingEncryption.encrypt_int` and `decrypt_int` apply the same mapping to `INT64` values.
+Content shorter than FF1's minimum domain (fewer than 6 digits or 4 alphanumeric characters) is permuted with keyed tables built on first use; longer content uses FF1 with cycle-walking back into the same class. `FormatPreservingEncryption.encrypt_int` and `decrypt_int` apply the same mapping to `INT64` values. How collision-freeness is tested, and the results for `INT64`, are in the [FPE verification guide](guides/fpe_collision_free_verification.md).
 
 FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **Every FPE pseudonym differs from releases that used FF3**, in notes and in tables, so outputs from before and after this change do not join. Re-run from source data to regenerate them.
 
