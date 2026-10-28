@@ -34,6 +34,12 @@ DEFAULT_MIN_JITTER_DAYS = 3
 ABSOLUTE_MIN_JITTER_DAYS = 3
 _JITTER_CACHE_SIZE = 65536
 _NULL_PATIENT_STRINGS = frozenset({"nan", "none", "null", ""})
+# Dates after this birthday are moved to it (HIPAA Safe Harbor "90 or older").
+DEFAULT_MAX_AGE = 90
+_MIN_MAX_AGE = 1
+_MAX_MAX_AGE = 150
+# Logged by every caller that shifts dates without a birth date; formatted with max_age.
+NO_BIRTH_DATE_WARNING = "dates are shifted but not capped at age %d; ages over 89 may be revealed"
 
 # Key size requirements
 REQUIRED_KEY_SIZE = 32
@@ -288,3 +294,15 @@ def validate_jitter_parameters(
         )
 
     return (True, None)
+
+
+def validate_max_age(value: Any) -> int:
+    """Return ``value`` as an int age between 1 and 150.
+
+    Raises:
+        ValueError: If ``value`` is not an integer in range.
+    """
+    max_age = int(value)
+    if not _MIN_MAX_AGE <= max_age <= _MAX_MAX_AGE:
+        raise ValueError(f"max_age must be between {_MIN_MAX_AGE} and {_MAX_MAX_AGE}, got {max_age}.")
+    return max_age

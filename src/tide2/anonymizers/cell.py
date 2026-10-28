@@ -14,6 +14,7 @@ root, and must not import heavy modules (``faker``, ``usaddress``, ``tide2.actor
 from __future__ import annotations
 
 import functools
+import logging
 from typing import Any
 
 from presidio_anonymizer.operators import Operator
@@ -23,13 +24,17 @@ from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import mask
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import NO_BIRTH_DATE_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
 
 __docformat__ = "google"
+
+logger = logging.getLogger(__name__)
 
 FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     {
@@ -55,6 +60,12 @@ def _operators() -> tuple[Operator, Operator]:
     """
     FormatPreservingEncryption.suppress_short_input_warnings = True
     return guarded(HipsAlphaNumericAnonymizer)(), guarded(DateJitterAnonymizer)()
+
+
+@functools.cache
+def _warn_no_birth_date(max_age: int) -> None:
+    """Log the missing-birth-date warning once per process and ``max_age``."""
+    logger.warning("anonymize_cell called without birth_date: " + NO_BIRTH_DATE_WARNING, max_age)
 
 
 def compute_jitter_for_patient(
@@ -90,6 +101,8 @@ def anonymize_cell(
     jitter: int | None = None,
     max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+    birth_date: Any = None,
+    max_age: int = DEFAULT_MAX_AGE,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -102,6 +115,10 @@ def anonymize_cell(
         jitter: Explicit date jitter in days; wins over ``patient_id``.
         max_jitter_days: Maximum absolute derived or random jitter in days.
         min_jitter_days: Minimum absolute derived or random jitter in days.
+        birth_date: Real birth date of the patient. Dates after the ``max_age``-th
+            birthday are moved to it; without it dates are not capped (a warning is
+            logged once per process).
+        max_age: Age at which dates are capped.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -131,6 +148,11 @@ def anonymize_cell(
         else:
             resolved = int(jitter)  # type: ignore[arg-type]
         operator, params = date_jitter, {"jitter": resolved}
+        if is_null(birth_date):
+            _warn_no_birth_date(max_age)
+        else:
+            params["birth_date"] = birth_date
+            params["max_age"] = max_age
     else:
         operator, params = fpe, {"salt": salt, "key": key}
     params["entity_type"] = entity_type

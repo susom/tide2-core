@@ -14,11 +14,19 @@ The format-fidelity, context, golden and property tests live in
 test_date_jitter_format.py.
 """
 
+import random
+from datetime import date
+from datetime import datetime
+from datetime import timedelta
+
+import numpy as np
+import pandas as pd
 import pytest
 
 from tide2.anonymizers.date_jitter import DateJitterAnonymizer
 from tide2.anonymizers.date_jitter import _shift_cached
 from tide2.anonymizers.guarded import end_note
+from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import start_note
 
 
@@ -466,3 +474,119 @@ class TestResultCache:
         value = "x" * 200 + " 03/04/2010"
         DateJitterAnonymizer().operate(value, {"entity_type": "DATE", "jitter": 10})
         assert _shift_cached.cache_info().currsize == 0
+
+
+def _capped(value, birth_date="1930-06-15", jitter=5, **extra):
+    params = {"entity_type": "DATE", "jitter": jitter, "birth_date": birth_date, **extra}
+    return DateJitterAnonymizer().operate(value, params)
+
+
+def _age(on: date, born: date) -> int:
+    return on.year - born.year - ((on.month, on.day) < (born.month, born.day))
+
+
+class TestAgeCap:
+    """Dates after the max_age-th birthday move to it before the jitter (DOB 1930-06-15, cap 2020-06-15)."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("2023-03-15", "2020-06-20"),
+            ("2019-01-10", "2019-01-15"),
+            ("03/15/23", "06/20/20"),
+            ("15-MAR-2023", "20-JUN-2020"),
+            ("March 10th, 2023", "June 20th, 2020"),
+            ("2023-03-15T10:30:00", "2020-06-20T10:30:00"),
+            ("March 2023", "June 2020"),
+            ("Seen 2021-01-01 and 2019-01-01", "Seen 2020-06-20 and 2019-01-06"),
+            # Year-only and yearless values carry no age and are not capped.
+            ("2023", "2023"),
+            ("03/15", "03/20"),
+            # The birth date itself and earlier dates are shifted as usual.
+            ("1930-06-15", "1930-06-20"),
+            ("1920-01-01", "1920-01-06"),
+        ],
+    )
+    def test_values(self, value, expected):
+        assert _capped(value) == expected
+
+    def test_boundary(self):
+        assert _capped("2020-06-15") == "2020-06-20"
+        assert _capped("2020-06-16") == "2020-06-20"
+        assert _capped("2020-06-14") == "2020-06-19"
+
+    def test_max_age(self):
+        assert _capped("2023-03-15", max_age=80) == "2010-06-20"
+        assert _capped("2023-03-15", max_age=100) == "2023-03-20"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        # 2022 is not a leap year, so the 90th birthday of a 29 February 1932 birth is 1 March 2022.
+        [("2022-02-28", "2022-03-05"), ("2022-03-01", "2022-03-06"), ("2023-03-01", "2022-03-06")],
+    )
+    def test_leap_day_birth_non_leap_cap(self, value, expected):
+        assert _capped(value, birth_date="1932-02-29") == expected
+
+    def test_leap_day_birth_leap_cap(self):
+        assert _capped("2025-01-01", birth_date="1932-02-29", max_age=92, jitter=3) == "2024-03-03"
+
+    def test_shifted_age_never_exceeds_max_age(self):
+        rng = random.Random(7)  # noqa: S311
+        for _ in range(2000):
+            born = date(1903, 1, 1) + timedelta(days=rng.randrange(29000))
+            event = born + timedelta(days=rng.randrange(-1000, 42000))
+            jitter = rng.choice([-1, 1]) * rng.randrange(3, 181)
+            out = date.fromisoformat(_capped(event.isoformat(), birth_date=born.isoformat(), jitter=jitter))
+            assert _age(out, born + timedelta(days=jitter)) <= 90
+            if _age(event, born) < 90:
+                assert out == event + timedelta(days=jitter)
+
+    @pytest.mark.parametrize(
+        "birth_date",
+        [
+            date(1930, 6, 15),
+            datetime(1930, 6, 15, 8, 30),
+            pd.Timestamp("1930-06-15"),
+            np.datetime64("1930-06-15"),
+            np.datetime64("1930-06-15T00:00:00.000000000"),
+            "1930-06-15",
+            "1930-06-15 00:00:00",
+        ],
+    )
+    def test_birth_date_types(self, birth_date):
+        assert _capped("2023-03-15", birth_date=birth_date) == "2020-06-20"
+
+    @pytest.mark.parametrize("birth_date", [None, float("nan"), "", "  ", pd.NaT, pd.NA])
+    def test_null_birth_date_turns_the_cap_off(self, birth_date):
+        assert _capped("2023-03-15", birth_date=birth_date) == "2023-03-20"
+
+    @pytest.mark.parametrize(
+        ("birth_date", "max_age", "match"),
+        [("not a date", 90, "birth_date"), ("1930-06-15", 0, "max_age"), ("1930-06-15", 151, "max_age")],
+    )
+    def test_invalid_params(self, birth_date, max_age, match):
+        with pytest.raises(ValueError, match=match):
+            _capped("2023-03-15", birth_date=birth_date, max_age=max_age)
+        events = start_note()
+        try:
+            params = {"entity_type": "DATE", "jitter": 5, "birth_date": birth_date, "max_age": max_age}
+            assert guarded(DateJitterAnonymizer)().operate("2023-03-15", params) == "[DATE]"
+        finally:
+            end_note()
+        assert [kind for kind, _ in events] == ["error"]
+
+    def test_validate_rejects_max_age_out_of_range(self):
+        with pytest.raises(ValueError, match="max_age"):
+            DateJitterAnonymizer().validate({"entity_type": "DATE", "jitter": 5, "max_age": 0})
+
+    def test_cache_is_keyed_on_the_cap(self):
+        _shift_cached.cache_clear()
+        assert _capped("2023-03-15", birth_date="1930-06-15") == "2020-06-20"
+        assert _capped("2023-03-15", birth_date="1931-06-15") == "2021-06-20"
+        assert _capped("2023-03-15", birth_date=None) == "2023-03-20"
+        assert _shift_cached.cache_info().currsize == 3
+
+    def test_cached_equals_uncached(self):
+        value = "x" * 100 + " 2023-03-15"
+        assert _capped(value) == "x" * 100 + " 2020-06-20"
+        assert _capped("2023-03-15") == "2020-06-20"

@@ -12,15 +12,20 @@ weekday. The result depends only on the input and the jitter, never on the clock
 import functools
 import re
 from datetime import date
+from datetime import datetime
 from datetime import timedelta
 from re import Match
 from re import Pattern
+from typing import Any
 
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
 from tide2.anonymizers.guarded import record_fallback
 from tide2.cryptographic.date_jitter import ABSOLUTE_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
+from tide2.cryptographic.date_jitter import validate_max_age
+from tide2.utils.nulls import is_null
 
 # Ordinal suffix: 11th-13th (and the 10-20 band) always take "th".
 _ORDINAL_TEEN_LOW = 10
@@ -41,6 +46,8 @@ _MAX_TWO_DIGIT_YEAR_PIVOT = 100
 # Results are cached per process by (text, jitter, pivot); long values (mis-tagged spans) are not.
 _RESULT_CACHE_SIZE = 65536
 _MAX_CACHED_TEXT_LEN = 64
+_FEBRUARY = 2
+_LEAP_DAY = 29
 
 # Alternations are ordered longest-first so backtracking never settles for a prefix.
 _MON = r"(?P<month>1[0-2]|0[1-9]|[1-9])"
@@ -98,6 +105,10 @@ class DateJitterAnonymizer(Operator):
     so a result that crosses the pivot (Dec 2029 to Jan 2030) reads in the other
     century. Dates without a year are shifted in a leap year, so a yearless result
     can differ by one day from a shift in a non-leap year across 29 February.
+
+    With a ``birth_date``, a date after the ``max_age``-th birthday (default 90) is
+    moved to that birthday before the jitter is added, so no shifted date reveals
+    an age over ``max_age``. Yearless and year-only values are not capped.
     """
 
     # Presidio builds a new operator for every span, so per-instance setup is kept minimal.
@@ -208,10 +219,15 @@ class DateJitterAnonymizer(Operator):
                   (including the absent default) raises ValueError.
                 - two_digit_year_pivot (int): Two-digit years below this value are
                   20xx, the rest 19xx. Optional, default 30.
+                - birth_date (date, datetime, numpy.datetime64 or ISO string): The
+                  real birth date. Optional; null or absent turns the age cap off.
+                - max_age (int): Dates after this birthday are moved to it.
+                  Optional, default 90, between 1 and 150.
 
         Raises:
             ValueError: If ``jitter`` is missing, ``entity_type`` is not a
-                supported type, or ``two_digit_year_pivot`` is out of range.
+                supported type, ``two_digit_year_pivot`` or ``max_age`` is out of
+                range, or ``birth_date`` is not a date.
 
         Returns:
             The text with each date shifted and its format kept, time and
@@ -235,16 +251,22 @@ class DateJitterAnonymizer(Operator):
         if not 0 <= pivot <= _MAX_TWO_DIGIT_YEAR_PIVOT:
             raise ValueError("two_digit_year_pivot must be between 0 and 100.")
 
+        birth_date = _parse_birth_date(params.get("birth_date"))
+        cap = None
+        if birth_date is not None:
+            cap = _age_cap(birth_date, validate_max_age(params.get("max_age", DEFAULT_MAX_AGE)))
+
         shift = _shift_cached if len(text) <= _MAX_CACHED_TEXT_LEN else self._shift
-        result, fell_back = shift(text, jitter, pivot)
+        result, fell_back = shift(text, jitter, pivot, cap)
         if fell_back:
             record_fallback(entity_type)
         return result
 
-    def _shift(self, text: str, jitter: int, pivot: int) -> tuple[str, bool]:
+    def _shift(self, text: str, jitter: int, pivot: int, cap: date | None = None) -> tuple[str, bool]:
         """Return the shifted ``text`` and whether it fell back to ``[DATE]``.
 
-        The result depends only on the arguments, so ``operate`` caches it.
+        Dates with a year after ``cap`` are moved to ``cap`` before the shift. The
+        result depends only on the arguments, so ``operate`` caches it.
         """
         if self._is_passthrough(text):
             return text, False
@@ -257,7 +279,7 @@ class DateJitterAnonymizer(Operator):
             return self.default_replacement, True
 
         try:
-            edits = [edit for match in matches for edit in self._date_edits(match, jitter, pivot)]
+            edits = [edit for match in matches for edit in self._date_edits(match, jitter, pivot, cap)]
         except (ValueError, OverflowError):
             return self.default_replacement, True
 
@@ -281,8 +303,10 @@ class DateJitterAnonymizer(Operator):
             scan = scan[: match.start()] + " " * (match.end() - match.start()) + scan[match.end() :]
         return found
 
-    def _date_edits(self, match: Match, jitter: int, pivot: int) -> list[tuple[int, int, str]]:
+    def _date_edits(self, match: Match, jitter: int, pivot: int, cap: date | None = None) -> list[tuple[int, int, str]]:
         """Return the (start, end, replacement) edits that shift one matched date.
+
+        A date with a year after ``cap`` is moved to ``cap`` before the shift.
 
         Raises:
             ValueError: If the matched tokens are not a real calendar date.
@@ -302,7 +326,10 @@ class DateJitterAnonymizer(Operator):
             year = 2000 + int(year_text) if int(year_text) < pivot else 1900 + int(year_text)
         else:
             year = int(year_text)
-        shifted = date(year, month, day) + timedelta(days=jitter)
+        parsed = date(year, month, day)
+        if cap is not None and year_text is not None and parsed > cap:
+            parsed = cap
+        shifted = parsed + timedelta(days=jitter)
 
         # Numeric dates keep zero padding only when every numeric part was padded.
         pad = len(month_text) == _PADDED_LEN and (day_text is None or len(day_text) == _PADDED_LEN)
@@ -405,6 +432,9 @@ class DateJitterAnonymizer(Operator):
         if entity_type not in self.supported_entity_types:
             raise ValueError(f"Entity type '{entity_type}' is not supported for DateJitterAnonymizer.")
 
+        if "max_age" in params:
+            validate_max_age(params["max_age"])
+
     def operator_name(self) -> str:
         """Return the operator name."""
         return "date_jitter"
@@ -415,6 +445,50 @@ class DateJitterAnonymizer(Operator):
 
 
 @functools.lru_cache(maxsize=_RESULT_CACHE_SIZE)
-def _shift_cached(text: str, jitter: int, pivot: int) -> tuple[str, bool]:
+def _shift_cached(text: str, jitter: int, pivot: int, cap: date | None) -> tuple[str, bool]:
     """Cache ``DateJitterAnonymizer._shift`` for the process (Presidio builds a new operator per span)."""
-    return DateJitterAnonymizer()._shift(text, jitter, pivot)
+    return DateJitterAnonymizer()._shift(text, jitter, pivot, cap)
+
+
+def _parse_birth_date(value: Any) -> date | None:
+    """Return ``value`` as a date, or None when it is null or blank.
+
+    Raises:
+        ValueError: If ``value`` is not a date, a datetime or an ISO date string.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _parse_iso_birth_date(value)
+    if is_null(value):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    # numpy.datetime64 and similar: their str() is ISO.
+    return _parse_iso_birth_date(str(value))
+
+
+@functools.lru_cache(maxsize=_RESULT_CACHE_SIZE)
+def _parse_iso_birth_date(value: str) -> date | None:
+    """Return the date of an ISO string, or None when it is blank or a null marker."""
+    text = value.strip()
+    if text in ("", "NaT", "<NA>"):
+        return None
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError as err:
+        raise ValueError(f"birth_date is not an ISO date: {text!r}") from err
+
+
+@functools.cache
+def _age_cap(birth_date: date, max_age: int) -> date:
+    """Return the ``max_age``-th birthday; a 29 February birth has it on 1 March in a non-leap year."""
+    year = birth_date.year + max_age
+    if birth_date.month == _FEBRUARY and birth_date.day == _LEAP_DAY:
+        try:
+            return date(year, _FEBRUARY, _LEAP_DAY)
+        except ValueError:
+            return date(year, 3, 1)
+    return birth_date.replace(year=year)

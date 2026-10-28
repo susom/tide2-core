@@ -691,6 +691,26 @@ result that crosses the 29/30 pivot (December 2029 to January 2030) reads in the
 other century. The pivot can be changed with the `two_digit_year_pivot` operator
 parameter.
 
+**Ages over 89 (Safe Harbor).** Give the input a `birth_date` column (the real
+birth date, as a date or an ISO `YYYY-MM-DD` string) and every date after the
+patient's 90th birthday is moved to that birthday before the jitter is added, so
+no shifted date reveals an age over 89. `--max-age` (default 90) changes the
+birthday. All events after it land on the same day, so their order and intervals
+are lost. Year-only and yearless values, the birth date itself and earlier dates
+are not capped. The column travels through the stages like `jitter` but is never
+written to the anonymizer output. Without the column, or with a null value, dates
+are shifted but not capped and a warning is logged; such a run is not Safe Harbor
+compliant for patients over 89. For cells, pass `birth_date` (and `max_age`) to
+`anonymize_cell`. Ages written as text ("92-year-old") are not dates and are not
+covered.
+
+| Input | `birth_date` | Jitter | Output |
+|---|---|---|---|
+| `2023-03-15` | `1930-06-15` | +5 | `2020-06-20` (90th birthday + 5) |
+| `March 10th, 2023` | `1930-06-15` | +5 | `June 20th, 2020` |
+| `2019-01-10` | `1930-06-15` | +5 | `2019-01-15` (before the 90th birthday) |
+| `2023` | `1930-06-15` | +5 | `2023` |
+
 ### What happens when a run wedges
 
 Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
