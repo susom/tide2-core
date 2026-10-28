@@ -9,6 +9,7 @@ names, which are rotated by the same jitter so they never reveal the original
 weekday. The result depends only on the input and the jitter, never on the clock.
 """
 
+import functools
 import re
 from datetime import date
 from datetime import timedelta
@@ -37,6 +38,9 @@ _REFERENCE_LEAP_YEAR = 2000
 # Two-digit years below the pivot are 20xx, the rest 19xx (00-29 -> 20xx, 30-99 -> 19xx).
 _DEFAULT_TWO_DIGIT_YEAR_PIVOT = 30
 _MAX_TWO_DIGIT_YEAR_PIVOT = 100
+# Results are cached per process by (text, jitter, pivot); long values (mis-tagged spans) are not.
+_RESULT_CACHE_SIZE = 65536
+_MAX_CACHED_TEXT_LEN = 64
 
 # Alternations are ordered longest-first so backtracking never settles for a prefix.
 _MON = r"(?P<month>1[0-2]|0[1-9]|[1-9])"
@@ -74,6 +78,12 @@ _MONTH_NUMBERS = {
     )
 }
 
+# Once every date is blanked out, a scan with no word character left cannot match any pattern.
+_WORD_CHAR = re.compile(r"\w")
+
+# Non-PHI values returned unchanged: a year or decade ("2016", "1990s") or a gestational age ("21w 1d", "36w", "4d").
+_NON_DATE_VALUE = re.compile(r"(?:19|20)\d{2}s?|\d{1,2}w(?:\s+\d{1,2}d)?|\d{1,2}d")
+
 
 class DateJitterAnonymizer(Operator):
     """Anonymizer that shifts every date in a value by a jitter, keeping its format.
@@ -90,47 +100,49 @@ class DateJitterAnonymizer(Operator):
     can differ by one day from a shift in a non-leap year across 29 February.
     """
 
+    # Presidio builds a new operator for every span, so per-instance setup is kept minimal.
+    default_replacement = "[DATE]"
+    supported_entity_types = ["DATE_TIME", "DATE"]  # noqa: RUF012
+
+    month_names = {  # noqa: RUF012
+        1: "January",
+        2: "February",
+        3: "March",
+        4: "April",
+        5: "May",
+        6: "June",
+        7: "July",
+        8: "August",
+        9: "September",
+        10: "October",
+        11: "November",
+        12: "December",
+    }
+
+    month_abbrev = {  # noqa: RUF012
+        1: "Jan",
+        2: "Feb",
+        3: "Mar",
+        4: "Apr",
+        5: "May",
+        6: "Jun",
+        7: "Jul",
+        8: "Aug",
+        9: "Sep",
+        10: "Oct",
+        11: "Nov",
+        12: "Dec",
+    }
+
+    days_of_week_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]  # noqa: RUF012
+    days_of_week_abbrev = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]  # noqa: RUF012
+
+    _month_words = frozenset(month_names.values()) | frozenset(month_abbrev.values())
+
     def __init__(self):
         """Initialize the date jitter anonymizer."""
         super().__init__()
-
         self.patterns = self._compile_patterns()
-        self.default_replacement = "[DATE]"
-
-        self.month_names = {
-            1: "January",
-            2: "February",
-            3: "March",
-            4: "April",
-            5: "May",
-            6: "June",
-            7: "July",
-            8: "August",
-            9: "September",
-            10: "October",
-            11: "November",
-            12: "December",
-        }
-
-        self.month_abbrev = {
-            1: "Jan",
-            2: "Feb",
-            3: "Mar",
-            4: "Apr",
-            5: "May",
-            6: "Jun",
-            7: "Jul",
-            8: "Aug",
-            9: "Sep",
-            10: "Oct",
-            11: "Nov",
-            12: "Dec",
-        }
-
-        self.days_of_week_full = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        self.days_of_week_abbrev = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-        self.supported_entity_types = ["DATE_TIME", "DATE"]
 
     @staticmethod
     def _get_day_suffix(day: int) -> str:
@@ -140,6 +152,7 @@ class DateJitterAnonymizer(Operator):
         return {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
 
     @staticmethod
+    @functools.cache
     def _compile_patterns() -> list[Pattern]:
         """Compile the date patterns in priority order (the first pattern that matches wins).
 
@@ -220,22 +233,31 @@ class DateJitterAnonymizer(Operator):
         if not 0 <= pivot <= _MAX_TWO_DIGIT_YEAR_PIVOT:
             raise ValueError("two_digit_year_pivot must be between 0 and 100.")
 
+        shift = _shift_cached if len(text) <= _MAX_CACHED_TEXT_LEN else self._shift
+        result, fell_back = shift(text, jitter, pivot)
+        if fell_back:
+            record_fallback(entity_type)
+        return result
+
+    def _shift(self, text: str, jitter: int, pivot: int) -> tuple[str, bool]:
+        """Return the shifted ``text`` and whether it fell back to ``[DATE]``.
+
+        The result depends only on the arguments, so ``operate`` caches it.
+        """
         if self._is_passthrough(text):
-            return text
+            return text, False
 
         matches = self._find_dates(text)
         if not matches:
             weekday = self._standalone_weekday(text)
             if weekday is not None:
-                return self._rotate_weekday(weekday, jitter)
-            record_fallback(entity_type)
-            return self.default_replacement
+                return self._rotate_weekday(weekday, jitter), False
+            return self.default_replacement, True
 
         try:
             edits = [edit for match in matches for edit in self._date_edits(match, jitter, pivot)]
         except (ValueError, OverflowError):
-            record_fallback(entity_type)
-            return self.default_replacement
+            return self.default_replacement, True
 
         edits.extend(
             (weekday.start(), weekday.end(), self._rotate_weekday(weekday.group(), jitter))
@@ -243,18 +265,19 @@ class DateJitterAnonymizer(Operator):
         )
         for start, end, replacement in sorted(edits, reverse=True):
             text = text[:start] + replacement + text[end:]
-        return text
+        return text, False
 
     def _find_dates(self, text: str) -> list[Match]:
         """Return the non-overlapping date matches in ``text``, highest-priority pattern first."""
-        scan = _TIME_PATTERN.sub(lambda match: " " * len(match.group()), text)
+        scan = _TIME_PATTERN.sub(lambda match: " " * len(match.group()), text) if ":" in text else text
         found: list[Match] = []
-        while True:
+        while _WORD_CHAR.search(scan):
             match = next((m for m in (pattern.search(scan) for pattern in self.patterns) if m), None)
             if match is None:
-                return found
+                break
             found.append(match)
             scan = scan[: match.start()] + " " * (match.end() - match.start()) + scan[match.end() :]
+        return found
 
     def _date_edits(self, match: Match, jitter: int, pivot: int) -> list[tuple[int, int, str]]:
         """Return the (start, end, replacement) edits that shift one matched date.
@@ -268,7 +291,8 @@ class DateJitterAnonymizer(Operator):
         day_text = tokens.get("day")
         year_text = tokens.get("year")
 
-        month = int(month_text) if month_text.isdigit() else _MONTH_NUMBERS[month_text[:_ABBREV_LEN].lower()]
+        month_numeric = month_text.isdigit()
+        month = int(month_text) if month_numeric else _MONTH_NUMBERS[month_text[:_ABBREV_LEN].lower()]
         day = int(day_text) if day_text is not None else _MONTH_ONLY_DAY
         if year_text is None:
             year = _REFERENCE_LEAP_YEAR
@@ -278,16 +302,16 @@ class DateJitterAnonymizer(Operator):
             year = int(year_text)
         shifted = date(year, month, day) + timedelta(days=jitter)
 
-        numeric_tokens = [token for token in (month_text, day_text) if token is not None and token.isdigit()]
-        pad = all(len(token) == _PADDED_LEN for token in numeric_tokens)
+        # Numeric dates keep zero padding only when every numeric part was padded.
+        pad = len(month_text) == _PADDED_LEN and (day_text is None or len(day_text) == _PADDED_LEN)
 
         replacements = {}
-        if month_text.isdigit():
+        if month_numeric:
             replacements["month"] = f"{shifted.month:02d}" if pad else str(shifted.month)
         else:
             replacements["month"] = self._format_month_name(month_text, shifted.month, "sep" in tokens)
         if day_text is not None:
-            padded = pad if month_text.isdigit() else day_text.startswith("0")
+            padded = pad if month_numeric else day_text.startswith("0")
             replacements["day"] = f"{shifted.day:02d}" if padded else str(shifted.day)
         if year_text is not None:
             two_digit = len(year_text) == _TWO_DIGIT_YEAR_LEN
@@ -354,19 +378,13 @@ class DateJitterAnonymizer(Operator):
     def _is_passthrough(self, text: str) -> bool:
         """Return True for values that should be returned unchanged (non-PHI)."""
         stripped = text.strip()
-        stripped_title = stripped.title()
-
+        # Single character: NER noise (e.g., "w", "-", "/", single digit)
+        if len(stripped) <= 1:
+            return True
         # Standalone month name (full or abbreviated)
-        if stripped_title in self.month_names.values() or stripped_title in self.month_abbrev.values():
+        if stripped.title() in self._month_words:
             return True
-        # Standalone year or decade (e.g., "2016", "1990s")
-        if re.match(r"^(?:19|20)\d{2}s?$", stripped):
-            return True
-        # Gestational ages (e.g., "21w 1d", "36w", "4d") — not PHI
-        if re.match(r"^\d{1,2}w(?:\s+\d{1,2}d)?$", stripped) or re.match(r"^\d{1,2}d$", stripped):
-            return True
-        # Single character — NER noise (e.g., "w", "-", "/", single digit)
-        return len(stripped) <= 1
+        return _NON_DATE_VALUE.fullmatch(stripped) is not None
 
     def validate(self, params: dict) -> None:
         """Validate operator parameters."""
@@ -392,3 +410,9 @@ class DateJitterAnonymizer(Operator):
     def operator_type(self) -> OperatorType:
         """Return the operator type."""
         return OperatorType.Anonymize
+
+
+@functools.lru_cache(maxsize=_RESULT_CACHE_SIZE)
+def _shift_cached(text: str, jitter: int, pivot: int) -> tuple[str, bool]:
+    """Cache ``DateJitterAnonymizer._shift`` for the process (Presidio builds a new operator per span)."""
+    return DateJitterAnonymizer()._shift(text, jitter, pivot)

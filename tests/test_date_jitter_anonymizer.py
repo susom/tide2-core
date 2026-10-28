@@ -17,6 +17,9 @@ test_date_jitter_format.py.
 import pytest
 
 from tide2.anonymizers.date_jitter import DateJitterAnonymizer
+from tide2.anonymizers.date_jitter import _shift_cached
+from tide2.anonymizers.guarded import end_note
+from tide2.anonymizers.guarded import start_note
 
 
 class TestDateJitterAnonymizer:
@@ -394,3 +397,58 @@ class TestDateJitterAnonymizer:
         # Monday + 5 = Saturday; punctuation/whitespace must not break the path.
         for value in ("Monday,", "  Monday  ", "Monday."):
             assert self.anonymizer.operate(value, params) == "Saturday"
+
+
+class TestResultCache:
+    """The result cache must not change results or fallback reporting."""
+
+    def setup_method(self):
+        _shift_cached.cache_clear()
+
+    @pytest.mark.parametrize("value", ["not a date", "13/45/2020", "99/99"])
+    def test_fallback_recorded_on_every_call_including_cache_hits(self, value):
+        params = {"entity_type": "DATE", "jitter": 10}
+        events = start_note()
+        try:
+            results = [DateJitterAnonymizer().operate(value, params) for _ in range(3)]
+        finally:
+            end_note()
+
+        assert results == ["[DATE]"] * 3
+        assert events == [("fallback", "DATE")] * 3
+        assert _shift_cached.cache_info().hits == 2
+
+    def test_no_fallback_recorded_for_cached_valid_date(self):
+        params = {"entity_type": "DATE", "jitter": 10}
+        events = start_note()
+        try:
+            for _ in range(3):
+                DateJitterAnonymizer().operate("03/04/2010", params)
+        finally:
+            end_note()
+
+        assert events == []
+        assert _shift_cached.cache_info().hits == 2
+
+    def test_cache_is_keyed_on_jitter_and_pivot(self):
+        operator = DateJitterAnonymizer()
+        assert operator.operate("03/04/2010", {"entity_type": "DATE", "jitter": 10}) == "03/14/2010"
+        assert operator.operate("03/04/2010", {"entity_type": "DATE", "jitter": 20}) == "03/24/2010"
+        # 2000 is a leap year and 1900 is not, so the pivot changes the result for the same text and jitter.
+        leap = {"entity_type": "DATE", "jitter": 1, "two_digit_year_pivot": 30}
+        non_leap = {"entity_type": "DATE", "jitter": 1, "two_digit_year_pivot": 0}
+        assert operator.operate("02/28/00", leap) == "02/29/00"
+        assert operator.operate("02/28/00", non_leap) == "03/01/00"
+
+    def test_cached_result_equals_uncached_result(self):
+        operator = DateJitterAnonymizer()
+        params = {"entity_type": "DATE_TIME", "jitter": -17}
+        values = ["2023-03-15T10:30:00", "Monday, March 4th, 2024", "not a date", "2016", "12/31/99"]
+        first = [operator.operate(value, params) for value in values]
+        second = [operator.operate(value, params) for value in values]
+        assert first == second
+
+    def test_long_values_bypass_the_cache(self):
+        value = "x" * 200 + " 03/04/2010"
+        DateJitterAnonymizer().operate(value, {"entity_type": "DATE", "jitter": 10})
+        assert _shift_cached.cache_info().currsize == 0
