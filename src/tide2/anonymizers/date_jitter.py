@@ -48,6 +48,9 @@ _RESULT_CACHE_SIZE = 65536
 _MAX_CACHED_TEXT_LEN = 64
 _FEBRUARY = 2
 _LEAP_DAY = 29
+_FOUR_DIGIT_YEAR_LEN = 4
+# Entity types for a day, month or year held in its own column, mapped to the part they carry.
+_PART_ENTITY_TYPES = {"DATE_DAY": "day", "DATE_MONTH": "month", "DATE_YEAR": "year"}
 
 # Alternations are ordered longest-first so backtracking never settles for a prefix.
 _MON = r"(?P<month>1[0-2]|0[1-9]|[1-9])"
@@ -109,11 +112,16 @@ class DateJitterAnonymizer(Operator):
     With a ``birth_date``, a date after the ``max_age``-th birthday (default 90) is
     moved to that birthday before the jitter is added, so no shifted date reveals
     an age over ``max_age``. Yearless and year-only values are not capped.
+
+    A day, month or year held on its own (entity types ``DATE_DAY``, ``DATE_MONTH``,
+    ``DATE_YEAR``) is replaced by the same part of the shifted ``full_date`` of its
+    row, in the format of the input. A value that is not that part of ``full_date``,
+    or a null ``full_date``, becomes ``[DATE]``.
     """
 
     # Presidio builds a new operator for every span, so per-instance setup is kept minimal.
     default_replacement = "[DATE]"
-    supported_entity_types = ["DATE_TIME", "DATE"]  # noqa: RUF012
+    supported_entity_types = ["DATE_TIME", "DATE", *_PART_ENTITY_TYPES]  # noqa: RUF012
 
     month_names = {  # noqa: RUF012
         1: "January",
@@ -215,8 +223,12 @@ class DateJitterAnonymizer(Operator):
             params: Operator parameters. Required/supported keys:
                 - jitter (int): Number of days to shift the date. Required.
                 - entity_type (str): Entity type label. Required: must be one of
-                  the supported types ("DATE_TIME", "DATE"). Any other value
-                  (including the absent default) raises ValueError.
+                  the supported types ("DATE_TIME", "DATE", "DATE_DAY",
+                  "DATE_MONTH", "DATE_YEAR"). Any other value (including the
+                  absent default) raises ValueError.
+                - full_date (date, datetime, numpy.datetime64 or ISO string): The
+                  real full date of the row. Required for the part types, where
+                  null gives ``[DATE]``; ignored for the others.
                 - two_digit_year_pivot (int): Two-digit years below this value are
                   20xx, the rest 19xx. Optional, default 30.
                 - birth_date (date, datetime, numpy.datetime64 or ISO string): The
@@ -227,7 +239,8 @@ class DateJitterAnonymizer(Operator):
         Raises:
             ValueError: If ``jitter`` is missing, ``entity_type`` is not a
                 supported type, ``two_digit_year_pivot`` or ``max_age`` is out of
-                range, or ``birth_date`` is not a date.
+                range, ``birth_date`` or ``full_date`` is not a date, or a part
+                type has no ``full_date`` key.
 
         Returns:
             The text with each date shifted and its format kept, time and
@@ -251,16 +264,84 @@ class DateJitterAnonymizer(Operator):
         if not 0 <= pivot <= _MAX_TWO_DIGIT_YEAR_PIVOT:
             raise ValueError("two_digit_year_pivot must be between 0 and 100.")
 
-        birth_date = _parse_birth_date(params.get("birth_date"))
+        birth_date = _parse_date_param(params.get("birth_date"), "birth_date")
         cap = None
         if birth_date is not None:
             cap = _age_cap(birth_date, validate_max_age(params.get("max_age", DEFAULT_MAX_AGE)))
 
-        shift = _shift_cached if len(text) <= _MAX_CACHED_TEXT_LEN else self._shift
-        result, fell_back = shift(text, jitter, pivot, cap)
+        part = _PART_ENTITY_TYPES.get(entity_type)
+        if part is not None:
+            result, fell_back = self._operate_part(text, part, params, jitter, cap)
+        else:
+            shift = _shift_cached if len(text) <= _MAX_CACHED_TEXT_LEN else self._shift
+            result, fell_back = shift(text, jitter, pivot, cap)
         if fell_back:
             record_fallback(entity_type)
         return result
+
+    def _operate_part(self, text: str, part: str, params: dict, jitter: int, cap: date | None) -> tuple[str, bool]:
+        """Return the shifted day, month or year ``text`` and whether it fell back to ``[DATE]``."""
+        if "full_date" not in params:
+            raise ValueError("full_date parameter is required for date part anonymization.")
+        full_date = _parse_date_param(params["full_date"], "full_date")
+        if full_date is None:
+            return self.default_replacement, True
+        shift = _shift_part_cached if len(text) <= _MAX_CACHED_TEXT_LEN else self._shift_part
+        return shift(text, part, full_date, jitter, cap)
+
+    def _shift_part(
+        self, text: str, part: str, full_date: date, jitter: int, cap: date | None = None
+    ) -> tuple[str, bool]:
+        """Return ``text`` as the same part of the shifted ``full_date``, and whether it fell back to ``[DATE]``.
+
+        ``text`` must be that part of ``full_date`` (the real, unshifted date); the
+        result keeps its zero padding, month name form and case, and year width.
+        """
+        token = text.strip()
+        try:
+            shifted = _shifted_date(full_date, jitter, cap)
+        except OverflowError:
+            return self.default_replacement, True
+
+        result = None
+        if part == "month":
+            result = self._shift_month_token(token, full_date.month, shifted.month)
+        elif part == "day":
+            result = self._shift_day_token(token, full_date.day, shifted.day)
+        elif part == "year":
+            result = self._shift_year_token(token, full_date.year, shifted.year)
+        if result is None:
+            return self.default_replacement, True
+        return result, False
+
+    @staticmethod
+    def _shift_day_token(token: str, day: int, shifted_day: int) -> str | None:
+        """Return ``shifted_day`` in the format of ``token``, or None when ``token`` is not ``day``."""
+        if not _is_number(token, 1, _PADDED_LEN) or int(token) != day:
+            return None
+        return f"{shifted_day:02d}" if _is_zero_padded(token) else str(shifted_day)
+
+    def _shift_month_token(self, token: str, month: int, shifted_month: int) -> str | None:
+        """Return ``shifted_month`` in the format of ``token``, or None when ``token`` is not ``month``."""
+        if _is_number(token, 1, _PADDED_LEN):
+            if int(token) != month:
+                return None
+            return f"{shifted_month:02d}" if _is_zero_padded(token) else str(shifted_month)
+        lowered = token.lower()
+        if token.title() not in self._month_words and lowered != "sept":
+            return None
+        if _MONTH_NUMBERS[lowered[:_ABBREV_LEN]] != month:
+            return None
+        return self._format_month_name(token, shifted_month, False)
+
+    @staticmethod
+    def _shift_year_token(token: str, year: int, shifted_year: int) -> str | None:
+        """Return ``shifted_year`` in the width of ``token``, or None when ``token`` is not ``year``."""
+        if _is_number(token, _FOUR_DIGIT_YEAR_LEN):
+            return str(shifted_year) if int(token) == year else None
+        if _is_number(token, _TWO_DIGIT_YEAR_LEN):
+            return f"{shifted_year % 100:02d}" if int(token) == year % 100 else None
+        return None
 
     def _shift(self, text: str, jitter: int, pivot: int, cap: date | None = None) -> tuple[str, bool]:
         """Return the shifted ``text`` and whether it fell back to ``[DATE]``.
@@ -326,10 +407,7 @@ class DateJitterAnonymizer(Operator):
             year = 2000 + int(year_text) if int(year_text) < pivot else 1900 + int(year_text)
         else:
             year = int(year_text)
-        parsed = date(year, month, day)
-        if cap is not None and year_text is not None and parsed > cap:
-            parsed = cap
-        shifted = parsed + timedelta(days=jitter)
+        shifted = _shifted_date(date(year, month, day), jitter, cap if year_text is not None else None)
 
         # Numeric dates keep zero padding only when every numeric part was padded.
         pad = len(month_text) == _PADDED_LEN and (day_text is None or len(day_text) == _PADDED_LEN)
@@ -435,6 +513,9 @@ class DateJitterAnonymizer(Operator):
         if "max_age" in params:
             validate_max_age(params["max_age"])
 
+        if entity_type in _PART_ENTITY_TYPES and "full_date" not in params:
+            raise ValueError(f"full_date parameter is required for {entity_type} anonymization.")
+
     def operator_name(self) -> str:
         """Return the operator name."""
         return "date_jitter"
@@ -450,8 +531,35 @@ def _shift_cached(text: str, jitter: int, pivot: int, cap: date | None) -> tuple
     return DateJitterAnonymizer()._shift(text, jitter, pivot, cap)
 
 
-def _parse_birth_date(value: Any) -> date | None:
-    """Return ``value`` as a date, or None when it is null or blank.
+@functools.lru_cache(maxsize=_RESULT_CACHE_SIZE)
+def _shift_part_cached(text: str, part: str, full_date: date, jitter: int, cap: date | None) -> tuple[str, bool]:
+    """Cache ``DateJitterAnonymizer._shift_part`` for the process."""
+    return DateJitterAnonymizer()._shift_part(text, part, full_date, jitter, cap)
+
+
+def _shifted_date(parsed: date, jitter: int, cap: date | None) -> date:
+    """Return ``parsed`` moved to ``cap`` when it is later, plus ``jitter`` days.
+
+    Raises:
+        OverflowError: If the result is out of range.
+    """
+    if cap is not None and parsed > cap:
+        parsed = cap
+    return parsed + timedelta(days=jitter)
+
+
+def _is_number(token: str, *lengths: int) -> bool:
+    """Return True when ``token`` is ASCII digits and its length is one of ``lengths``."""
+    return token.isascii() and token.isdigit() and len(token) in lengths
+
+
+def _is_zero_padded(token: str) -> bool:
+    """Return True for a two-digit token with a leading zero ("05")."""
+    return len(token) == _PADDED_LEN and token.startswith("0")
+
+
+def _parse_date_param(value: Any, name: str) -> date | None:
+    """Return the operator param ``value`` as a date, or None when it is null or blank.
 
     Raises:
         ValueError: If ``value`` is not a date, a datetime or an ISO date string.
@@ -459,7 +567,7 @@ def _parse_birth_date(value: Any) -> date | None:
     if value is None:
         return None
     if isinstance(value, str):
-        return _parse_iso_birth_date(value)
+        return _parse_iso_date(value, name)
     if is_null(value):
         return None
     if isinstance(value, datetime):
@@ -467,11 +575,11 @@ def _parse_birth_date(value: Any) -> date | None:
     if isinstance(value, date):
         return value
     # numpy.datetime64 and similar: their str() is ISO.
-    return _parse_iso_birth_date(str(value))
+    return _parse_iso_date(str(value), name)
 
 
 @functools.lru_cache(maxsize=_RESULT_CACHE_SIZE)
-def _parse_iso_birth_date(value: str) -> date | None:
+def _parse_iso_date(value: str, name: str) -> date | None:
     """Return the date of an ISO string, or None when it is blank or a null marker."""
     text = value.strip()
     if text in ("", "NaT", "<NA>"):
@@ -479,7 +587,7 @@ def _parse_iso_birth_date(value: str) -> date | None:
     try:
         return datetime.fromisoformat(text).date()
     except ValueError as err:
-        raise ValueError(f"birth_date is not an ISO date: {text!r}") from err
+        raise ValueError(f"{name} is not an ISO date: {text!r}") from err
 
 
 @functools.cache

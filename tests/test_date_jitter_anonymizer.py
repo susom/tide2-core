@@ -39,7 +39,7 @@ class TestDateJitterAnonymizer:
 
     def test_initialization(self):
         """Test DateJitterAnonymizer initialization."""
-        assert self.anonymizer.supported_entity_types == ["DATE_TIME", "DATE"]
+        assert self.anonymizer.supported_entity_types == ["DATE_TIME", "DATE", "DATE_DAY", "DATE_MONTH", "DATE_YEAR"]
         assert hasattr(self.anonymizer, "month_names")
         assert hasattr(self.anonymizer, "month_abbrev")
         assert hasattr(self.anonymizer, "patterns")
@@ -590,3 +590,156 @@ class TestAgeCap:
         value = "x" * 100 + " 2023-03-15"
         assert _capped(value) == "x" * 100 + " 2020-06-20"
         assert _capped("2023-03-15") == "2020-06-20"
+
+
+def _part(value, entity_type, full_date="2023-03-30", jitter=5, **extra):
+    params = {"entity_type": entity_type, "jitter": jitter, "full_date": full_date, **extra}
+    return DateJitterAnonymizer().operate(str(value), params)
+
+
+class TestDateParts:
+    """A day, month or year held on its own is the same part of the shifted full date (2023-03-30 + 5 = 2023-04-04)."""
+
+    @pytest.mark.parametrize(
+        ("value", "entity_type", "expected"),
+        [
+            (30, "DATE_DAY", "4"),
+            ("30", "DATE_DAY", "4"),
+            (3, "DATE_MONTH", "4"),
+            ("3", "DATE_MONTH", "4"),
+            ("03", "DATE_MONTH", "04"),
+            ("March", "DATE_MONTH", "April"),
+            ("Mar", "DATE_MONTH", "Apr"),
+            ("MAR", "DATE_MONTH", "APR"),
+            ("march", "DATE_MONTH", "april"),
+            (2023, "DATE_YEAR", "2023"),
+            ("23", "DATE_YEAR", "23"),
+            (" 30 ", "DATE_DAY", "4"),
+        ],
+    )
+    def test_values(self, value, entity_type, expected):
+        assert _part(value, entity_type) == expected
+
+    def test_zero_padded_day(self):
+        assert _part("05", "DATE_DAY", full_date="2023-03-05") == "10"
+        assert _part("05", "DATE_DAY", full_date="2023-03-05", jitter=-3) == "02"
+        assert _part("02", "DATE_DAY", full_date="2023-03-02", jitter=-3) == "27"
+        assert _part("27", "DATE_DAY", full_date="2023-03-27", jitter=7) == "3"
+        assert _part("01", "DATE_DAY", full_date="2023-03-01", jitter=3) == "04"
+
+    def test_sept(self):
+        assert _part("Sept", "DATE_MONTH", full_date="2023-09-10", jitter=-10) == "Aug"
+        assert _part("Aug", "DATE_MONTH", full_date="2023-08-31", jitter=10) == "Sep"
+        assert _part("Sept", "DATE_MONTH", full_date="2023-09-10", jitter=30) == "Oct"
+
+    def test_year_rolls_over(self):
+        assert _part(2023, "DATE_YEAR", full_date="2023-12-30") == "2024"
+        assert _part("23", "DATE_YEAR", full_date="2023-12-30") == "24"
+        assert _part(2023, "DATE_YEAR", full_date="2023-01-02", jitter=-5) == "2022"
+        assert _part("99", "DATE_YEAR", full_date="1999-12-30") == "00"
+
+    def test_age_cap(self):
+        # DOB 1930-06-15: the cap is 2020-06-15, so 2023-03-30 becomes 2020-06-15 + 5 = 2020-06-20.
+        extra = {"birth_date": "1930-06-15"}
+        assert _part(2023, "DATE_YEAR", **extra) == "2020"
+        assert _part(3, "DATE_MONTH", **extra) == "6"
+        assert _part(30, "DATE_DAY", **extra) == "20"
+        assert _part(2019, "DATE_YEAR", full_date="2019-12-30", **extra) == "2020"
+
+    @pytest.mark.parametrize(
+        "full_date",
+        [
+            date(2023, 3, 30),
+            datetime(2023, 3, 30, 14, 0),
+            pd.Timestamp("2023-03-30"),
+            np.datetime64("2023-03-30"),
+            "2023-03-30",
+            "2023-03-30T14:00:00",
+        ],
+    )
+    def test_full_date_types(self, full_date):
+        assert _part(30, "DATE_DAY", full_date=full_date) == "4"
+
+    def test_parts_agree_with_the_full_date(self):
+        rng = random.Random(11)  # noqa: S311
+        operator = DateJitterAnonymizer()
+        for _ in range(1500):
+            born = date(1903, 1, 1) + timedelta(days=rng.randrange(29000))
+            event = born + timedelta(days=rng.randrange(-1000, 42000))
+            jitter = rng.choice([-1, 1]) * rng.randrange(3, 181)
+            base = {"jitter": jitter, "birth_date": born, "full_date": event}
+            full = date.fromisoformat(operator.operate(event.isoformat(), {"entity_type": "DATE", **base}))
+            assert operator.operate(str(event.day), {"entity_type": "DATE_DAY", **base}) == str(full.day)
+            assert operator.operate(str(event.month), {"entity_type": "DATE_MONTH", **base}) == str(full.month)
+            assert operator.operate(str(event.year), {"entity_type": "DATE_YEAR", **base}) == str(full.year)
+
+    @pytest.mark.parametrize(
+        ("value", "entity_type"),
+        [
+            (29, "DATE_DAY"),
+            (0, "DATE_DAY"),
+            (32, "DATE_DAY"),
+            ("x", "DATE_DAY"),
+            ("²", "DATE_DAY"),
+            (2, "DATE_MONTH"),
+            (13, "DATE_MONTH"),
+            ("April", "DATE_MONTH"),
+            ("Marchx", "DATE_MONTH"),
+            ("Mon", "DATE_MONTH"),
+            (2022, "DATE_YEAR"),
+            ("22", "DATE_YEAR"),
+            ("223", "DATE_YEAR"),
+            ("3", "DATE_YEAR"),
+        ],
+    )
+    def test_mismatch_is_masked(self, value, entity_type):
+        events = start_note()
+        try:
+            assert _part(value, entity_type) == "[DATE]"
+        finally:
+            end_note()
+        assert events == [("fallback", entity_type)]
+
+    @pytest.mark.parametrize("full_date", [None, float("nan"), "", pd.NaT])
+    def test_null_full_date_is_masked(self, full_date):
+        events = start_note()
+        try:
+            assert _part(30, "DATE_DAY", full_date=full_date) == "[DATE]"
+        finally:
+            end_note()
+        assert events == [("fallback", "DATE_DAY")]
+
+    def test_shifted_out_of_range_is_masked(self):
+        assert _part("9999", "DATE_YEAR", full_date="9999-12-30") == "[DATE]"
+
+    def test_values_that_pass_through_as_dates_are_shifted_as_parts(self):
+        assert _part("3", "DATE_MONTH") == "4"
+        assert _part("Mar", "DATE_MONTH") == "Apr"
+        assert _part("2023", "DATE_YEAR") == "2023"
+        assert DateJitterAnonymizer().operate("Mar", {"entity_type": "DATE", "jitter": 5}) == "Mar"
+
+    def test_missing_or_invalid_params(self):
+        with pytest.raises(ValueError, match="full_date"):
+            DateJitterAnonymizer().operate("30", {"entity_type": "DATE_DAY", "jitter": 5})
+        with pytest.raises(ValueError, match="full_date"):
+            DateJitterAnonymizer().validate({"entity_type": "DATE_DAY", "jitter": 5})
+        with pytest.raises(ValueError, match="full_date"):
+            _part(30, "DATE_DAY", full_date="not a date")
+        events = start_note()
+        try:
+            params = {"entity_type": "DATE_DAY", "jitter": 5, "full_date": "not a date"}
+            assert guarded(DateJitterAnonymizer)().operate("30", params) == "[DATE_DAY]"
+        finally:
+            end_note()
+        assert [kind for kind, _ in events] == ["error"]
+
+    def test_full_date_is_ignored_for_full_dates(self):
+        params = {"entity_type": "DATE", "jitter": 5, "full_date": "1999-01-01"}
+        assert DateJitterAnonymizer().operate("2023-03-30", params) == "2023-04-04"
+
+    def test_cache_is_keyed_on_full_date_and_cap(self):
+        assert _part(30, "DATE_DAY", full_date="2023-03-30") == "4"
+        assert _part(30, "DATE_DAY", full_date="2023-01-30") == "4"
+        assert _part(30, "DATE_DAY", full_date="2023-01-30", jitter=10) == "9"
+        assert _part(30, "DATE_DAY", full_date="2023-03-30", birth_date="1930-06-15") == "20"
+        assert _part(31, "DATE_DAY", full_date="2023-03-30") == "[DATE]"

@@ -711,6 +711,28 @@ covered.
 | `2019-01-10` | `1930-06-15` | +5 | `2019-01-15` (before the 90th birthday) |
 | `2023` | `1930-06-15` | +5 | `2023` |
 
+**Day, month and year columns.** A day, month or year stored on its own cannot be
+shifted alone (day 31 plus 5 days depends on the month and year). Use the entity
+types `DATE_DAY`, `DATE_MONTH` and `DATE_YEAR` with `anonymize_cell` and pass the
+row's real full date as `full_date` (a date, an ISO string, or a timestamp). The
+cell value only gives the format (zero padding, full or abbreviated month name and
+case, two- or four-digit year); the result is that part of the shifted full date,
+with the same jitter and `birth_date` cap as the full-date column, so the parts
+and the full date stay consistent. Unlike a year in free text, a year column is
+shifted, because it can change across 1 January and with the cap. A value that is
+not that part of `full_date`, or a null `full_date`, becomes `[DATE]`; a
+`full_date` that is not a date becomes `[DATE_DAY]` (and so on) and the row is
+`failed`. These types are for structured cells only; the note pipeline does not
+produce them.
+
+| Entity type | Value | `full_date` | Jitter | Output |
+|---|---|---|---|---|
+| `DATE_DAY` | `30` | `2023-03-30` | +5 | `4` |
+| `DATE_MONTH` | `03` | `2023-03-30` | +5 | `04` |
+| `DATE_MONTH` | `March` | `2023-03-30` | +5 | `April` |
+| `DATE_YEAR` | `2023` | `2023-12-30` | +5 | `2024` |
+| `DATE_DAY` | `29` | `2023-03-30` | +5 | `[DATE]` (not the day of `full_date`) |
+
 ### What happens when a run wedges
 
 Hang protection operates at the Ray Data execution level via `NoProgressGuard`:
