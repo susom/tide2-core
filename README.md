@@ -690,6 +690,12 @@ original `row_id` and `text_hash` in its own fields. Use `--json-dir` to write t
 the anonymizer JSON is written, because that mode keeps no recognizer folder. In
 Python, call `tide2.runner.utils.write_visualizer_json(output_dir, json_dir=None)`.
 
+## BigQuery
+
+Running the anonymizers on BigQuery columns through a Python UDF lives in the separate `tide2-bq` repository. It reuses
+`tide2.anonymizers.cell.anonymize_cell`, which anonymizes one table cell the way `AnonymizerWorker` anonymizes a
+one-span note.
+
 ## Docker Images
 
 The `Dockerfile` builds one image, based on `nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04`, whose entrypoint is
