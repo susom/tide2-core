@@ -19,11 +19,11 @@ from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
 from tide2.anonymizers.guarded import record_fallback
+from tide2.cryptographic.date_jitter import ABSOLUTE_MIN_JITTER_DAYS
 
 # Ordinal suffix: 11th-13th (and the 10-20 band) always take "th".
 _ORDINAL_TEEN_LOW = 10
 _ORDINAL_TEEN_HIGH = 20
-_MIN_JITTER = 3
 _DAYS_IN_WEEK = 7
 _PADDED_LEN = 2
 _TWO_DIGIT_YEAR_LEN = 2
@@ -373,7 +373,7 @@ class DateJitterAnonymizer(Operator):
         try:
             # Always convert to Python int (handles str, numpy.int64, etc.)
             jitter = int(params["jitter"])
-            if abs(jitter) < _MIN_JITTER:
+            if abs(jitter) < ABSOLUTE_MIN_JITTER_DAYS:
                 raise ValueError("Jitter must have absolute value >= 3 for date anonymization.")
         except KeyError as err:
             raise ValueError(

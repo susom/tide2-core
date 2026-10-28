@@ -625,6 +625,13 @@ masked or the row failed. With `anonymized_note_text` it undoes the date shift, 
 give it the same access control as `salt.bin` and `key.bin` and drop it before
 release. `patient_id` is written as a string, whatever its input type.
 
+**Jitter range.** `--min-jitter-days` (default 3, the lowest allowed) and
+`--max-jitter-days` (default 180) set the absolute size of the date shift for
+anonymizer and pipeline runs. Rows without a patient id get a random shift in the
+same range. The derived shift depends on the range, so keep it constant within one
+dataset or the same patient gets a new shift. A `jitter` value given in the input
+is used as it is; a value below 3 days in absolute terms masks the date.
+
 **Known limitations**
 
 - All input files must have the same columns. The column list is read from the
