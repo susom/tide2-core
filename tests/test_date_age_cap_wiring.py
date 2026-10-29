@@ -69,6 +69,14 @@ def test_cell_matches_process_note_with_birth_date() -> None:
         assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001", birth_date=DOB) == expected
 
 
+def test_cell_max_age_is_validated_when_a_birth_date_uses_it() -> None:
+    # Without a birth date max_age is not used, so it cannot change the result; with one, an invalid value is masked.
+    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, max_age=0) == "2023-03-20"
+    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=0) == "[DATE]"
+    # A fractional age is truncated, not rejected.
+    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=90.9) == "2020-06-20"
+
+
 def test_cell_fpe_ignores_birth_date() -> None:
     assert cell.anonymize_cell("48291037", "MRN", SALT, KEY, birth_date=DOB) == cell.anonymize_cell(
         "48291037", "MRN", SALT, KEY
