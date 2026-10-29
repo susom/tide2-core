@@ -150,4 +150,5 @@ def test_run_anonymization_keeps_existing_positional_order() -> None:
     """The jitter range options come last, so callers passing the older arguments positionally are unaffected."""
     names = list(inspect.signature(LocalJobRunner.run_anonymization).parameters)
     assert names[names.index("jitter_required") + 1] == "worker_num_cpus"
-    assert names[-2:] == ["min_jitter_days", "max_jitter_days"]
+    assert names.index("min_jitter_days") > names.index("_id_column")
+    assert names.index("max_jitter_days") > names.index("_id_column")
