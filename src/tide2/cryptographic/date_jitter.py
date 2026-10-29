@@ -17,6 +17,10 @@ Usage:
         min_jitter_days=3,
     )
     # Returns an integer between -180 and +180 (excluding -2 to +2)
+
+Age cap: ``max_age`` is a whole number of years from 1 to 150. A fractional value is
+truncated, not rejected (``90.9`` is 90, and ``150.9`` is accepted as 150), and the
+range is checked after the truncation. Callers should pass integers.
 """
 
 import functools
@@ -299,6 +303,8 @@ def validate_jitter_parameters(
 
 def validate_max_age(value: Any) -> int:
     """Return ``value`` as an int age between 1 and 150.
+
+    A fractional value is truncated before the range check (``90.9`` becomes 90).
 
     Raises:
         ValueError: If ``value`` is not an integer in range.
