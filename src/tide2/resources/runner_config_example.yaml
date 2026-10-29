@@ -63,6 +63,8 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # acc_num_salt: "your-salt-here"
 # acc_num_study_id: "your-study-id-here"
 # jitter_required: false
+# min_jitter_days: 3
+# max_jitter_days: 180
 
 # =========================================================================
 # Transformer-specific

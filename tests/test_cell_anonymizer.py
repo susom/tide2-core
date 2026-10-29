@@ -1,5 +1,7 @@
 """Tests for tide2.anonymizers.cell: parity with AnonymizerWorker.process_note on a one-span note."""
 
+from datetime import date
+
 import pytest
 
 from tide2.actors.anonymizer import AnonymizerWorker
@@ -75,9 +77,17 @@ def test_matches_process_note(worker: AnonymizerWorker, case: dict) -> None:
 
 
 def test_null_patient_gets_a_random_shift() -> None:
-    out = cell.anonymize_cell("2024-05-20", "DATE", SALT, KEY)
-    assert out != "2024-05-20"
-    assert out.count("-") == 2
+    for _ in range(1000):
+        out = cell.anonymize_cell("2024-05-20", "DATE", SALT, KEY)
+        assert out.count("-") == 2
+        shift = (date.fromisoformat(out) - date(2024, 5, 20)).days
+        assert 3 <= abs(shift) <= 180
+
+
+def test_null_patient_random_shift_follows_the_range() -> None:
+    for _ in range(200):
+        out = cell.anonymize_cell("2024-05-20", "DATE", SALT, KEY, min_jitter_days=10, max_jitter_days=20)
+        assert 10 <= abs((date.fromisoformat(out) - date(2024, 5, 20)).days) <= 20
 
 
 def test_null_value_stays_null() -> None:
