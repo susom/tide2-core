@@ -7,7 +7,9 @@ BigQuery) call it once per cell.
 This module is shipped on its own in the BigQuery UDF bundle, where ``tide2`` and ``tide2.anonymizers``
 are namespace packages (their ``__init__.py`` files are not bundled). It must import sibling modules by
 full module path, for example ``from tide2.anonymizers.guarded import guarded``, never from a package
-root, and must not import heavy modules (``faker``, ``usaddress``, ``tide2.actors``).
+root, and must not import heavy modules (``faker``, ``usaddress``, ``tide2.actors``) at load time.
+The ``FREE_TEXT`` type imports ``tide2.anonymizers.free_text`` (and through it the actors and the
+operators) only when such a cell is anonymized.
 ``tests/test_cell_isolation.py`` enforces this.
 """
 
@@ -51,7 +53,10 @@ FPE_ENTITY_TYPES: frozenset[str] = frozenset(
 )
 DATE_ENTITY_TYPES: frozenset[str] = frozenset({"DATE", "DATE_TIME"})
 DATE_PART_ENTITY_TYPES: frozenset[str] = frozenset({"DATE_DAY", "DATE_MONTH", "DATE_YEAR"})
-SUPPORTED_ENTITY_TYPES: frozenset[str] = FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES
+FREE_TEXT_ENTITY_TYPES: frozenset[str] = frozenset({"FREE_TEXT"})
+SUPPORTED_ENTITY_TYPES: frozenset[str] = (
+    FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES
+)
 
 
 @functools.cache
@@ -106,6 +111,9 @@ def anonymize_cell(
     birth_date: Any = None,
     max_age: int = DEFAULT_MAX_AGE,
     full_date: Any = None,
+    recognizer_results: Any = None,
+    acc_num_salt: str | None = None,
+    acc_num_study_id: str | None = None,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -130,10 +138,17 @@ def anonymize_cell(
             the parts of a row consistent with each other and with the full-date column,
             pass the same non-null ``patient_id`` (and settings) or the same ``jitter``
             to every call; without either, each call draws a different random shift.
+        recognizer_results: Spans found in the text by the recognition stages, as a JSON string or
+            a parsed list. Required for ``FREE_TEXT``, where they index into ``str(value)``;
+            ignored otherwise.
+        acc_num_salt: Salt for accession number hashing of ``ACC_NUM`` spans (``FREE_TEXT`` only).
+        acc_num_study_id: Study ID for accession number hashing (``FREE_TEXT`` only).
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
-        when the operator cannot handle the value.
+        when the operator cannot handle the value. For ``FREE_TEXT``, ``None`` also when the spans are
+        unusable (null, malformed or outside the text), and spans of the Faker types (email, URL,
+        organization) give random, non-deterministic values.
 
     Raises:
         ValueError: If ``entity_type`` is missing or not supported.
@@ -150,6 +165,26 @@ def anonymize_cell(
     text = str(value)
     if text == "":
         return ""
+
+    if entity_type in FREE_TEXT_ENTITY_TYPES:
+        from tide2.anonymizers.free_text import anonymize_free_text  # heavy imports, free text only
+
+        if is_null_or_blank(birth_date):
+            _warn_no_birth_date()
+        return anonymize_free_text(
+            text,
+            recognizer_results,
+            salt,
+            key,
+            patient_id,
+            jitter,
+            birth_date,
+            max_jitter_days,
+            min_jitter_days,
+            max_age,
+            acc_num_salt,
+            acc_num_study_id,
+        )
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
     if safe_entity_type(entity_type, text) != entity_type:

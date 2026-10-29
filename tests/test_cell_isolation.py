@@ -31,3 +31,57 @@ def test_cell_loads_without_package_roots_or_heavy_modules() -> None:
     loaded = result["modules"]
     for forbidden in FORBIDDEN:
         assert not any(m == forbidden or m.startswith(forbidden + ".") for m in loaded), forbidden
+
+
+BLOCKED = ("presidio_analyzer", "spacy", "transformers", "torch", "sklearn", "scipy", "pandas", "pyarrow", "ray")
+
+FREE_TEXT_CHILD = """
+import importlib.abc, json, sys, types
+
+BLOCKED = tuple(sys.argv[2].split(","))
+
+
+class Blocker(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path=None, target=None):
+        if name.split(".")[0] in BLOCKED:
+            raise ImportError(f"blocked: {name}")
+
+
+sys.meta_path.insert(0, Blocker())
+
+for name, sub in (
+    ("tide2", ""),
+    ("tide2.anonymizers", "anonymizers"),
+    ("tide2.actors", "actors"),
+    ("tide2.utils", "utils"),
+):
+    pkg = types.ModuleType(name)
+    pkg.__path__ = [sys.argv[1] + ("/" + sub if sub else "")]
+    sys.modules[name] = pkg
+
+import tide2.anonymizers.cell as cell
+
+text = "Patient Rhea Orleans, MRN 48291037."
+spans = [
+    {"entity_type": "PERSON", "start": 8, "end": 20, "score": 1.0},
+    {"entity_type": "MRN", "start": 26, "end": 34, "score": 1.0},
+]
+out = cell.anonymize_cell(text, "FREE_TEXT", b"\\x01" * 32, b"\\x02" * 32, "P1", recognizer_results=spans)
+print(json.dumps({"out": out, "modules": sorted(sys.modules)}))
+"""
+
+
+def test_free_text_loads_without_heavy_dependencies() -> None:
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", FREE_TEXT_CHILD, str(SRC), ",".join(BLOCKED)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    result = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert "Rhea" not in result["out"]
+    assert "48291037" not in result["out"]
+    loaded = result["modules"]
+    for name in (*BLOCKED, "tide2.actors.recognizer", "tide2.actors.transformer"):
+        assert not any(m == name or m.startswith(name + ".") for m in loaded), name
