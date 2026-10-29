@@ -66,9 +66,14 @@ _DAY_OF_WEEK = r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|M
 _WEEKDAY_PATTERN = re.compile(_DAY_OF_WEEK, re.IGNORECASE)
 
 # Times of day and UTC offsets are hidden from date matching so that, for
-# example, the "30-05" in "10:30-05:30" is never read as dd-mm.
+# example, the "30-05" in "10:30-05:30" is never read as dd-mm. A time never
+# starts inside a number, and a numeric or dd-Mon-yy date directly followed by
+# ":" and a clock ("2023-12-31:10:30") is kept whole, so the clock cannot take
+# the day or the last year digits.
 _TIME_PATTERN = re.compile(
-    r"[0-9]{1,2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:[+-][0-9]{2}:[0-9]{2}|[+-][0-9]{4}(?![0-9]))?"
+    r"(?P<date>(?:[0-9]{4}[/-][0-9]{1,2}[/-][0-9]{1,2}|[0-9]{1,2}[/-](?:[0-9]{1,2}|[A-Za-z]{3,9})[/-][0-9]{2,4})"
+    r"(?=:[0-9]))"
+    r"|(?<![0-9])[0-9]{1,2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?(?:[+-][0-9]{2}:[0-9]{2}|[+-][0-9]{4}(?![0-9]))?"
 )
 
 _MONTH_NUMBERS = {
@@ -83,6 +88,11 @@ _WORD_CHAR = re.compile(r"\w")
 
 # Non-PHI values returned unchanged: a year or decade ("2016", "1990s") or a gestational age ("21w 1d", "36w", "4d").
 _NON_DATE_VALUE = re.compile(r"(?:19|20)\d{2}s?|\d{1,2}w(?:\s+\d{1,2}d)?|\d{1,2}d")
+
+
+def _blank_clock(match: Match) -> str:
+    """Return the text to scan for ``match`` of ``_TIME_PATTERN``: a date is kept, a clock is blanked."""
+    return match.group() if match.group("date") else " " * len(match.group())
 
 
 class DateJitterAnonymizer(Operator):
@@ -180,6 +190,8 @@ class DateJitterAnonymizer(Operator):
             f"{_START}{_DAY_FIRST}{_SEP}{_MON}(?P=sep)(?P<year>[0-9]{{2}}){_END}",
             # January 1st, 2010
             f"{_START}{_MONTH} +{_DAY}{_DAY_SUFFIX}[,\\s]+{_YEAR}{_END}",
+            # Dec 31, 99 / January 1st 05
+            f"{_START}{_MONTH} +{_DAY}{_DAY_SUFFIX}[,\\s]+(?P<year>[0-9]{{2}}){_END}",
             # mm/yyyy
             f"{_START}{_MON}{_SEP}{_YEAR}{_END}",
             # March of 2010 / March 2010 / March2010
@@ -271,7 +283,7 @@ class DateJitterAnonymizer(Operator):
 
     def _find_dates(self, text: str) -> list[Match]:
         """Return the non-overlapping date matches in ``text``, highest-priority pattern first."""
-        scan = _TIME_PATTERN.sub(lambda match: " " * len(match.group()), text) if ":" in text else text
+        scan = _TIME_PATTERN.sub(_blank_clock, text) if ":" in text else text
         found: list[Match] = []
         while _WORD_CHAR.search(scan):
             match = next((m for m in (pattern.search(scan) for pattern in self.patterns) if m), None)

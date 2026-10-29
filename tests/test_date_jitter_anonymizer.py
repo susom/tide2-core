@@ -384,6 +384,41 @@ class TestDateJitterAnonymizer:
             == "2008-08-14T15:11:00"
         )
 
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            # A clock after a colon must not consume the day or the last two year digits.
+            ("2023-12-31:10:30", "2024-01-05:10:30"),
+            ("2023-03-15:10:30:45", "2023-03-20:10:30:45"),
+            ("12/31/2023:10:30", "01/05/2024:10:30"),
+            ("12/31/99:23:59:59", "01/05/00:23:59:59"),
+            ("15-Mar-2023:10:30", "20-Mar-2023:10:30"),
+            ("Dec 31, 2023:10:30", "Jan 5, 2024:10:30"),
+            # Clocks and offsets are still hidden from date matching.
+            ("2023-03-15T10:30-05:30", "2023-03-20T10:30-05:30"),
+            ("2023-03-15 10:30", "2023-03-20 10:30"),
+            ("10:30-05:30", "[DATE]"),
+            ("9-10:30", "[DATE]"),
+        ],
+    )
+    def test_clock_does_not_consume_date_components(self, value, expected):
+        assert self.anonymizer.operate(value, {"entity_type": "DATE_TIME", "jitter": 5}) == expected
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("Dec 31, 99", "Jan 5, 00"),
+            ("Dec 31 99", "Jan 5 00"),
+            ("March 10th, 99", "March 15th, 99"),
+            ("January 1st, 05", "January 6th, 05"),
+            ("Feb 28, 00", "Mar 4, 00"),
+            ("March 10 15:30", "March 15 15:30"),
+        ],
+    )
+    def test_month_name_with_two_digit_year(self, value, expected):
+        """A two-digit year after a month name takes the pivot and rolls over like mm/dd/yy."""
+        assert self.anonymizer.operate(value, {"entity_type": "DATE", "jitter": 5}) == expected
+
     def test_embedded_weekday_does_not_drop_rest_of_value(self):
         """A weekday embedded in a longer date must not short-circuit the scan.
 
