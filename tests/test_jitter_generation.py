@@ -1,5 +1,6 @@
 """Tests for the single jitter generator in tide2.cryptographic.date_jitter and its range plumbing."""
 
+import inspect
 import re
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.date_jitter import random_date_jitter
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.runner import cli
+from tide2.runner.local_runner import LocalJobRunner
 
 SALT = b"\x01" * 32
 KEY = b"\x02" * 32
@@ -142,3 +144,11 @@ def test_randomness_is_only_in_the_jitter_util() -> None:
         and "jitter" in p.read_text(encoding="utf-8")
     }
     assert users <= {str(Path("cryptographic/date_jitter.py"))}
+
+
+def test_run_anonymization_keeps_existing_positional_order() -> None:
+    """The jitter range options come last, so callers passing the older arguments positionally are unaffected."""
+    names = list(inspect.signature(LocalJobRunner.run_anonymization).parameters)
+    assert names[names.index("jitter_required") + 1] == "worker_num_cpus"
+    assert names.index("min_jitter_days") > names.index("_id_column")
+    assert names.index("max_jitter_days") > names.index("_id_column")
