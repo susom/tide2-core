@@ -131,6 +131,8 @@ class DateJitterAnonymizer(Operator):
     values are not capped. An invalid ``max_age`` (outside 1 to 150, or not a number)
     turns the cap off instead of raising: the anonymizer does not check it, and the
     job runners reject it before they start.
+    A capped date is the shifted birthday, so together with the jitter it gives the real
+    birth date: the ``jitter`` output column is for debugging and must not be released.
 
     Weekday names are rotated by the jitter alone. When a date is capped its shift is
     larger than the jitter, so a weekday written next to a capped date can differ from

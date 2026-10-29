@@ -621,9 +621,13 @@ resuming a run does not retry them.
 
 **Jitter column.** The anonymizer output has a `jitter` column: the date shift in
 days that was applied, taken from the input or derived. It is null when dates were
-masked or the row failed. With `anonymized_note_text` it undoes the date shift, so
-give it the same access control as `salt.bin` and `key.bin` and drop it before
-release. `patient_id` is written as a string, whatever its input type.
+masked or the row failed. It is a debugging aid, not part of the released data: with
+`anonymized_note_text` it undoes the date shift, and with a `birth_date` every capped
+date equals the birth date plus `max_age` years plus the jitter, so the real birth
+date can be recovered from any capped date and this column. Give it the same access
+control as `salt.bin` and `key.bin` and drop it before release, so that whoever
+receives the data gets shifted dates only. `patient_id` is written as a string,
+whatever its input type.
 
 **Jitter range.** `--min-jitter-days` (default 3, the lowest allowed) and
 `--max-jitter-days` (default 180) set the absolute size of the date shift for
@@ -692,20 +696,24 @@ other century. The pivot can be changed with the `two_digit_year_pivot` operator
 parameter.
 
 **Ages over 89 (Safe Harbor).** Give the input a `birth_date` column (the real
-birth date, as a date or an ISO `YYYY-MM-DD` string) and every date after the
-patient's 90th birthday is capped: the jitter is added first, and a shifted date
-later than the shifted 90th birthday (birth date plus 90 years plus the jitter)
-becomes that date, so no shifted date reveals an age over 89. `--max-age`
-(default 90, 1 to 150) changes the birthday; the CLI and the runners reject any
-other value before the job starts, while the anonymizers themselves leave the cap
-off for an invalid value. All events after it land on the same day, so their order and intervals
-are lost. Year-only and yearless values, the birth date itself and earlier dates
-are not capped. The column travels through the stages like `jitter` but is never
-written to the anonymizer output. Without the column, or with a null value, dates
-are shifted but not capped and a warning is logged; such a run is not Safe Harbor
-compliant for patients over 89. For cells, pass `birth_date` (and `max_age`) to
-`anonymize_cell`. Ages written as text ("92-year-old") are not dates and are not
-covered.
+birth date, as a date or an ISO `YYYY-MM-DD` string) and every full or month date
+after the patient's 90th birthday is capped: the jitter is added first, and a
+shifted date later than the shifted 90th birthday (birth date plus 90 years plus the
+jitter) becomes that date, so no shifted date shows an age over 89. All events after
+it land on the same day, so their order and intervals are lost. The birth date
+itself and earlier dates are only shifted. `--max-age` (default 90, 1 to 150) changes
+the birthday; the CLI and the runners reject any other value before the job starts,
+while the anonymizers themselves leave the cap off for an invalid value. The column
+travels through the stages like `jitter` but is never written to the anonymizer
+output. For cells, pass `birth_date` (and `max_age`) to `anonymize_cell`.
+
+This is a per-event cap, not a Safe Harbor compliance guarantee on its own. Year-only
+and yearless values are not capped, so a note that holds a shifted birth date and a
+bare year (`1930-06-20` and `2023`) can still imply an age over 89. Ages written as
+text ("92-year-old") are not dates and are not covered. Other values that indicate an
+older age need their own generalization. Without the column, or with a null value,
+dates are shifted but not capped and a warning is logged; such a run is not Safe
+Harbor compliant for patients over 89.
 
 | Input | `birth_date` | Jitter | Output |
 |---|---|---|---|
