@@ -56,7 +56,6 @@ from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.date_jitter import validate_jitter_parameters
-from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import type_columns
@@ -111,8 +110,9 @@ class AnonymizerWorker:
                 of computing one automatically.
             min_jitter_days: Minimum absolute date jitter in days (at least 3).
             max_jitter_days: Maximum absolute date jitter in days.
-            max_age: Dates after this birthday are moved to it when the note has a
-                ``birth_date`` (between 1 and 150).
+            max_age: Age at which dates are capped for notes with a ``birth_date``.
+                Not validated here: a value outside 1 to 150 turns the cap off. The job
+                runners reject it before they start.
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -126,7 +126,6 @@ class AnonymizerWorker:
         is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
         if not is_valid:
             raise ValueError(message)
-        max_age = validate_max_age(max_age)
 
         # Apply Presidio patches - must be done in __init__ (not module level)
         # for Ray workers since they are separate processes.

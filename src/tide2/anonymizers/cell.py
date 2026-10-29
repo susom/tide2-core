@@ -121,7 +121,8 @@ def anonymize_cell(
         birth_date: Real birth date of the patient. Dates after the ``max_age``-th
             birthday are moved to it; without it dates are not capped (a warning is
             logged once per process).
-        max_age: Age at which dates are capped.
+        max_age: Age at which dates are capped. A value outside 1 to 150 turns the cap
+            off; it is not checked here.
         full_date: Real full date of the row. Required for the part types
             (``DATE_DAY``, ``DATE_MONTH``, ``DATE_YEAR``), where ``value`` is the day,
             month or year held on its own and the result is that part of the shifted

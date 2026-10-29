@@ -693,9 +693,12 @@ parameter.
 
 **Ages over 89 (Safe Harbor).** Give the input a `birth_date` column (the real
 birth date, as a date or an ISO `YYYY-MM-DD` string) and every date after the
-patient's 90th birthday is moved to that birthday before the jitter is added, so
-no shifted date reveals an age over 89. `--max-age` (default 90) changes the
-birthday. All events after it land on the same day, so their order and intervals
+patient's 90th birthday is capped: the jitter is added first, and a shifted date
+later than the shifted 90th birthday (birth date plus 90 years plus the jitter)
+becomes that date, so no shifted date reveals an age over 89. `--max-age`
+(default 90, 1 to 150) changes the birthday; the CLI and the runners reject any
+other value before the job starts, while the anonymizers themselves leave the cap
+off for an invalid value. All events after it land on the same day, so their order and intervals
 are lost. Year-only and yearless values, the birth date itself and earlier dates
 are not capped. The column travels through the stages like `jitter` but is never
 written to the anonymizer output. Without the column, or with a null value, dates
