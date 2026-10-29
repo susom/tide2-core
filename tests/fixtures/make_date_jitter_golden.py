@@ -161,6 +161,10 @@ def _formats(d: date) -> list[str]:
         f"{year}-{month:02d}-{day:02d} ({weekday})",
         f"Visit on {year}-{month:02d}-{day:02d} at noon",
         f"on {name} {day}, {year}.",
+        f"{name} {day}, {year % 100:02d}",
+        f"{abbrev} {day} {year % 100:02d}",
+        f"{year}-{month:02d}-{day:02d}:10:30",
+        f"{month:02d}/{day:02d}/{year}:10:30",
     ]
 
 

@@ -38,8 +38,9 @@ _NULL_PATIENT_STRINGS = frozenset({"nan", "none", "null", ""})
 DEFAULT_MAX_AGE = 90
 _MIN_MAX_AGE = 1
 _MAX_MAX_AGE = 150
-# Logged by every caller that shifts dates without a birth date; formatted with max_age.
-NO_BIRTH_DATE_WARNING = "dates are shifted but not capped at age %d; ages over 89 may be revealed"
+# Logged by every caller that shifts dates without a birth date. A plain constant: it is
+# logged without arguments so no row-level or birth-date-related value reaches the log.
+UNCAPPED_DATES_WARNING = "dates are shifted but not capped at the maximum age; ages over 89 may be revealed"
 
 # Key size requirements
 REQUIRED_KEY_SIZE = 32

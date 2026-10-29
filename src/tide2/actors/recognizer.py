@@ -318,7 +318,7 @@ class RecognizerWorker:
 
         # Process note (with chunking for very long notes)
         if note_len > MAX_NOTE_CHUNK_SIZE:
-            logger.info(f"Chunking long note ({note_len:,} chars): {text_hash[:16]}...")
+            logger.info(f"Chunking long note ({note_len:,} chars)")
             analyzer_results = self._process_long_note(
                 note_text=note_text,
                 ad_hoc_recognizers=ad_hoc_recognizers,
@@ -334,8 +334,7 @@ class RecognizerWorker:
         # Log slow processing
         if elapsed > SLOW_PROCESSING_SECONDS or note_len > LONG_NOTE_CHAR_THRESHOLD:
             logger.info(
-                f"Processed note {text_hash[:16]} ({note_len:,} chars) "
-                f"in {elapsed:.2f}s, found {len(analyzer_results)} entities"
+                f"Processed a note ({note_len:,} chars) in {elapsed:.2f}s, found {len(analyzer_results)} entities"
             )
 
         # Serialize results to JSON

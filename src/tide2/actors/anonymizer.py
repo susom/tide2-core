@@ -53,7 +53,7 @@ from tide2.anonymizers.guarded import summarize
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
-from tide2.cryptographic.date_jitter import NO_BIRTH_DATE_WARNING
+from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.date_jitter import validate_jitter_parameters
 from tide2.cryptographic.date_jitter import validate_max_age
@@ -61,6 +61,7 @@ from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
+from tide2.utils.nulls import is_null_or_blank
 from tide2.utils.span_metrics import resolve_recognizer_results
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import NoteError
@@ -277,7 +278,7 @@ class AnonymizerWorker:
             operators.update({"DATE_TIME": OperatorConfig("masking"), "DATE": OperatorConfig("masking")})
         else:
             date_params: dict[str, Any] = {"jitter": date_jitter}
-            if not is_null(birth_date):
+            if not is_null_or_blank(birth_date):
                 date_params.update({"birth_date": birth_date, "max_age": self.max_age})
             operators.update(
                 {
@@ -624,7 +625,7 @@ class AnonymizerWorker:
         jitters = cols.get("jitter", [None] * batch_size)
         has_birth_date = "birth_date" in cols
         input_birth_dates = cols.get("birth_date", [None] * batch_size)
-        missing_birth_dates: list[str] = []
+        missing_birth_dates = 0
         input_patient_ids = cols.get("patient_id", [None] * batch_size)
         input_row_ids = cols.get("row_id", [None] * batch_size)
         recognizer_results_list = cols.get("recognizer_results_json", [None] * batch_size)
@@ -661,12 +662,10 @@ class AnonymizerWorker:
                 status_of=lambda r: (r["stage_status"], r["stage_reason"]),
             )
             if result is not None and result["stage_status"] == FAILED:
-                logger.error(
-                    "anonymizer masked an entity of note %s: %s", original_text_hash[:16], result["stage_reason"]
-                )
+                logger.error("anonymizer masked an entity of a note: %s", result["stage_reason"])
             # Masked dates (jitter_required) carry no jitter and need no birth date.
-            if has_birth_date and result is not None and result["jitter"] is not None and is_null(birth_date):
-                missing_birth_dates.append(original_text_hash)
+            if has_birth_date and result is not None and result["jitter"] is not None and is_null_or_blank(birth_date):
+                missing_birth_dates += 1
 
             original_text_hashes.append(original_text_hash)
             patient_ids.append(patient_id)
@@ -701,18 +700,13 @@ class AnonymizerWorker:
         """Process a batch of notes directly under Ray Data map_batches."""
         return self.process_batch(batch)
 
-    def _warn_missing_birth_dates(self, text_hashes: list[str]) -> None:
-        """Log the notes of a batch whose dates were not age-capped: a warning the first time, then debug."""
-        if not text_hashes:
+    def _warn_missing_birth_dates(self, count: int) -> None:
+        """Log how many notes of a batch were not age-capped: a warning the first time, then debug."""
+        if not count:
             return
         log = logger.debug if self._warned_no_birth_date else logger.warning
         self._warned_no_birth_date = True
-        log(
-            "%d note(s) without birth_date (first %s): " + NO_BIRTH_DATE_WARNING,
-            len(text_hashes),
-            text_hashes[0][:16],
-            self.max_age,
-        )
+        log("%d note(s) without birth_date: %s", count, UNCAPPED_DATES_WARNING)
 
 
 AnonymizerActor = AnonymizerWorker

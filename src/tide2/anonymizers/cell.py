@@ -27,10 +27,11 @@ from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
-from tide2.cryptographic.date_jitter import NO_BIRTH_DATE_WARNING
+from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
+from tide2.utils.nulls import is_null_or_blank
 
 __docformat__ = "google"
 
@@ -64,9 +65,9 @@ def _operators() -> tuple[Operator, Operator]:
 
 
 @functools.cache
-def _warn_no_birth_date(max_age: int) -> None:
-    """Log the missing-birth-date warning once per process and ``max_age``."""
-    logger.warning("anonymize_cell called without birth_date: " + NO_BIRTH_DATE_WARNING, max_age)
+def _warn_no_birth_date() -> None:
+    """Log the missing-birth-date warning once per process."""
+    logger.warning("anonymize_cell called without birth_date: %s", UNCAPPED_DATES_WARNING)
 
 
 def compute_jitter_for_patient(
@@ -157,8 +158,8 @@ def anonymize_cell(
         else:
             resolved = int(jitter)  # type: ignore[arg-type]
         operator, params = date_jitter, {"jitter": resolved}
-        if is_null(birth_date):
-            _warn_no_birth_date(max_age)
+        if is_null_or_blank(birth_date):
+            _warn_no_birth_date()
         else:
             params["birth_date"] = birth_date
             params["max_age"] = max_age
