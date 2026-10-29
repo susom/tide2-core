@@ -1456,7 +1456,6 @@ class LocalJobRunner:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
-        zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE; not imported here to keep this module light
         worker_num_cpus: int | float | None = None,
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
@@ -1465,6 +1464,7 @@ class LocalJobRunner:
         key_hex: str | None = None,
         dry_run: bool = False,
         _id_column: str = "row_id",
+        zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1491,8 +1491,6 @@ class LocalJobRunner:
             acc_num_study_id: Study ID for accession number hashing
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically
-            zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
-                ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
             worker_num_cpus: CPUs reserved for each actor (None = 1.0); lower it to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
@@ -1514,6 +1512,8 @@ class LocalJobRunner:
             dry_run: If True, validate setup and show plan without processing
             _id_column: Column name to use as primary key for Ray Data checkpointing
                 (default: "row_id").
+            zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
+                ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number

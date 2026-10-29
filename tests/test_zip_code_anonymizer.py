@@ -302,6 +302,34 @@ def test_address_with_a_malformed_zip_is_masked_and_records_an_error() -> None:
     assert status == ("failed", "ZIP_CODE:ValueError")
 
 
+@pytest.mark.parametrize("malformed", ["0213-9", "02.139", "(02139)", "9430-5"])
+@pytest.mark.parametrize("mode", ZIP_MODES)
+def test_address_zip_is_validated_as_written_not_after_punctuation_cleaning(malformed: str, mode: str) -> None:
+    from tide2.anonymizers.guarded import end_note
+    from tide2.anonymizers.guarded import start_note
+    from tide2.anonymizers.guarded import summarize
+    from tide2.anonymizers.hips_locations import HipsLocationAnonymizer
+
+    op = guarded(HipsLocationAnonymizer)()
+    events = start_note()
+    try:
+        out = op.operate(
+            f"123 Main Street, Cambridge, MA {malformed}",
+            {"salt": SALT, "key": KEY, "entity_type": "LOCATION", "zip_mode": mode},
+        )
+        status = summarize(events)
+    finally:
+        end_note()
+    assert out.endswith(", MA [ZIP_CODE]")
+    assert status == ("failed", "ZIP_CODE:ValueError")
+
+
+def test_address_zip_plus_four_is_still_accepted() -> None:
+    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=MODE_STRICT)
+    address = "123 Main Street, Cambridge, MA 02139-4307"
+    assert _anonymize_note(worker, address, [(0, len(address), "LOCATION")]).endswith(", MA 021")
+
+
 def test_note_with_a_malformed_address_zip_is_failed_but_still_anonymized() -> None:
     worker = AnonymizerWorker(salt=SALT, key=KEY)
     address = "789 Pine Road, Springfield, IL 6280"
@@ -399,6 +427,25 @@ def test_cli_and_runner_defaults_match_the_operator_constants() -> None:
     run_anonymization = inspect.signature(local_runner.LocalJobRunner.run_anonymization)
     assert run_anonymization.parameters["zip_mode"].default == DEFAULT_ZIP_MODE
     assert inspect.signature(create_anonymizer_actor).parameters["zip_mode"].default == DEFAULT_ZIP_MODE
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        local_runner.LocalJobRunner.run_anonymization,
+        AnonymizerWorker.__init__,
+        create_anonymizer_actor,
+        cell.anonymize_cell,
+    ],
+    ids=["run_anonymization", "AnonymizerWorker", "create_anonymizer_actor", "anonymize_cell"],
+)
+def test_zip_mode_is_the_last_parameter_so_positional_calls_keep_their_meaning(func: Any) -> None:
+    assert list(inspect.signature(func).parameters)[-1] == "zip_mode"
+
+
+def test_run_anonymization_positional_cpu_arguments_are_unchanged() -> None:
+    names = list(inspect.signature(local_runner.LocalJobRunner.run_anonymization).parameters)
+    assert names[names.index("jitter_required") + 1] == "worker_num_cpus"
 
 
 def _parse_run_args(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> argparse.Namespace:

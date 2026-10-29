@@ -308,7 +308,9 @@ class HipsLocationAnonymizer(Operator):
                     new_zipcode = secure_string_selector(salt, key, self.zipcodes, zipcode)
                 else:
                     try:
-                        new_zipcode = anonymize_zip(zipcode, zip_mode)
+                        # Validate the parsed value as written: the cleaned one has lost its punctuation, so
+                        # "0213-9" would otherwise pass as "02139".
+                        new_zipcode = anonymize_zip(result["zipcode"], zip_mode)
                     except ValueError as exc:
                         # Not a 5-digit ZIP: never keep digits that may identify the person. Same outcome as a
                         # standalone ZIP_CODE entity: the placeholder, and the note records the error.
