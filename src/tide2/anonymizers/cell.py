@@ -125,7 +125,10 @@ def anonymize_cell(
         full_date: Real full date of the row. Required for the part types
             (``DATE_DAY``, ``DATE_MONTH``, ``DATE_YEAR``), where ``value`` is the day,
             month or year held on its own and the result is that part of the shifted
-            ``full_date``; a null ``full_date`` gives ``[DATE]``. Ignored otherwise.
+            ``full_date``; a null ``full_date`` gives ``[DATE]``. Ignored otherwise. To keep
+            the parts of a row consistent with each other and with the full-date column,
+            pass the same non-null ``patient_id`` (and settings) or the same ``jitter``
+            to every call; without either, each call draws a different random shift.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)

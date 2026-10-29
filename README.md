@@ -717,13 +717,19 @@ types `DATE_DAY`, `DATE_MONTH` and `DATE_YEAR` with `anonymize_cell` and pass th
 row's real full date as `full_date` (a date, an ISO string, or a timestamp). The
 cell value only gives the format (zero padding, full or abbreviated month name and
 case, two- or four-digit year); the result is that part of the shifted full date,
-with the same jitter and `birth_date` cap as the full-date column, so the parts
-and the full date stay consistent. Unlike a year in free text, a year column is
+with the same jitter and `birth_date` cap as the full-date column. Passing the
+same `full_date` is not enough to keep the parts and the full-date column
+consistent: they must also get the same jitter. Pass the same non-null
+`patient_id` (with the same salt, key and jitter range) to every related call, or
+compute one jitter per row and pass it as `jitter` to every call. Without a
+`patient_id` or `jitter`, each call draws its own random shift and the parts do
+not line up. Unlike a year in free text, a year column is
 shifted, because it can change across 1 January and with the cap. A value that is
 not that part of `full_date`, or a null `full_date`, becomes `[DATE]`; a
 `full_date` that is not a date becomes `[DATE_DAY]` (and so on) and the row is
 `failed`. These types are for structured cells only; the note pipeline does not
-produce them.
+produce them. A four-digit year below 1000 is not zero padded, which is outside the
+supported range (the date patterns cover 1900 to 2099).
 
 | Entity type | Value | `full_date` | Jitter | Output |
 |---|---|---|---|---|
