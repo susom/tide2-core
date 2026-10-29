@@ -7,6 +7,13 @@ month, full or abbreviated name, case, zero padding, ordinal suffix, the word
 the ``T`` separator, timezone, surrounding text) is kept verbatim, except weekday
 names, which are rotated by the same jitter so they never reveal the original
 weekday. The result depends only on the input and the jitter, never on the clock.
+
+Known limit: a named-month date written directly before a colon-separated clock
+(``Dec 31, 99:10:30``, ``March 31:10:30``) is not protected from clock masking, so
+the clock takes the two-digit year or the day. The date is then shifted without its
+year (``Jan 5, 99:10:30``) or masked as ``[DATE]``. Numeric dates followed by a
+clock (``2023-12-31:10:30``) are handled. Write the clock after a space, or a ``T``
+for ISO values, to avoid this.
 """
 
 import functools

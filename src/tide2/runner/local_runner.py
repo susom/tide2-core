@@ -1450,8 +1450,6 @@ class LocalJobRunner:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
-        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
-        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         worker_num_cpus: int | float | None = None,
         write_cpus: float = 1.0,
         enable_checkpoint: bool = True,
@@ -1460,6 +1458,8 @@ class LocalJobRunner:
         key_hex: str | None = None,
         dry_run: bool = False,
         _id_column: str = "row_id",
+        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1486,8 +1486,6 @@ class LocalJobRunner:
             acc_num_study_id: Study ID for accession number hashing
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically
-            min_jitter_days: Minimum absolute date jitter in days (at least 3)
-            max_jitter_days: Maximum absolute date jitter in days
             worker_num_cpus: CPUs reserved for each actor (None = 1.0); lower it to fit
                 small boxes.
             write_cpus: CPUs to reserve for each write_parquet task. Default 1.0
@@ -1509,6 +1507,8 @@ class LocalJobRunner:
             dry_run: If True, validate setup and show plan without processing
             _id_column: Column name to use as primary key for Ray Data checkpointing
                 (default: "row_id").
+            min_jitter_days: Minimum absolute date jitter in days (at least 3)
+            max_jitter_days: Maximum absolute date jitter in days
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
