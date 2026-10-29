@@ -13,7 +13,9 @@ gets the same pseudonym as a STRING and as an INT64.
 
 Classes (each (class, length) map is a permutation, so the mapping is one-to-one):
     N: digits without a leading zero. The output never starts with 0, so int() is safe.
-       At 19 digits, values up to 2**63 - 1 and above it are separate classes.
+       At 19 digits, values up to 2**63 - 1 and above 2**63 are separate classes.
+    M: exactly "9223372036854775808" (2**63). It maps to itself, so "-9223372036854775808"
+       (the minimum INT64 value) stays in range, and no other value maps onto it.
     Z: exactly "0". It maps to itself, so a negative value never becomes "-0".
     S: digit string of two or more characters that starts with 0.
     A: content that contains a letter. The output contains a letter.
@@ -45,6 +47,7 @@ _INT64_MAX_DIGITS = 19
 
 _CLASS_NUMERIC = "N"
 _CLASS_NUMERIC_ABOVE_INT64 = "H"
+_CLASS_INT64_MIN_MAGNITUDE = "M"
 _CLASS_ZERO = "Z"
 _CLASS_ZERO_LED = "S"
 _CLASS_ALPHANUMERIC = "A"
@@ -163,7 +166,7 @@ class FormatPreservingEncryption:
         if content[0] == "0":
             return _CLASS_ZERO_LED
         if len(content) == _INT64_MAX_DIGITS and int(content) > INT64_MAX:
-            return _CLASS_NUMERIC_ABOVE_INT64
+            return _CLASS_INT64_MIN_MAGNITUDE if int(content) == -INT64_MIN else _CLASS_NUMERIC_ABOVE_INT64
         return _CLASS_NUMERIC
 
     def _build_table(self, content_class: str, length: int) -> tuple[dict[str, str], dict[str, str]]:
@@ -203,7 +206,7 @@ class FormatPreservingEncryption:
     def _permute_content(self, content: str, format_type: str, decrypt: bool) -> str:
         """Encrypt or decrypt alphanumeric content inside its class, keeping its length."""
         content_class = self._classify(content)
-        if content_class == _CLASS_ZERO:
+        if content_class in (_CLASS_ZERO, _CLASS_INT64_MIN_MAGNITUDE):
             return content
 
         min_length = self.MIN_LENGTH_NUMERIC if format_type == self.FORMAT_NUMERIC else self.MIN_LENGTH_ALPHANUMERIC
@@ -314,7 +317,8 @@ class FormatPreservingEncryption:
     def encrypt_int(self, value: int) -> int:
         """Encrypt an INT64 value; the result equals int(encrypt(str(value))) and stays in INT64.
 
-        The sign and zero are kept. The minimum INT64 value (-2**63) maps to itself.
+        The sign and zero are kept. The minimum INT64 value (-2**63) maps to itself,
+        because the string mapping keeps the magnitude 2**63 fixed.
 
         Args:
             value: Integer in the INT64 range.
@@ -327,8 +331,6 @@ class FormatPreservingEncryption:
             ValueError: If value is outside the INT64 range.
         """
         self._check_int64(value)
-        if value == INT64_MIN:
-            return value
         return int(self.encrypt(str(value))[0])
 
     def decrypt_int(self, value: int) -> int:
@@ -345,8 +347,6 @@ class FormatPreservingEncryption:
             ValueError: If value is outside the INT64 range.
         """
         self._check_int64(value)
-        if value == INT64_MIN:
-            return value
         return int(self.decrypt(str(value)))
 
     # Legacy method for backward compatibility

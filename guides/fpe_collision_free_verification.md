@@ -18,7 +18,8 @@ of content belongs to one class, and the mapping is a permutation of each
 
 | Class | Content | Notes |
 |---|---|---|
-| `N` | digits, no leading zero | The output never starts with `0`, so `int()` is safe. At 19 digits, values up to `2**63 - 1` form `N`; larger values form the separate class `H`. |
+| `N` | digits, no leading zero | The output never starts with `0`, so `int()` is safe. At 19 digits, values up to `2**63 - 1` form `N`; values above `2**63` form the separate class `H`. |
+| `M` | exactly `9223372036854775808` (`2**63`) | Maps to itself, so `-9223372036854775808` (INT64 minimum) stays in range as a `STRING` and as an `INT64`. No other value maps onto it. |
 | `Z` | exactly `0` | Maps to itself, so a negative value never becomes `-0`. |
 | `S` | two or more digits, starting with `0` | |
 | `A` | content that contains a letter | The output contains a letter. |
@@ -42,9 +43,10 @@ it is one-to-one on all of INT64, for these reasons:
 - The magnitudes `1` to `2**63 - 1` are permuted inside their digit length. At
   19 digits the class `N` ends at `2**63 - 1`, so the result never exceeds the
   INT64 maximum.
-- The magnitude `2**63` exists only as `-2**63` (INT64 minimum). It belongs to
-  class `H`, and `encrypt_int` maps it to itself. No other value can map to it,
-  because every other output magnitude is at most `2**63 - 1`.
+- The magnitude `2**63` exists only as `-2**63` (INT64 minimum). It is its own
+  class `M` and maps to itself in the string mapping, so `encrypt_int` needs no
+  special case. No other value can map to it: class `H` is cycle-walked without
+  it, and every other output magnitude is at most `2**63 - 1`.
 
 ## Tests in the repository
 
@@ -62,6 +64,7 @@ it is one-to-one on all of INT64, for these reasons:
 | `test_fpe_cf_zero_is_a_fixed_point` | `0` and `-0` map to themselves. |
 | `test_fpe_cf_no_length_limit` | 5,000-character inputs encrypt and decrypt. |
 | `test_fpe_cf_int64` | Values -2000 to 2000, the extremes (`INT64_MIN`, `INT64_MIN + 1`, `-1`, `0`, `1`, `INT64_MAX - 1`, `INT64_MAX`) and 5,000 random INT64 values: all outputs distinct, in range, sign and digit count kept, round-trip, and equal to `int(encrypt(str(v)))`. `INT64_MIN` maps to itself. |
+| `test_fpe_cf_int64_min_string_and_cell_agree`, `test_fpe_cf_int64_min_magnitude_is_reserved` | `-9223372036854775808` maps to itself through `encrypt`, `decrypt` and `anonymize_cell`; sampled 19-digit values above `2**63` and below it never map onto `2**63`, stay on their side of it, and round-trip. |
 | `test_fpe_cf_int64_rejects_non_int`, `test_fpe_cf_int64_rejects_out_of_range` | `bool`, float, string, `None` raise `TypeError`; values outside INT64 raise `ValueError`. |
 | `test_fpe_cf_entity_type_independent` | The same value gets the same pseudonym for every FPE entity type. |
 | `test_fpe_cf_cycle_walking_cap` | A cipher that never returns to the class makes cycle-walking raise `RuntimeError` instead of returning the plaintext. |

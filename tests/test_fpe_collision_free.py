@@ -204,9 +204,32 @@ def test_fpe_cf_int64(fpe: FormatPreservingEncryption) -> None:
     )
     assert all(len(str(abs(v))) == len(str(abs(o))) for v, o in zip(values, outputs, strict=True))
     assert [fpe.decrypt_int(o) for o in outputs] == values
-    assert all(o == int(fpe.encrypt(str(v))[0]) for v, o in zip(values, outputs, strict=True) if v != INT64_MIN)
+    assert all(o == int(fpe.encrypt(str(v))[0]) for v, o in zip(values, outputs, strict=True))
     assert fpe.encrypt_int(INT64_MIN) == INT64_MIN
     assert fpe.decrypt_int(INT64_MIN) == INT64_MIN
+
+
+def test_fpe_cf_int64_min_string_and_cell_agree(fpe: FormatPreservingEncryption) -> None:
+    """The magnitude 2**63 is a fixed point, so the string path (used by anonymize_cell) stays in range."""
+    assert fpe.encrypt("-9223372036854775808")[0] == "-9223372036854775808"
+    assert fpe.decrypt("-9223372036854775808") == "-9223372036854775808"
+    assert cell.anonymize_cell("-9223372036854775808", "ID", SALT, KEY) == "-9223372036854775808"
+    assert cell.anonymize_cell(INT64_MIN, "ID", SALT, KEY) == str(fpe.encrypt_int(INT64_MIN))
+
+
+def test_fpe_cf_int64_min_magnitude_is_reserved(fpe: FormatPreservingEncryption) -> None:
+    """No other 19-digit value maps onto 2**63, and the values above it stay a permutation."""
+    magnitude = str(-INT64_MIN)
+    rng = random.Random(5)  # noqa: S311
+    above = [str(rng.randint(-INT64_MIN + 1, 10**19 - 1)) for _ in range(3000)]
+    below = [str(rng.randint(10**18, INT64_MAX)) for _ in range(3000)]
+    outputs = [fpe.encrypt(v)[0] for v in [*above, *below]]
+
+    assert magnitude not in outputs
+    assert len(set(outputs)) == len(set(above) | set(below))
+    assert all(int(o) > -INT64_MIN for o in outputs[: len(above)])
+    assert all(int(o) <= INT64_MAX for o in outputs[len(above) :])
+    assert [fpe.decrypt(o) for o in outputs] == [*above, *below]
 
 
 @pytest.mark.parametrize("bad", [True, 1.5, "12", None])
