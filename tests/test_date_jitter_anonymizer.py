@@ -24,6 +24,7 @@ import pandas as pd
 import pytest
 
 from tide2.anonymizers.date_jitter import DateJitterAnonymizer
+from tide2.anonymizers.date_jitter import _age_cap
 from tide2.anonymizers.date_jitter import _shift_cached
 from tide2.anonymizers.guarded import end_note
 from tide2.anonymizers.guarded import guarded
@@ -521,7 +522,7 @@ def _age(on: date, born: date) -> int:
 
 
 class TestAgeCap:
-    """Dates after the max_age-th birthday move to it before the jitter (DOB 1930-06-15, cap 2020-06-15)."""
+    """Dates are shifted, then capped at the shifted max_age-th birthday (DOB 1930-06-15, shifted cap 2020-06-20 at +5)."""
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -595,24 +596,38 @@ class TestAgeCap:
     def test_null_birth_date_turns_the_cap_off(self, birth_date):
         assert _capped("2023-03-15", birth_date=birth_date) == "2023-03-20"
 
-    @pytest.mark.parametrize(
-        ("birth_date", "max_age", "match"),
-        [("not a date", 90, "birth_date"), ("1930-06-15", 0, "max_age"), ("1930-06-15", 151, "max_age")],
-    )
-    def test_invalid_params(self, birth_date, max_age, match):
-        with pytest.raises(ValueError, match=match):
-            _capped("2023-03-15", birth_date=birth_date, max_age=max_age)
+    def test_invalid_birth_date_is_masked(self):
+        with pytest.raises(ValueError, match="birth_date"):
+            _capped("2023-03-15", birth_date="not a date")
         events = start_note()
         try:
-            params = {"entity_type": "DATE", "jitter": 5, "birth_date": birth_date, "max_age": max_age}
+            params = {"entity_type": "DATE", "jitter": 5, "birth_date": "not a date"}
             assert guarded(DateJitterAnonymizer)().operate("2023-03-15", params) == "[DATE]"
         finally:
             end_note()
         assert [kind for kind, _ in events] == ["error"]
 
-    def test_validate_rejects_max_age_out_of_range(self):
-        with pytest.raises(ValueError, match="max_age"):
-            DateJitterAnonymizer().validate({"entity_type": "DATE", "jitter": 5, "max_age": 0})
+    @pytest.mark.parametrize("max_age", [0, -1, 151, "abc", None])
+    def test_invalid_max_age_turns_the_cap_off(self, max_age):
+        """The anonymizer does not check max_age; the job runners reject it before they start."""
+        assert _capped("2023-03-15", max_age=max_age) == "2023-03-20"
+        DateJitterAnonymizer().validate({"entity_type": "DATE", "jitter": 5, "max_age": max_age})
+
+    def test_shift_then_cap_equals_cap_then_shift(self):
+        """Every event after the shifted birthday gets the same date; the order of cap and shift gives one result."""
+        rng = random.Random(3)  # noqa: S311
+        for _ in range(2000):
+            born = date(1903, 1, 1) + timedelta(days=rng.randrange(29000))
+            event = born + timedelta(days=rng.randrange(-500, 42000))
+            jitter = rng.choice([-1, 1]) * rng.randrange(3, 181)
+            cap = _age_cap(born, 90)
+            expected = min(event + timedelta(days=jitter), cap + timedelta(days=jitter))
+            assert _capped(event.isoformat(), birth_date=born, jitter=jitter) == expected.isoformat()
+
+    def test_capped_dates_are_the_shifted_birthday_not_the_real_one(self):
+        # The real 90th birthday is 2020-06-15; capping the shifted date there would give 2020-06-15.
+        assert _capped("2023-03-15") == "2020-06-20"
+        assert _capped("2023-03-15", jitter=-5) == "2020-06-10"
 
     def test_cache_is_keyed_on_the_cap(self):
         _shift_cached.cache_clear()

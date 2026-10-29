@@ -20,7 +20,9 @@ Usage:
 
 Age cap: ``max_age`` is a whole number of years from 1 to 150. A fractional value is
 truncated, not rejected (``90.9`` is 90, and ``150.9`` is accepted as 150), and the
-range is checked after the truncation. Callers should pass integers.
+range is checked after the truncation. Callers should pass integers. The anonymizers
+do not reject an invalid ``max_age``: they leave the cap off. The job runners and the
+CLI call ``validate_max_age`` before they start, so a bad value stops the job.
 """
 
 import functools

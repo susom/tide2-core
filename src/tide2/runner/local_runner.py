@@ -58,6 +58,7 @@ from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
+from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.utils.batch_columns import check_no_patient_uid
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
@@ -1525,9 +1526,10 @@ class LocalJobRunner:
                 (default: "row_id").
             min_jitter_days: Minimum absolute date jitter in days (at least 3)
             max_jitter_days: Maximum absolute date jitter in days
-            max_age: Dates after this birthday are moved to it for notes with a
-                ``birth_date`` column value. Without the column dates are not capped
-                and a warning is logged.
+            max_age: Age at which dates are capped for notes with a ``birth_date``
+                column value (1 to 150; anything else raises ``ValueError`` before
+                Ray starts). Without the column dates are not capped and a warning
+                is logged.
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1542,6 +1544,7 @@ class LocalJobRunner:
         from tide2.actors import create_anonymizer_actor_class
 
         _validate_id_column(_id_column)
+        validate_max_age(max_age)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -2126,6 +2129,7 @@ class LocalJobRunner:
         for stage_kwargs in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, llm_recognizer_kwargs):
             if stage_kwargs and "_id_column" in stage_kwargs:
                 _validate_id_column(stage_kwargs["_id_column"])
+        validate_max_age((anonymizer_kwargs or {}).get("max_age", DEFAULT_MAX_AGE))
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)

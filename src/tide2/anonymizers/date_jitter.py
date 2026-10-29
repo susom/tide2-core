@@ -124,9 +124,13 @@ class DateJitterAnonymizer(Operator):
     century. Dates without a year are shifted in a leap year, so a yearless result
     can differ by one day from a shift in a non-leap year across 29 February.
 
-    With a ``birth_date``, a date after the ``max_age``-th birthday (default 90) is
-    moved to that birthday before the jitter is added, so no shifted date reveals
-    an age over ``max_age``. Yearless and year-only values are not capped.
+    With a ``birth_date``, the jitter is added first and the result is then capped:
+    a shifted date later than the shifted ``max_age``-th birthday (default 90,
+    birthday plus jitter) becomes that date, so every event after it gets the same
+    date and no shifted date reveals an age over ``max_age``. Yearless and year-only
+    values are not capped. An invalid ``max_age`` (outside 1 to 150, or not a number)
+    turns the cap off instead of raising: the anonymizer does not check it, and the
+    job runners reject it before they start.
 
     Weekday names are rotated by the jitter alone. When a date is capped its shift is
     larger than the jitter, so a weekday written next to a capped date can differ from
@@ -245,13 +249,16 @@ class DateJitterAnonymizer(Operator):
                   20xx, the rest 19xx. Optional, default 30.
                 - birth_date (date, datetime, numpy.datetime64 or ISO string): The
                   real birth date. Optional; null or absent turns the age cap off.
-                - max_age (int): Dates after this birthday are moved to it.
-                  Optional, default 90, between 1 and 150.
+                - max_age (int): The age at which dates are capped: after the jitter,
+                  a date later than the shifted ``max_age``-th birthday becomes that
+                  date. Optional, default 90. A value outside 1 to 150 (or not a
+                  number) turns the cap off instead of raising; the job runners
+                  reject it before they start.
 
         Raises:
             ValueError: If ``jitter`` is missing, ``entity_type`` is not a
-                supported type, ``two_digit_year_pivot`` or ``max_age`` is out of
-                range, or ``birth_date`` is not a date.
+                supported type, ``two_digit_year_pivot`` is out of range, or
+                ``birth_date`` is not a date.
 
         Returns:
             The text with each date shifted and its format kept, time and
@@ -276,9 +283,7 @@ class DateJitterAnonymizer(Operator):
             raise ValueError("two_digit_year_pivot must be between 0 and 100.")
 
         birth_date = _parse_birth_date(params.get("birth_date"))
-        cap = None
-        if birth_date is not None:
-            cap = _age_cap(birth_date, validate_max_age(params.get("max_age", DEFAULT_MAX_AGE)))
+        cap = _age_cap_or_none(birth_date, params.get("max_age", DEFAULT_MAX_AGE)) if birth_date is not None else None
 
         shift = _shift_cached if len(text) <= _MAX_CACHED_TEXT_LEN else self._shift
         result, fell_back = shift(text, jitter, pivot, cap)
@@ -289,8 +294,9 @@ class DateJitterAnonymizer(Operator):
     def _shift(self, text: str, jitter: int, pivot: int, cap: date | None = None) -> tuple[str, bool]:
         """Return the shifted ``text`` and whether it fell back to ``[DATE]``.
 
-        Dates with a year after ``cap`` are moved to ``cap`` before the shift. The
-        result depends only on the arguments, so ``operate`` caches it.
+        Dates with a year are shifted by ``jitter`` and then limited to ``cap + jitter``,
+        the shifted age cap. The result depends only on the arguments, so ``operate``
+        caches it.
         """
         if self._is_passthrough(text):
             return text, False
@@ -330,7 +336,7 @@ class DateJitterAnonymizer(Operator):
     def _date_edits(self, match: Match, jitter: int, pivot: int, cap: date | None = None) -> list[tuple[int, int, str]]:
         """Return the (start, end, replacement) edits that shift one matched date.
 
-        A date with a year after ``cap`` is moved to ``cap`` before the shift.
+        A date with a year is limited to ``cap + jitter`` after the shift.
 
         Raises:
             ValueError: If the matched tokens are not a real calendar date.
@@ -351,9 +357,9 @@ class DateJitterAnonymizer(Operator):
         else:
             year = int(year_text)
         parsed = date(year, month, day)
-        if cap is not None and year_text is not None and parsed > cap:
-            parsed = cap
         shifted = parsed + timedelta(days=jitter)
+        if cap is not None and year_text is not None:
+            shifted = min(shifted, cap + timedelta(days=jitter))
 
         # Numeric dates keep zero padding only when every numeric part was padded.
         pad = len(month_text) == _PADDED_LEN and (day_text is None or len(day_text) == _PADDED_LEN)
@@ -456,9 +462,6 @@ class DateJitterAnonymizer(Operator):
         if entity_type not in self.supported_entity_types:
             raise ValueError(f"Entity type '{entity_type}' is not supported for DateJitterAnonymizer.")
 
-        if "max_age" in params:
-            validate_max_age(params["max_age"])
-
     def operator_name(self) -> str:
         """Return the operator name."""
         return "date_jitter"
@@ -516,3 +519,12 @@ def _age_cap(birth_date: date, max_age: int) -> date:
         except ValueError:
             return date(year, 3, 1)
     return birth_date.replace(year=year)
+
+
+def _age_cap_or_none(birth_date: date, max_age: Any) -> date | None:
+    """Return the age cap, or None when ``max_age`` is not a valid age (the cap is then off)."""
+    try:
+        age = validate_max_age(max_age)
+    except (ValueError, TypeError):
+        return None
+    return _age_cap(birth_date, age)

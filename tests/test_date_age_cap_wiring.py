@@ -69,10 +69,11 @@ def test_cell_matches_process_note_with_birth_date() -> None:
         assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001", birth_date=DOB) == expected
 
 
-def test_cell_max_age_is_validated_when_a_birth_date_uses_it() -> None:
-    # Without a birth date max_age is not used, so it cannot change the result; with one, an invalid value is masked.
+def test_cell_invalid_max_age_turns_the_cap_off() -> None:
+    # The anonymizers do not check max_age; the job runners reject an invalid value before they start.
     assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, max_age=0) == "2023-03-20"
-    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=0) == "[DATE]"
+    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=0) == "2023-03-20"
+    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=-3) == "2023-03-20"
     # A fractional age is truncated, not rejected.
     assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=90.9) == "2020-06-20"
 
@@ -158,10 +159,23 @@ def test_worker_max_age_and_factory() -> None:
     assert worker_cls().max_age == 80
 
 
-@pytest.mark.parametrize("max_age", [0, 151])
-def test_worker_rejects_invalid_max_age(max_age: int) -> None:
+@pytest.mark.parametrize("max_age", [0, -1, 151])
+def test_worker_invalid_max_age_turns_the_cap_off(max_age: int) -> None:
+    assert _worker(max_age=max_age).process_batch(_batch([DOB]))["anonymized_note_text"] == ["Seen 2023-03-20."]
+
+
+@pytest.mark.parametrize("max_age", [0, -1, 151])
+def test_runner_rejects_invalid_max_age_before_ray_starts(monkeypatch: pytest.MonkeyPatch, max_age: int) -> None:
+    runner = local_runner.LocalJobRunner()
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("the job started")
+
+    monkeypatch.setattr(runner, "_init_ray", fail)
     with pytest.raises(ValueError, match="max_age"):
-        _worker(max_age=max_age)
+        runner.run_anonymization("in", "out", salt_hex="00" * 32, key_hex="11" * 32, max_age=max_age)
+    with pytest.raises(ValueError, match="max_age"):
+        runner.run_pipeline("in", "out", "model", anonymizer_kwargs={"max_age": max_age})
 
 
 def test_worker_warns_once_then_debug_for_null_birth_dates(caplog: pytest.LogCaptureFixture) -> None:
@@ -287,7 +301,7 @@ def test_cli_forwards_max_age_to_pipeline(fake_runner: MagicMock) -> None:
     assert fake_runner.run_pipeline.call_args.kwargs["anonymizer_kwargs"]["max_age"] == 95
 
 
-@pytest.mark.parametrize("max_age", ["0", "151"])
+@pytest.mark.parametrize("max_age", ["0", "-5", "151"])
 def test_cli_rejects_invalid_max_age(monkeypatch: pytest.MonkeyPatch, max_age: str) -> None:
     monkeypatch.setattr(cli, "cmd_run", lambda _args: None)
     with pytest.raises(SystemExit) as exc:

@@ -119,7 +119,8 @@ def anonymize_cell(
         birth_date: Real birth date of the patient. Dates after the ``max_age``-th
             birthday are moved to it; without it dates are not capped (a warning is
             logged once per process).
-        max_age: Age at which dates are capped.
+        max_age: Age at which dates are capped. A value outside 1 to 150 turns the cap
+            off; it is not checked here.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
