@@ -50,7 +50,8 @@ FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     }
 )
 DATE_ENTITY_TYPES: frozenset[str] = frozenset({"DATE", "DATE_TIME"})
-SUPPORTED_ENTITY_TYPES: frozenset[str] = FPE_ENTITY_TYPES | DATE_ENTITY_TYPES
+DATE_PART_ENTITY_TYPES: frozenset[str] = frozenset({"DATE_DAY", "DATE_MONTH", "DATE_YEAR"})
+SUPPORTED_ENTITY_TYPES: frozenset[str] = FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES
 
 
 @functools.cache
@@ -104,6 +105,7 @@ def anonymize_cell(
     min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
     birth_date: Any = None,
     max_age: int = DEFAULT_MAX_AGE,
+    full_date: Any = None,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -121,6 +123,13 @@ def anonymize_cell(
             logged once per process).
         max_age: Age at which dates are capped. A value outside 1 to 150 turns the cap
             off; it is not checked here.
+        full_date: Real full date of the row. Required for the part types
+            (``DATE_DAY``, ``DATE_MONTH``, ``DATE_YEAR``), where ``value`` is the day,
+            month or year held on its own and the result is that part of the shifted
+            ``full_date``; a null ``full_date`` gives ``[DATE]``. Ignored otherwise. To keep
+            the parts of a row consistent with each other and with the full-date column,
+            pass the same non-null ``patient_id`` (and settings) or the same ``jitter``
+            to every call; without either, each call draws a different random shift.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -135,6 +144,9 @@ def anonymize_cell(
     if is_null(value):
         return None
 
+    if entity_type in DATE_PART_ENTITY_TYPES and isinstance(value, float) and value.is_integer():
+        # A nullable integer column read as float holds 3.0, not 3.
+        value = int(value)
     text = str(value)
     if text == "":
         return ""
@@ -144,7 +156,7 @@ def anonymize_cell(
         return mask("ENTITY")
 
     fpe, date_jitter = _operators()
-    if entity_type in DATE_ENTITY_TYPES:
+    if entity_type in DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES:
         if is_null(jitter):
             resolved = resolve_date_jitter(patient_id, salt, key, max_jitter_days, min_jitter_days)
         else:
@@ -155,6 +167,8 @@ def anonymize_cell(
         else:
             params["birth_date"] = birth_date
             params["max_age"] = max_age
+        if entity_type in DATE_PART_ENTITY_TYPES:
+            params["full_date"] = full_date
     else:
         operator, params = fpe, {"salt": salt, "key": key}
     params["entity_type"] = entity_type
