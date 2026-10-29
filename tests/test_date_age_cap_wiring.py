@@ -1,6 +1,7 @@
 """Tests for the birth_date / max_age age cap wiring: cells, actors, stage columns, runner and CLI."""
 
 import logging
+from datetime import date
 from unittest.mock import MagicMock
 
 import pyarrow as pa
@@ -21,6 +22,7 @@ from tide2.runner.local_runner import _resolve_merged_batch
 from tide2.runner.local_runner import validate_stage_columns
 from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.batch_columns import type_columns
+from tide2.utils.nulls import is_null_or_blank
 
 SALT = b"\x01" * 32
 KEY = b"\x02" * 32
@@ -80,12 +82,55 @@ def test_cell_warns_once_without_birth_date(caplog: pytest.LogCaptureFixture) ->
             assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5) == "2023-03-20"
         cell.anonymize_cell("48291037", "MRN", SALT, KEY)
     assert [r.getMessage() for r in caplog.records] == [
-        "anonymize_cell called without birth_date: dates are shifted but not capped at age 90; "
+        "anonymize_cell called without birth_date: dates are shifted but not capped at the maximum age; "
         "ages over 89 may be revealed"
     ]
 
 
 # --- anonymizer actor ----------------------------------------------------
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "NaT", "<NA>", None])
+def test_cell_warns_for_blank_birth_dates(caplog: pytest.LogCaptureFixture, blank: str | None) -> None:
+    cell._warn_no_birth_date.cache_clear()
+    with caplog.at_level(logging.WARNING, logger=cell.__name__):
+        assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=blank) == "2023-03-20"
+    assert len(caplog.records) == 1
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "NaT"])
+def test_worker_warns_for_blank_birth_dates(caplog: pytest.LogCaptureFixture, blank: str) -> None:
+    with caplog.at_level(logging.WARNING, logger="tide2.actors.anonymizer"):
+        out = _worker().process_batch(_batch([blank]))
+    assert out["anonymized_note_text"] == ["Seen 2023-03-20."]
+    assert [r.getMessage() for r in caplog.records if "without birth_date" in r.getMessage()] == [
+        "1 note(s) without birth_date: dates are shifted but not capped at the maximum age; "
+        "ages over 89 may be revealed"
+    ]
+
+
+def test_warnings_do_not_log_note_identifiers_or_dates(caplog: pytest.LogCaptureFixture) -> None:
+    worker = _worker()
+    text_hash = worker.compute_text_hash(NOTE)
+    cell._warn_no_birth_date.cache_clear()
+    with caplog.at_level(logging.DEBUG):
+        worker.process_batch(_batch([None]))
+        cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB)
+        cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5)
+        local_runner._warn_if_no_birth_date(["note_text"])
+    assert caplog.records
+    for needle in (text_hash[:16], DOB, "2023-03-15", NOTE):
+        assert needle not in caplog.text
+
+
+def test_is_null_or_blank() -> None:
+    for value in (None, float("nan"), "", "  ", "NaT", "<NA>"):
+        assert is_null_or_blank(value)
+    for value in ("1930-06-15", "nan", 0, date(1930, 6, 15)):
+        assert not is_null_or_blank(value)
+
+
+# --- anonymizer actor (continued) ----------------------------------------
 
 
 def test_worker_caps_with_birth_date_and_drops_the_column() -> None:
@@ -203,11 +248,12 @@ def test_stage_contracts_carry_birth_date_but_the_sink_does_not() -> None:
 
 def test_runner_warns_when_the_column_is_missing(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger=local_runner.__name__):
-        local_runner._warn_if_no_birth_date(["note_text", "BIRTH_DATE"], "in/", 90)
+        local_runner._warn_if_no_birth_date(["note_text", "BIRTH_DATE"])
         assert not caplog.records
-        local_runner._warn_if_no_birth_date(["note_text", "jitter"], "in/", 90)
+        local_runner._warn_if_no_birth_date(["note_text", "jitter"])
     assert [r.getMessage() for r in caplog.records] == [
-        "No birth_date column in in/: dates are shifted but not capped at age 90; ages over 89 may be revealed"
+        "No birth_date column in the input: dates are shifted but not capped at the maximum age; "
+        "ages over 89 may be revealed"
     ]
 
 

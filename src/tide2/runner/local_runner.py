@@ -57,7 +57,7 @@ from ray.data.dataset import Dataset
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
-from tide2.cryptographic.date_jitter import NO_BIRTH_DATE_WARNING
+from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.utils.batch_columns import check_no_patient_uid
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
@@ -628,10 +628,10 @@ def _check_streamed_row_parity(input_rows: int, output_rows: int) -> None:
     )
 
 
-def _warn_if_no_birth_date(columns: Iterable[str], location: Any, max_age: int) -> None:
+def _warn_if_no_birth_date(columns: Iterable[str]) -> None:
     """Warn once for a run whose input has no ``birth_date`` column, so dates are not age-capped."""
     if "birth_date" not in {column.lower() for column in columns}:
-        logger.warning("No birth_date column in %s: " + NO_BIRTH_DATE_WARNING, location, max_age)
+        logger.warning("No birth_date column in the input: %s", UNCAPPED_DATES_WARNING)
 
 
 def _streamed_source_columns(contracts: list[tuple[str, "StageColumns"]]) -> frozenset[str]:
@@ -1596,7 +1596,7 @@ class LocalJobRunner:
             "stage_status_json",
         ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
-        _warn_if_no_birth_date(columns, input_path, max_age)
+        _warn_if_no_birth_date(columns)
 
         ctx = ray.data.DataContext.get_current()
         logger.info("Anonymization job starting")
@@ -2563,9 +2563,7 @@ class LocalJobRunner:
             contracts.append(("recognizer", RECOGNIZER_STAGE_COLUMNS))
         contracts.append(("anonymizer", ANONYMIZER_STAGE_COLUMNS))
         final_columns = validate_stage_columns(input_info.columns | {"text_hash", "row_id"}, contracts)
-        _warn_if_no_birth_date(
-            input_info.columns, input_files[0], int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE))
-        )
+        _warn_if_no_birth_date(input_info.columns)
 
         # --- Resolve pools and CPU budget, then admit or fail fast ---
         pool_minimums: dict[str, float] = {}

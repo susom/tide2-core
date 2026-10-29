@@ -25,6 +25,7 @@ from tide2.anonymizers.guarded import record_fallback
 from tide2.cryptographic.date_jitter import ABSOLUTE_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import validate_max_age
+from tide2.utils.nulls import BLANK_NULL_STRINGS
 from tide2.utils.nulls import is_null
 
 # Ordinal suffix: 11th-13th (and the 10-20 band) always take "th".
@@ -119,6 +120,10 @@ class DateJitterAnonymizer(Operator):
     With a ``birth_date``, a date after the ``max_age``-th birthday (default 90) is
     moved to that birthday before the jitter is added, so no shifted date reveals
     an age over ``max_age``. Yearless and year-only values are not capped.
+
+    Weekday names are rotated by the jitter alone. When a date is capped its shift is
+    larger than the jitter, so a weekday written next to a capped date can differ from
+    the weekday of the shifted date. This is a known limit and is not corrected.
     """
 
     # Presidio builds a new operator for every span, so per-instance setup is kept minimal.
@@ -486,7 +491,7 @@ def _parse_birth_date(value: Any) -> date | None:
 def _parse_iso_birth_date(value: str) -> date | None:
     """Return the date of an ISO string, or None when it is blank or a null marker."""
     text = value.strip()
-    if text in ("", "NaT", "<NA>"):
+    if text in BLANK_NULL_STRINGS:
         return None
     try:
         return datetime.fromisoformat(text).date()
