@@ -17,16 +17,36 @@ Usage:
         min_jitter_days=3,
     )
     # Returns an integer between -180 and +180 (excluding -2 to +2)
+
+Age cap: ``max_age`` is a whole number of years from 1 to 150. A fractional value is
+truncated, not rejected (``90.9`` is 90, and ``150.9`` is accepted as 150), and the
+range is checked after the truncation. Callers should pass integers. The anonymizers
+do not reject an invalid ``max_age``: they leave the cap off. The job runners and the
+CLI call ``validate_max_age`` before they start, so a bad value stops the job.
 """
 
+import functools
 import hashlib
 import hmac
+import secrets
 import struct
+from typing import Any
+
+from tide2.utils.nulls import is_null
 
 # Default jitter range constants
 DEFAULT_MAX_JITTER_DAYS = 180
 DEFAULT_MIN_JITTER_DAYS = 3
 ABSOLUTE_MIN_JITTER_DAYS = 3
+_JITTER_CACHE_SIZE = 65536
+_NULL_PATIENT_STRINGS = frozenset({"nan", "none", "null", ""})
+# Dates after this birthday are moved to it (HIPAA Safe Harbor "90 or older").
+DEFAULT_MAX_AGE = 90
+_MIN_MAX_AGE = 1
+_MAX_MAX_AGE = 150
+# Logged by every caller that shifts dates without a birth date. A plain constant: it is
+# logged without arguments so no row-level or birth-date-related value reaches the log.
+UNCAPPED_DATES_WARNING = "dates are shifted but not capped at the maximum age; ages over 89 may be revealed"
 
 # Key size requirements
 REQUIRED_KEY_SIZE = 32
@@ -135,6 +155,71 @@ def derive_date_jitter(
     return magnitude if is_positive else -magnitude
 
 
+def random_date_jitter(
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+) -> int:
+    """
+    Return a random date jitter with ``min_jitter_days <= abs(jitter) <= max_jitter_days``.
+
+    Uses ``secrets``. The magnitude is uniform in the range and the sign is uniform, the same
+    distribution ``derive_date_jitter`` produces, so no value falls below the minimum.
+
+    Args:
+        max_jitter_days: Maximum absolute jitter in days (default: 180).
+        min_jitter_days: Minimum absolute jitter in days (default: 3, the lowest allowed).
+
+    Returns:
+        Integer jitter in days.
+
+    Raises:
+        ValueError: If the range is invalid.
+    """
+    is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
+    if not is_valid:
+        raise ValueError(message)
+    magnitude = min_jitter_days + secrets.randbelow(max_jitter_days - min_jitter_days + 1)
+    return magnitude if secrets.randbelow(2) == 0 else -magnitude
+
+
+@functools.lru_cache(maxsize=_JITTER_CACHE_SIZE)
+def _cached_derive(patient_id: str, salt: bytes, key: bytes, max_jitter_days: int, min_jitter_days: int) -> int:
+    return derive_date_jitter(patient_id, salt, key, max_jitter_days, min_jitter_days)
+
+
+def resolve_date_jitter(
+    patient_id: Any,
+    salt: bytes,
+    key: bytes,
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+) -> int:
+    """
+    Return a patient's date jitter: derived when the patient is known, random when it is null.
+
+    A null patient is ``None``, NaN, or a string that is blank, ``nan``, ``none`` or ``null``
+    (case-insensitive, after stripping). Both paths use the same range.
+
+    Args:
+        patient_id: Patient identifier, or a null value.
+        salt: 32-byte salt.
+        key: 32-byte key.
+        max_jitter_days: Maximum absolute jitter in days (default: 180).
+        min_jitter_days: Minimum absolute jitter in days (default: 3).
+
+    Returns:
+        Integer jitter in days.
+
+    Raises:
+        ValueError: If the range or the keys are invalid.
+    """
+    if not is_null(patient_id):
+        patient = str(patient_id).strip()
+        if patient.lower() not in _NULL_PATIENT_STRINGS:
+            return _cached_derive(patient, salt, key, max_jitter_days, min_jitter_days)
+    return random_date_jitter(max_jitter_days, min_jitter_days)
+
+
 def derive_date_jitter_batch(
     patient_ids: list[str],
     salt: bytes,
@@ -216,3 +301,17 @@ def validate_jitter_parameters(
         )
 
     return (True, None)
+
+
+def validate_max_age(value: Any) -> int:
+    """Return ``value`` as an int age between 1 and 150.
+
+    A fractional value is truncated before the range check (``90.9`` becomes 90).
+
+    Raises:
+        ValueError: If ``value`` is not an integer in range.
+    """
+    max_age = int(value)
+    if not _MIN_MAX_AGE <= max_age <= _MAX_MAX_AGE:
+        raise ValueError(f"max_age must be between {_MIN_MAX_AGE} and {_MAX_MAX_AGE}, got {max_age}.")
+    return max_age

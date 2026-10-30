@@ -36,7 +36,6 @@ Usage:
 
 from contextlib import contextmanager
 
-from presidio_analyzer import EntityRecognizer
 from presidio_anonymizer import AnonymizerEngine
 
 # Presidio renamed this private method in 2.2.363. Try the new name first, then
@@ -219,8 +218,9 @@ def no_whitespace_merging():
 # Patch 2: Disable O(n²) remove_duplicates in AnalyzerEngine
 # ============================================================================
 
-# Store original method for restoration
-_original_remove_duplicates = EntityRecognizer.remove_duplicates
+# Original method, captured when the patch is applied. presidio_analyzer is imported inside the
+# functions: it pulls spaCy and torch, which the anonymizer side must not load.
+_original_remove_duplicates = None
 
 # Flag to track if patch is applied
 _remove_duplicates_patched = False
@@ -238,17 +238,23 @@ def patch_remove_duplicates() -> None:
 
     This is a global patch that affects all AnalyzerEngine instances.
     """
-    global _remove_duplicates_patched  # noqa: PLW0603  # shared across Ray workers via module globals
+    global _remove_duplicates_patched, _original_remove_duplicates  # noqa: PLW0603  # shared across Ray workers via module globals
     if not _remove_duplicates_patched:
+        from presidio_analyzer import EntityRecognizer
+
+        _original_remove_duplicates = EntityRecognizer.remove_duplicates
         EntityRecognizer.remove_duplicates = staticmethod(lambda results: results)
         _remove_duplicates_patched = True
 
 
 def unpatch_remove_duplicates() -> None:
     """Restore Presidio's original remove_duplicates method."""
-    global _remove_duplicates_patched  # noqa: PLW0603  # shared across Ray workers via module globals
+    global _remove_duplicates_patched, _original_remove_duplicates  # noqa: PLW0603  # shared across Ray workers via module globals
     if _remove_duplicates_patched:
+        from presidio_analyzer import EntityRecognizer
+
         EntityRecognizer.remove_duplicates = _original_remove_duplicates
+        _original_remove_duplicates = None
         _remove_duplicates_patched = False
 
 
