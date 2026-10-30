@@ -180,7 +180,8 @@ def anonymize_cell(
         acc_num_salt: Salt for accession number hashing of ``ACC_NUM`` spans (``FREE_TEXT`` only).
         acc_num_study_id: Study ID for accession number hashing (``FREE_TEXT`` only).
         zip_mode: ``"strict"`` or ``"relaxed"`` (the default, as in ``AnonymizerWorker``);
-            used for ``ZIP_CODE`` only. An integer ZIP is padded to 5 digits (see ``ZipCodeAnonymizer``).
+            used for ``ZIP_CODE`` and the ZIP codes in ``FREE_TEXT``. An integer ZIP is padded to 5 digits
+            (see ``ZipCodeAnonymizer``).
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -189,12 +190,12 @@ def anonymize_cell(
         organization) give random, non-deterministic values.
 
     Raises:
-        ValueError: If ``entity_type`` is missing or not supported, or ``entity_type`` is ``ZIP_CODE`` and
-            ``zip_mode`` is invalid.
+        ValueError: If ``entity_type`` is missing or not supported, or ``entity_type`` is ``ZIP_CODE`` or
+            ``FREE_TEXT`` and ``zip_mode`` is invalid.
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
-    if entity_type in ZIP_ENTITY_TYPES:
+    if entity_type in ZIP_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES:
         from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE  # see _zip_operator
         from tide2.anonymizers.zip_code import validate_zip_mode
 
@@ -229,6 +230,7 @@ def anonymize_cell(
             max_age,
             acc_num_salt,
             acc_num_study_id,
+            zip_mode,
         )
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
