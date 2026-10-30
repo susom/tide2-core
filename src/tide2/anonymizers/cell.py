@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import numbers
 from typing import Any
 
 from presidio_anonymizer.operators import Operator
@@ -53,9 +54,43 @@ FPE_ENTITY_TYPES: frozenset[str] = frozenset(
 DATE_ENTITY_TYPES: frozenset[str] = frozenset({"DATE", "DATE_TIME"})
 DATE_PART_ENTITY_TYPES: frozenset[str] = frozenset({"DATE_DAY", "DATE_MONTH", "DATE_YEAR"})
 FREE_TEXT_ENTITY_TYPES: frozenset[str] = frozenset({"FREE_TEXT"})
+ZIP_ENTITY_TYPES: frozenset[str] = frozenset({"ZIP_CODE"})
 SUPPORTED_ENTITY_TYPES: frozenset[str] = (
-    FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES
+    FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES | ZIP_ENTITY_TYPES
 )
+
+MAX_ZIP5 = 99999
+_warned_integer_zip = False
+
+
+@functools.cache
+def _zip_operator() -> Operator:
+    """Return the guarded ZIP operator, built once per process.
+
+    ``zip_code`` is imported here, not at module level, so a bundle that has no ZIP module or population file
+    still runs every other entity type.
+    """
+    from tide2.anonymizers.zip_code import ZipCodeAnonymizer
+
+    return guarded(ZipCodeAnonymizer)()
+
+
+def _zip_text(value: Any) -> str:
+    """Return the text of a ZIP cell, restoring the leading zeros an integer column has lost.
+
+    A ZIP stored as an integer (``2139`` for ``02139``) is left-padded to 5 digits and a warning is logged once
+    per process. Any other value is returned as text; a value that is not a ZIP is masked by the operator.
+    """
+    global _warned_integer_zip  # noqa: PLW0603 # one warning per process
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool) and 0 <= value <= MAX_ZIP5:
+        if not _warned_integer_zip:
+            _warned_integer_zip = True
+            logger.warning(
+                "ZIP code given as an integer: padding to 5 digits. The column lost its leading zeros upstream; "
+                "store ZIP codes as strings."
+            )
+        return f"{int(value):05d}"
+    return str(value)
 
 
 @functools.cache
@@ -112,6 +147,7 @@ def anonymize_cell(
     recognizer_results: Any = None,
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
+    zip_mode: str | None = None,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -141,6 +177,9 @@ def anonymize_cell(
             ignored otherwise.
         acc_num_salt: Salt for accession number hashing of ``ACC_NUM`` spans (``FREE_TEXT`` only).
         acc_num_study_id: Study ID for accession number hashing (``FREE_TEXT`` only).
+        zip_mode: ``"strict"`` or ``"relaxed"`` (the default, as in ``AnonymizerWorker``);
+            used for ``ZIP_CODE`` and the ZIP codes in ``FREE_TEXT``. An integer ZIP is padded to 5 digits
+            (see ``ZipCodeAnonymizer``).
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -149,10 +188,17 @@ def anonymize_cell(
         organization) give random, non-deterministic values.
 
     Raises:
-        ValueError: If ``entity_type`` is missing or not supported.
+        ValueError: If ``entity_type`` is missing or not supported, or ``entity_type`` is ``ZIP_CODE`` or
+            ``FREE_TEXT`` and ``zip_mode`` is invalid.
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
+    if entity_type in ZIP_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES:
+        from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE  # see _zip_operator
+        from tide2.anonymizers.zip_code import validate_zip_mode
+
+        zip_mode = DEFAULT_ZIP_MODE if zip_mode is None else zip_mode
+        validate_zip_mode(zip_mode)
 
     if is_null(value):
         return None
@@ -160,7 +206,7 @@ def anonymize_cell(
     if entity_type in DATE_PART_ENTITY_TYPES and isinstance(value, float) and value.is_integer():
         # A nullable integer column read as float holds 3.0, not 3.
         value = int(value)
-    text = str(value)
+    text = _zip_text(value) if entity_type in ZIP_ENTITY_TYPES else str(value)
     if text == "":
         return ""
 
@@ -182,11 +228,15 @@ def anonymize_cell(
             max_age,
             acc_num_salt,
             acc_num_study_id,
+            zip_mode,
         )
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
     if safe_entity_type(entity_type, text) != entity_type:
         return mask("ENTITY")
+
+    if entity_type in ZIP_ENTITY_TYPES:
+        return _zip_operator().operate(text, {"mode": zip_mode, "entity_type": entity_type})
 
     fpe, date_jitter = _operators()
     if entity_type in DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES:

@@ -192,6 +192,14 @@ def _validate_id_column(id_column: str) -> None:
         raise ValueError(f"Invalid _id_column: {id_column!r}. Must be one of {SUPPORTED_ID_COLUMNS}.")
 
 
+def _validate_zip_mode(zip_mode: str) -> None:
+    """Fail before Ray starts if ``zip_mode`` is not a Safe Harbor ZIP mode."""
+    from tide2.anonymizers.zip_code import ZIP_MODES
+
+    if zip_mode not in ZIP_MODES:
+        raise ValueError(f"Invalid zip_mode: {zip_mode!r}. Must be one of {ZIP_MODES}.")
+
+
 DEFAULT_ROW_ID_PATIENT_ID = "None"
 
 
@@ -1477,6 +1485,7 @@ class LocalJobRunner:
         min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
+        zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1530,6 +1539,8 @@ class LocalJobRunner:
                 column value (1 to 150; anything else raises ``ValueError`` before
                 Ray starts). Without the column dates are not capped and a warning
                 is logged.
+            zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
+                ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1543,6 +1554,7 @@ class LocalJobRunner:
         """
         from tide2.actors import create_anonymizer_actor_class
 
+        _validate_zip_mode(zip_mode)
         _validate_id_column(_id_column)
         validate_max_age(max_age)
         self._init_ray()
@@ -1622,6 +1634,7 @@ class LocalJobRunner:
             min_jitter_days=min_jitter_days,
             max_jitter_days=max_jitter_days,
             max_age=max_age,
+            zip_mode=zip_mode,
         )
 
         try:
@@ -2188,6 +2201,7 @@ class LocalJobRunner:
         t_kw = dict(transformer_kwargs or {})
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
+        _validate_zip_mode(a_kw.get("zip_mode", "relaxed"))
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------
@@ -2736,6 +2750,7 @@ class LocalJobRunner:
                 min_jitter_days=int(anonymizer_kwargs.get("min_jitter_days", DEFAULT_MIN_JITTER_DAYS)),
                 max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
                 max_age=int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE)),
+                zip_mode=anonymizer_kwargs.get("zip_mode", "relaxed"),
             )
             ds = self.build_anonymizer_stage(
                 ds,
