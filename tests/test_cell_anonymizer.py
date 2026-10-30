@@ -28,6 +28,7 @@ CASES = [
     _case("fpe_short_5digits", "59201", "ID"),
     _case("fpe_6digits", "604821", "HAR", "FAKE-P0002"),
     _case("fpe_7digits", "7381920", "HAR", "FAKE-P0002"),
+    _case("fpe_acc_num", "ACC123456", "ACC_NUM"),
     _case("fpe_csn_10digits", "1312849201", "CSN_ID"),
     _case("fpe_19digits", "9182736455463728191", "ID", "FAKE-P0002"),
     _case("fpe_alnum_with_separators", "AB-9021-X7", "MEDICAL_LICENSE"),
@@ -99,7 +100,7 @@ def test_numeric_value_is_stringified() -> None:
     assert cell.anonymize_cell(48291037, "MRN", SALT, KEY) == cell.anonymize_cell("48291037", "MRN", SALT, KEY)
 
 
-@pytest.mark.parametrize("entity_type", ["PERSON", "ACC_NUM", "", None])
+@pytest.mark.parametrize("entity_type", ["PERSON", "", None])
 def test_unsupported_entity_type_raises(entity_type: str | None) -> None:
     with pytest.raises(ValueError, match="Unsupported entity_type"):
         cell.anonymize_cell("x", entity_type, SALT, KEY)

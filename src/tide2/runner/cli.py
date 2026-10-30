@@ -117,6 +117,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 min_jitter_days=args.min_jitter_days,
                 max_jitter_days=args.max_jitter_days,
                 max_age=args.max_age,
+                acc_num_hash=getattr(args, "acc_num_hash", False),
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -237,6 +238,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw: dict = {}
             if getattr(args, "jitter_required", False):
                 a_kw["jitter_required"] = True
+            if getattr(args, "acc_num_hash", False):
+                a_kw["acc_num_hash"] = True
             a_kw["min_jitter_days"] = args.min_jitter_days
             a_kw["max_jitter_days"] = args.max_jitter_days
             a_kw["max_age"] = args.max_age
@@ -487,8 +490,14 @@ Examples:
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")
-    run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (anonymizer jobs)")
-    run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (anonymizer jobs)")
+    run_p.add_argument(
+        "--acc-num-hash",
+        action="store_true",
+        help="Hash ACC_NUM with the BigQuery-compatible SHA256 instead of the default hips_alphanumeric "
+        "(anonymizer/pipeline jobs)",
+    )
+    run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (requires --acc-num-hash)")
+    run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (requires --acc-num-hash)")
     run_p.add_argument(
         "--jitter-required",
         action="store_true",
