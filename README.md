@@ -114,6 +114,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Faker Integration**: Realistic fake data generation
 - **Date Jittering**: Deterministic, privacy-preserving date shifts derived from patient keys
 - **Age Grouping**: Age range categorization
+- **ZIP code Safe Harbor**: HIPAA Safe Harbor ZIP reduction (3-digit prefix, or `000` for small areas) from 2020 Census populations, for ZIP entities and the ZIP inside addresses; see [ZIP code anonymization](#zip-code-anonymization-hipaa-safe-harbor)
 
 ### Cryptographic Protection
 - **Format-Preserving Encryption (FPE)**: Maintains data format during encryption
@@ -190,6 +191,10 @@ tide2-runner run pipeline -i ./data/input.parquet -o ./data/output \
 # Run anonymization
 tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
     --salt /path/to/salt.bin --key /path/to/key.bin
+
+# Run anonymization with strict HIPAA Safe Harbor ZIP codes (3-digit prefix, or 000 for small areas)
+tide2-runner run anonymizer -i ./data/recognized -o ./data/anonymized \
+    --salt /path/to/salt.bin --key /path/to/key.bin --zip-mode strict
 
 # Run on a small box (e.g. 2-CPU Google Colab) WITHOUT deadlocking. Two fixes
 # are required together (see below): fractional CPUs AND --no-checkpoint.
@@ -429,6 +434,31 @@ stage's *concurrent* operator reservations within the available CPUs (C = total 
 
 On a machine with 4 CPUs or fewer the pipeline applies both fixes for you (the `tiny`
 rule) — see *Hardware autotuning* below. The knobs above remain the way to override it.
+
+### ZIP code anonymization (HIPAA Safe Harbor)
+
+`--zip-mode` (anonymizer and pipeline jobs; also `zip_mode` in the YAML config) chooses how ZIP codes are reduced. There are two modes, `strict` and `relaxed`, and `relaxed` is the one used when the option is not given:
+
+| Mode | Rule | Safe Harbor compliant |
+|---|---|---|
+| `strict` | The 3-digit prefix if all ZIPs sharing it have **more than 20,000** people, else `000` | Yes (45 CFR §164.514(b)(2)(i)(B)) |
+| `relaxed` (used when `--zip-mode` is not given) | The full 5-digit ZIP if its 3-digit area has more than 20,000 people, else the real 3-digit prefix | **No**: use only under an expert determination or a data use agreement that allows 5-digit ZIPs. Pass `--zip-mode strict` for Safe Harbor |
+
+| Input | `strict` | `relaxed` |
+|---|---|---|
+| `94305-1234` (large area) | `943` | `94305` (the +4 is always dropped) |
+| `02139` (large area, leading zero) | `021` | `02139` |
+| `03601` (area of 20,000 or fewer) | `000` | `036` |
+| `2139`, `ABCDE` (not a 5-digit ZIP) | `[ZIP_CODE]` | `[ZIP_CODE]` |
+
+A value that is not a 5-digit ZIP is masked and its note gets `processing_status` `failed` (see [When a note fails](#when-a-note-fails)); the other entities in the note are still anonymized.
+
+- **Population data**: `src/tide2/resources/zip3_population_2020.tsv`, the 2020 Census total population of each ZIP Code Tabulation Area, summed by the first three digits (894 prefixes, 18 of them at or below 20,000). A prefix missing from the table counts as 0, so it is restricted. Rebuild it with `CENSUS_API_KEY=... uv run python scripts/zip/build_zip3_population.py` (free key at <https://api.census.gov/data/key_signup.html>); never commit the key.
+- **Leading zeros**: ZIPs are handled as strings. `02139` keeps its zero and the restricted prefix is the string `000`. A 3- or 4-digit value is never zero-padded; it is masked. Store ZIP columns as strings: for the cell API (`anonymize_cell`) an integer ZIP is padded back to 5 digits and a warning is logged, but that cannot recover a ZIP that lost its zeros elsewhere.
+- **Other labels**: the model labels `ZIP` and `ZIPCODE` use the same rule as `ZIP_CODE`.
+- **ZIP inside an address**: in a detected full address (`LOCATION`, `HOSPITAL`, `VENDOR`) the ZIP follows the same mode, for example `123 Main Street, Cambridge, MA 02139` gives `<new street>, <new city>, MA 021` in strict mode and `MA 02139` in relaxed mode. A ZIP in an address that is not a 5-digit ZIP is replaced by `[ZIP_CODE]`, like a standalone one, and the note's `processing_status` is `failed` (see [When a note fails](#when-a-note-fails)); the rest of the address is still anonymized. The street, number and city are still replaced by `hips_location`; the state is kept.
+- **Behavior change**: before `--zip-mode`, a `ZIP_CODE` entity was masked as `[ZIP_CODE]` and the ZIP inside an address was replaced by a random real ZIP. Both now follow the mode.
+- **Python**: `anonymize_zip("02139", "strict")`, or `anonymize_cell(value, "ZIP_CODE", salt, key, zip_mode=...)` for a table cell (`zip_mode` defaults to `relaxed`).
 
 ### Standalone Stage Execution (Python API)
 
@@ -803,7 +833,9 @@ Python, call `tide2.runner.utils.write_visualizer_json(output_dir, json_dir=None
 
 Running the anonymizers on BigQuery columns through a Python UDF lives in the separate `tide2-bq` repository. It reuses
 `tide2.anonymizers.cell.anonymize_cell`, which anonymizes one table cell the way `AnonymizerWorker` anonymizes a
-one-span note.
+one-span note. Its `ZIP_CODE` support (`zip_mode=...`) loads `tide2/anonymizers/zip_code.py` and
+`tide2/resources/zip3_population_2020.tsv` only when a ZIP is anonymized, so a bundle for other entity types does not
+need them.
 
 The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason column) with spans that the recognition
 stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
