@@ -1477,6 +1477,7 @@ class LocalJobRunner:
         min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
+        acc_num_hash: bool = False,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1530,6 +1531,8 @@ class LocalJobRunner:
                 column value (1 to 150; anything else raises ``ValueError`` before
                 Ray starts). Without the column dates are not capped and a warning
                 is logged.
+            acc_num_hash: If True, hash ACC_NUM with accession_number_hash
+                (``acc_num_salt``/``acc_num_study_id``); otherwise use hips_alphanumeric.
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1622,6 +1625,7 @@ class LocalJobRunner:
             min_jitter_days=min_jitter_days,
             max_jitter_days=max_jitter_days,
             max_age=max_age,
+            acc_num_hash=acc_num_hash,
         )
 
         try:
@@ -2736,6 +2740,7 @@ class LocalJobRunner:
                 min_jitter_days=int(anonymizer_kwargs.get("min_jitter_days", DEFAULT_MIN_JITTER_DAYS)),
                 max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
                 max_age=int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE)),
+                acc_num_hash=bool(anonymizer_kwargs.get("acc_num_hash", False)),
             )
             ds = self.build_anonymizer_stage(
                 ds,

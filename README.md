@@ -110,7 +110,8 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Anonymization Strategies
 - **HIPS (Healthcare Identity Protection System)**: Cryptographic deterministic anonymization for names, locations, and alphanumeric identifiers
-- **Accession number hashing**: SHA256-based, compatible with BigQuery UDF
+- **Accession number hashing** (opt-in with `--acc-num-hash`): SHA256-based, compatible with BigQuery UDF. By default
+  accession numbers use HIPS alphanumeric encryption like MRN and HAR
 - **Faker Integration**: Realistic fake data generation
 - **Date Jittering**: Deterministic, privacy-preserving date shifts derived from patient keys
 - **Age Grouping**: Age range categorization
@@ -808,7 +809,8 @@ one-span note.
 The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason column) with spans that the recognition
 stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
 index into `str(value)`, and no recognizer runs per cell. Dates in the text shift like the `DATE` cells of the row (same
-`patient_id`, `jitter` and `birth_date`), and `ACC_NUM` spans use `acc_num_salt` and `acc_num_study_id`. The result is
+`patient_id`, `jitter` and `birth_date`), and `ACC_NUM` spans use HIPS alphanumeric, or the accession hash with
+`acc_num_salt` and `acc_num_study_id` when `acc_num_hash=True`. The result is
 `None` when the spans are null, malformed or outside the text; an entity whose operator fails is masked (for example
 `[PERSON]`) and the rest of the text is kept. Spans of the Faker types (email, URL, organization) get random values, so
 the output for such text is not deterministic. Without `presidio-analyzer` installed, the path does not load spaCy or
