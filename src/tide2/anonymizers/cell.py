@@ -31,7 +31,6 @@ from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
-from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
 
@@ -65,7 +64,6 @@ def _operators() -> tuple[Operator, Operator]:
 
     Keys travel in the per-call params, so the instances do not depend on them.
     """
-    FormatPreservingEncryption.suppress_short_input_warnings = True
     return guarded(HipsAlphaNumericAnonymizer)(), guarded(DateJitterAnonymizer)()
 
 

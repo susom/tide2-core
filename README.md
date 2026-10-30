@@ -121,6 +121,21 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Deterministic date jitter**: Batch-capable date shift derivation from cryptographic keys
 - **String Selection**: HMAC-based cached string selection
 
+#### Format-preserving encryption (FPE)
+
+Identifier entity types (`MRN`, `HAR`, `ID`, `CSN_ID`, `US_SSN`, `PHONE_NUMBER`, `PHONE`, `MEDICAL_LICENSE`) are pseudonymized with **NIST FF1** (AES-256, via the `fastfpe` package). Non-alphanumeric characters stay where they are; the alphanumeric content is permuted inside its class and keeps its length. The mapping is one-to-one and reversible, has no length limit, and does not depend on the entity type or on whether the value is stored as `STRING` or `INT64`.
+
+| Class | Content | Output |
+|---|---|---|
+| N | digits, no leading zero | digits, no leading zero (`int()` is safe; 19-digit values stay on the same side of 2^63-1) |
+| Z | exactly `0` | `0` |
+| S | digit string starting with `0` (two or more characters) | digit string starting with `0` |
+| A | contains a letter | contains a letter |
+
+Content shorter than FF1's minimum domain (fewer than 6 digits or 4 alphanumeric characters) is permuted with keyed tables built on first use; longer content uses FF1 with cycle-walking back into the same class. `FormatPreservingEncryption.encrypt_int` and `decrypt_int` apply the same mapping to `INT64` values. How collision-freeness is tested, and the results for `INT64`, are in the [FPE verification guide](guides/fpe_collision_free_verification.md).
+
+FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **Every FPE pseudonym differs from releases that used FF3**, in notes and in tables, so outputs from before and after this change do not join. Re-run from source data to regenerate them.
+
 ### Ray-based Batch Processing
 - **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
 - **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor` for `ray.data.map_batches`
@@ -886,6 +901,9 @@ uv run pytest tests/test_masking_anonymizer.py
 
 # Skip slow integration tests
 uv run pytest -m "not integration"
+
+# Skip the exhaustive FPE tests (about a minute)
+uv run pytest -m "not slow"
 ```
 
 Coverage is configured in `pyproject.toml` and runs automatically with `pytest`. Three reports are generated on each run:
