@@ -20,6 +20,11 @@ import logging
 import sys
 from pathlib import Path
 
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import validate_jitter_parameters
+from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
@@ -114,6 +119,9 @@ def cmd_run(args: argparse.Namespace) -> None:
                 acc_num_salt=args.acc_num_salt,
                 acc_num_study_id=args.acc_num_study_id,
                 jitter_required=getattr(args, "jitter_required", False),
+                min_jitter_days=args.min_jitter_days,
+                max_jitter_days=args.max_jitter_days,
+                max_age=args.max_age,
                 zip_mode=getattr(args, "zip_mode", DEFAULT_ZIP_MODE),
                 dry_run=dry_run,
                 **optional_kwargs,
@@ -235,6 +243,9 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw: dict = {}
             if getattr(args, "jitter_required", False):
                 a_kw["jitter_required"] = True
+            a_kw["min_jitter_days"] = args.min_jitter_days
+            a_kw["max_jitter_days"] = args.max_jitter_days
+            a_kw["max_age"] = args.max_age
             a_kw["zip_mode"] = getattr(args, "zip_mode", DEFAULT_ZIP_MODE)
             for attr, key in [
                 ("num_actors", "num_actors"),
@@ -491,6 +502,25 @@ Examples:
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
     )
     run_p.add_argument(
+        "--min-jitter-days",
+        type=int,
+        default=DEFAULT_MIN_JITTER_DAYS,
+        help="Minimum absolute date shift in days, at least 3 (anonymizer/pipeline jobs, default: 3)",
+    )
+    run_p.add_argument(
+        "--max-jitter-days",
+        type=int,
+        default=DEFAULT_MAX_JITTER_DAYS,
+        help="Maximum absolute date shift in days (anonymizer/pipeline jobs, default: 180)",
+    )
+    run_p.add_argument(
+        "--max-age",
+        type=int,
+        default=DEFAULT_MAX_AGE,
+        help="Dates after this birthday are moved to it, for notes with a birth_date column value; without "
+        "the column dates are not capped and a warning is logged (anonymizer/pipeline jobs, default: 90)",
+    )
+    run_p.add_argument(
         "--zip-mode",
         choices=ZIP_MODE_CHOICES,
         default=DEFAULT_ZIP_MODE,
@@ -618,6 +648,14 @@ Examples:
     if args.command == "run" and getattr(args, "config", None):
         _apply_config(args, run_p, argv)
 
+    if args.command == "run":
+        is_valid, message = validate_jitter_parameters(args.max_jitter_days, args.min_jitter_days)
+        if not is_valid:
+            run_p.error(message)
+        try:
+            validate_max_age(args.max_age)
+        except ValueError as err:
+            run_p.error(str(err))
     # argparse checks the flag, but a value from --config YAML bypasses its choices
     if args.command == "run" and getattr(args, "zip_mode", DEFAULT_ZIP_MODE) not in ZIP_MODE_CHOICES:
         print(f"Error: invalid zip_mode {args.zip_mode!r}; choose from {', '.join(ZIP_MODE_CHOICES)}")

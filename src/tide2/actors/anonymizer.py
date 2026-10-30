@@ -24,7 +24,6 @@ results; a failure in one entity masks that entity as ``[ENTITY_TYPE]``.
 import hashlib
 import logging
 import os
-import secrets
 from datetime import UTC
 from datetime import datetime
 from functools import partial
@@ -36,30 +35,34 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_anonymizer.entities import RecognizerResult
 
-from tide2.anonymizers import AccessionNumberHashAnonymizer
-from tide2.anonymizers import AgeGroupAnonymizer
-from tide2.anonymizers import DateJitterAnonymizer
-from tide2.anonymizers import FakerAnonymizer
-from tide2.anonymizers import HipsAlphaNumericAnonymizer
-from tide2.anonymizers import HipsLocationAnonymizer
-from tide2.anonymizers import HipsNamesAnonymizer
-from tide2.anonymizers import MaskingAnonymizer
-from tide2.anonymizers import ZipCodeAnonymizer
 from tide2.anonymizers import presidio_patches
+from tide2.anonymizers.accession_number_hash import AccessionNumberHashAnonymizer
+from tide2.anonymizers.age_grouping import AgeGroupAnonymizer
+from tide2.anonymizers.date_jitter import DateJitterAnonymizer
+from tide2.anonymizers.faker import FakerAnonymizer
 from tide2.anonymizers.guarded import end_note
 from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import record_error
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
+from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
+from tide2.anonymizers.hips_locations import HipsLocationAnonymizer
+from tide2.anonymizers.hips_names import HipsNamesAnonymizer
+from tide2.anonymizers.masking import MaskingAnonymizer
 from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE
 from tide2.anonymizers.zip_code import ZIP_ENTITY_ALIASES
+from tide2.anonymizers.zip_code import ZipCodeAnonymizer
 from tide2.anonymizers.zip_code import validate_zip_mode
-from tide2.cryptographic.date_jitter import derive_date_jitter
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
+from tide2.cryptographic.date_jitter import resolve_date_jitter
+from tide2.cryptographic.date_jitter import validate_jitter_parameters
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
-from tide2.utils.batch_columns import BatchColumns
-from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
+from tide2.utils.nulls import is_null_or_blank
 from tide2.utils.span_metrics import resolve_recognizer_results
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import NoteError
@@ -93,6 +96,9 @@ class AnonymizerWorker:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+        max_age: int = DEFAULT_MAX_AGE,
         zip_mode: str = DEFAULT_ZIP_MODE,
     ) -> None:
         """
@@ -105,6 +111,11 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
+            min_jitter_days: Minimum absolute date jitter in days (at least 3).
+            max_jitter_days: Maximum absolute date jitter in days.
+            max_age: Age at which dates are capped for notes with a ``birth_date``.
+                Not validated here: a value outside 1 to 150 turns the cap off. The job
+                runners reject it before they start.
             zip_mode: How ZIP codes (and the ZIP inside an address) are anonymized: ``"relaxed"``
                 (default; not Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
         """
@@ -117,6 +128,9 @@ class AnonymizerWorker:
         if len(key) != REQUIRED_KEY_SIZE:
             raise ValueError(f"key must be {REQUIRED_KEY_SIZE} bytes, got {len(key)}")
 
+        is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
+        if not is_valid:
+            raise ValueError(message)
         validate_zip_mode(zip_mode)
 
         # Apply Presidio patches - must be done in __init__ (not module level)
@@ -129,6 +143,10 @@ class AnonymizerWorker:
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
         self.jitter_required = jitter_required
+        self.min_jitter_days = min_jitter_days
+        self.max_jitter_days = max_jitter_days
+        self.max_age = max_age
+        self._warned_no_birth_date = False
         self.zip_mode = zip_mode
 
         # Suppress short input warnings in batch processing (reduces log noise)
@@ -245,31 +263,33 @@ class AnonymizerWorker:
         date_jitter: int | None = None,
         patient_id: Any = None,
         mask_dates: bool = False,
+        birth_date: Any = None,
     ) -> dict[str, OperatorConfig]:
         """
         Create operators including per-note parameters.
 
         Args:
-            date_jitter: Jitter value for date anonymization.
+            date_jitter: Jitter value for date anonymization; required unless ``mask_dates``.
             patient_id: Patient ID used as entity param for ACC_NUM hashing.
             mask_dates: Replace dates with the entity mask instead of shifting them.
+            birth_date: Real birth date of the patient; dates after the ``max_age``-th
+                birthday are moved to it. Null turns the cap off.
 
         Returns:
             Dictionary of operator configurations for this note.
         """
         operators = self._base_operators.copy()
 
-        # Random jitter between 4-60 days if not provided
-        if date_jitter is None:
-            date_jitter = secrets.randbelow(57) + 4
-
         if mask_dates:
             operators.update({"DATE_TIME": OperatorConfig("masking"), "DATE": OperatorConfig("masking")})
         else:
+            date_params: dict[str, Any] = {"jitter": date_jitter}
+            if not is_null_or_blank(birth_date):
+                date_params.update({"birth_date": birth_date, "max_age": self.max_age})
             operators.update(
                 {
-                    "DATE_TIME": OperatorConfig("date_jitter", {"jitter": date_jitter}),
-                    "DATE": OperatorConfig("date_jitter", {"jitter": date_jitter}),
+                    "DATE_TIME": OperatorConfig("date_jitter", dict(date_params)),
+                    "DATE": OperatorConfig("date_jitter", dict(date_params)),
                 }
             )
 
@@ -352,23 +372,17 @@ class AnonymizerWorker:
 
         Args:
             patient_id: Patient identifier. If None, NaN, or empty,
-                generates a random jitter.
+                generates a random jitter within the configured range.
 
         Returns:
             Integer jitter value in days.
         """
-        if is_null(patient_id):
-            return secrets.randbelow(357) - 178  # Random between -178 and +178
-        val_str = str(patient_id).strip()
-        if val_str.lower() in ("nan", "none", "null", ""):
-            return secrets.randbelow(357) - 178  # Random between -178 and +178
-
-        return derive_date_jitter(
-            patient_id=val_str,
-            salt=self.salt,
-            key=self.key,
-            max_jitter_days=180,
-            min_jitter_days=3,
+        return resolve_date_jitter(
+            patient_id,
+            self.salt,
+            self.key,
+            max_jitter_days=self.max_jitter_days,
+            min_jitter_days=self.min_jitter_days,
         )
 
     def _anonymize_chunked(
@@ -480,6 +494,7 @@ class AnonymizerWorker:
         recognizer_results_json: str | list | None,
         patient_id: str | None = None,
         jitter: int | None = None,
+        birth_date: Any = None,
     ) -> dict[str, Any]:
         """
         Process a single note and return results.
@@ -490,6 +505,8 @@ class AnonymizerWorker:
             recognizer_results_json: Pre-computed recognizer results (JSON string).
             patient_id: Patient identifier.
             jitter: Per-note jitter value (computed if None/NaN).
+            birth_date: Real birth date of the patient; dates after the ``max_age``-th
+                birthday are moved to it. Null turns the cap off.
 
         Returns:
             Dictionary with the anonymized note and ``stage_status`` (``success``,
@@ -534,7 +551,9 @@ class AnonymizerWorker:
             )
 
             # Create operators with jitter and per-note patient_id
-            operators = self._create_operators_for_note(jitter, patient_id, mask_dates=mask_dates)
+            operators = self._create_operators_for_note(
+                jitter, patient_id, mask_dates=mask_dates, birth_date=birth_date
+            )
 
             # Use chunked anonymization for long notes to avoid O(n*m) string copies
             if len(note_text) > MAX_ANON_CHUNK_SIZE:
@@ -607,9 +626,15 @@ class AnonymizerWorker:
         stage_statuses = []
         row_ids = []
 
-        cols = BatchColumns(batch)
+        # Deferred: batch_columns needs pyarrow, which the single-cell path does not load.
+        from tide2.utils import batch_columns
+
+        cols = batch_columns.BatchColumns(batch)
         batch_size = len(cols["note_text"])
         jitters = cols.get("jitter", [None] * batch_size)
+        has_birth_date = "birth_date" in cols
+        input_birth_dates = cols.get("birth_date", [None] * batch_size)
+        missing_birth_dates = 0
         input_patient_ids = cols.get("patient_id", [None] * batch_size)
         input_row_ids = cols.get("row_id", [None] * batch_size)
         recognizer_results_list = cols.get("recognizer_results_json", [None] * batch_size)
@@ -623,6 +648,7 @@ class AnonymizerWorker:
             recognizer_results_json = recognizer_results_list[i] if i < len(recognizer_results_list) else None
             patient_id = input_patient_ids[i] if i < len(input_patient_ids) else None
             jitter = jitters[i] if i < len(jitters) else None
+            birth_date = input_birth_dates[i] if i < len(input_birth_dates) else None
 
             original_text_hash = self.compute_text_hash(note_text)
 
@@ -640,13 +666,15 @@ class AnonymizerWorker:
                     recognizer_results_json=recognizer_results_json,
                     patient_id=patient_id,
                     jitter=jitter,
+                    birth_date=birth_date,
                 ),
                 status_of=lambda r: (r["stage_status"], r["stage_reason"]),
             )
             if result is not None and result["stage_status"] == FAILED:
-                logger.error(
-                    "anonymizer masked an entity of note %s: %s", original_text_hash[:16], result["stage_reason"]
-                )
+                logger.error("anonymizer masked an entity of a note: %s", result["stage_reason"])
+            # Masked dates (jitter_required) carry no jitter and need no birth date.
+            if has_birth_date and result is not None and result["jitter"] is not None and is_null_or_blank(birth_date):
+                missing_birth_dates += 1
 
             original_text_hashes.append(original_text_hash)
             patient_ids.append(patient_id)
@@ -657,6 +685,8 @@ class AnonymizerWorker:
             processing_statuses.append(status)
             stage_statuses.append(stage_json)
             row_ids.append(row_id)
+
+        self._warn_missing_birth_dates(missing_birth_dates)
 
         batch_timestamp = datetime.now(UTC).isoformat()
         out = {
@@ -673,11 +703,19 @@ class AnonymizerWorker:
         # Preserve row_id for checkpointing when input batch has the column
         if "row_id" in cols:
             out["row_id"] = row_ids
-        return type_columns(out)
+        return batch_columns.type_columns(out)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""
         return self.process_batch(batch)
+
+    def _warn_missing_birth_dates(self, count: int) -> None:
+        """Log how many notes of a batch were not age-capped: a warning the first time, then debug."""
+        if not count:
+            return
+        log = logger.debug if self._warned_no_birth_date else logger.warning
+        self._warned_no_birth_date = True
+        log("%d note(s) without birth_date: %s", count, UNCAPPED_DATES_WARNING)
 
 
 AnonymizerActor = AnonymizerWorker
@@ -698,6 +736,9 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    max_age: int = DEFAULT_MAX_AGE,
     zip_mode: str = DEFAULT_ZIP_MODE,
 ) -> type[AnonymizerWorker]:
     """
@@ -713,6 +754,9 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
+        min_jitter_days: Minimum absolute date jitter in days (at least 3)
+        max_jitter_days: Maximum absolute date jitter in days
+        max_age: Dates after this birthday are moved to it for notes with a birth_date
         zip_mode: ``"relaxed"`` (default) or ``"strict"``; see ``AnonymizerWorker``
 
     Returns:
@@ -742,6 +786,9 @@ def create_anonymizer_actor(
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
                 jitter_required=jitter_required,
+                min_jitter_days=min_jitter_days,
+                max_jitter_days=max_jitter_days,
+                max_age=max_age,
                 zip_mode=zip_mode,
             )
 

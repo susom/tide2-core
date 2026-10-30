@@ -54,6 +54,11 @@ import ray.data.exceptions
 from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
+from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.utils.batch_columns import check_no_patient_uid
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
@@ -480,7 +485,7 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
         res_cols["stage_status_json"] = pa.array(stage_json_out, type=pa.string())
         res_cols["processing_status"] = pa.array(status_out, type=pa.string())
 
-    for col in ("note_text", "patient_id", "jitter", "patient_identifiers"):
+    for col in ("note_text", "patient_id", "jitter", "birth_date", "patient_identifiers"):
         col_reg = f"{col}_regex"
         col_llm = f"{col}_llm"
         if col_reg in col_names and col_llm in col_names:
@@ -515,7 +520,9 @@ class StageColumns:
 #: Column contracts, mirroring the actor implementations in ``tide2.actors``.
 TRANSFORMER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
-    optional=frozenset({"patient_id", "patient_identifiers", "jitter", "processing_status", "stage_status_json"}),
+    optional=frozenset(
+        {"patient_id", "patient_identifiers", "jitter", "birth_date", "processing_status", "stage_status_json"}
+    ),
     produces=frozenset(
         {
             "text_hash",
@@ -536,6 +543,7 @@ RECOGNIZER_STAGE_COLUMNS = StageColumns(
             "recognizer_results_json",
             "patient_id",
             "jitter",
+            "birth_date",
             "processing_status",
             "stage_status_json",
         }
@@ -556,7 +564,9 @@ RECOGNIZER_STAGE_COLUMNS = StageColumns(
 )
 LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "row_id"}),
-    optional=frozenset({"patient_identifiers", "patient_id", "jitter", "processing_status", "stage_status_json"}),
+    optional=frozenset(
+        {"patient_identifiers", "patient_id", "jitter", "birth_date", "processing_status", "stage_status_json"}
+    ),
     produces=frozenset(
         {
             "text_hash",
@@ -573,7 +583,7 @@ LLM_RECOGNIZER_STAGE_COLUMNS = StageColumns(
 )
 ANONYMIZER_STAGE_COLUMNS = StageColumns(
     requires=frozenset({"text_hash", "note_text", "recognizer_results_json", "row_id"}),
-    optional=frozenset({"patient_id", "jitter", "processing_status", "stage_status_json"}),
+    optional=frozenset({"patient_id", "jitter", "birth_date", "processing_status", "stage_status_json"}),
     produces=frozenset(
         {
             "text_hash",
@@ -625,6 +635,12 @@ def _check_streamed_row_parity(input_rows: int, output_rows: int) -> None:
         f"Streamed pipeline wrote {output_rows} rows from {input_rows} input rows "
         f"(dropped={input_rows - output_rows}).{hint}"
     )
+
+
+def _warn_if_no_birth_date(columns: Iterable[str]) -> None:
+    """Warn once for a run whose input has no ``birth_date`` column, so dates are not age-capped."""
+    if "birth_date" not in {column.lower() for column in columns}:
+        logger.warning("No birth_date column in the input: %s", UNCAPPED_DATES_WARNING)
 
 
 def _streamed_source_columns(contracts: list[tuple[str, "StageColumns"]]) -> frozenset[str]:
@@ -1139,6 +1155,7 @@ class LocalJobRunner:
             "recognizer_results_json",
             "patient_id",
             "jitter",
+            "birth_date",
             "row_id",
             "processing_status",
             "stage_status_json",
@@ -1342,6 +1359,7 @@ class LocalJobRunner:
             "patient_id",
             "row_id",
             "jitter",
+            "birth_date",
             "patient_identifiers",
             "processing_status",
             "stage_status_json",
@@ -1464,6 +1482,9 @@ class LocalJobRunner:
         key_hex: str | None = None,
         dry_run: bool = False,
         _id_column: str = "row_id",
+        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+        max_age: int = DEFAULT_MAX_AGE,
         zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
     ) -> dict[str, Any]:
         """
@@ -1512,6 +1533,12 @@ class LocalJobRunner:
             dry_run: If True, validate setup and show plan without processing
             _id_column: Column name to use as primary key for Ray Data checkpointing
                 (default: "row_id").
+            min_jitter_days: Minimum absolute date jitter in days (at least 3)
+            max_jitter_days: Maximum absolute date jitter in days
+            max_age: Age at which dates are capped for notes with a ``birth_date``
+                column value (1 to 150; anything else raises ``ValueError`` before
+                Ray starts). Without the column dates are not capped and a warning
+                is logged.
             zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
                 ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
 
@@ -1529,6 +1556,7 @@ class LocalJobRunner:
 
         _validate_zip_mode(zip_mode)
         _validate_id_column(_id_column)
+        validate_max_age(max_age)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1573,8 +1601,17 @@ class LocalJobRunner:
 
         # Detect columns
         required_cols = ["note_text", "recognizer_results_json"]
-        optional_cols = ["text_hash", "patient_id", "jitter", "row_id", "processing_status", "stage_status_json"]
+        optional_cols = [
+            "text_hash",
+            "patient_id",
+            "jitter",
+            "birth_date",
+            "row_id",
+            "processing_status",
+            "stage_status_json",
+        ]
         columns = detect_columns(input_files[0], required_cols, optional_cols)
+        _warn_if_no_birth_date(columns)
 
         ctx = ray.data.DataContext.get_current()
         logger.info("Anonymization job starting")
@@ -1594,6 +1631,9 @@ class LocalJobRunner:
             acc_num_salt=acc_num_salt,
             acc_num_study_id=acc_num_study_id,
             jitter_required=jitter_required,
+            min_jitter_days=min_jitter_days,
+            max_jitter_days=max_jitter_days,
+            max_age=max_age,
             zip_mode=zip_mode,
         )
 
@@ -1885,6 +1925,7 @@ class LocalJobRunner:
             "patient_id",
             "patient_identifiers",
             "jitter",
+            "birth_date",
             "row_id",
             "processing_status",
             "stage_status_json",
@@ -2101,6 +2142,7 @@ class LocalJobRunner:
         for stage_kwargs in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, llm_recognizer_kwargs):
             if stage_kwargs and "_id_column" in stage_kwargs:
                 _validate_id_column(stage_kwargs["_id_column"])
+        validate_max_age((anonymizer_kwargs or {}).get("max_age", DEFAULT_MAX_AGE))
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)
@@ -2294,7 +2336,7 @@ class LocalJobRunner:
                 remove_stage_dir(merged_output_path, STAGE_DIRS["merged_recognizer"])
                 sample_schema = read_parquet_schema(rec_files[0])
                 regex_names = set(sample_schema.names)
-                passthrough_cols = ["note_text", "patient_id", "jitter", "patient_identifiers"]
+                passthrough_cols = ["note_text", "patient_id", "jitter", "birth_date", "patient_identifiers"]
                 status_cols = ["processing_status", "stage_status_json"]
                 reg_passthrough = [c for c in passthrough_cols if c in regex_names]
                 reg_status = [c for c in status_cols if c in regex_names]
@@ -2539,6 +2581,7 @@ class LocalJobRunner:
             contracts.append(("recognizer", RECOGNIZER_STAGE_COLUMNS))
         contracts.append(("anonymizer", ANONYMIZER_STAGE_COLUMNS))
         final_columns = validate_stage_columns(input_info.columns | {"text_hash", "row_id"}, contracts)
+        _warn_if_no_birth_date(input_info.columns)
 
         # --- Resolve pools and CPU budget, then admit or fail fast ---
         pool_minimums: dict[str, float] = {}
@@ -2704,6 +2747,9 @@ class LocalJobRunner:
                 acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
                 acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
                 jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
+                min_jitter_days=int(anonymizer_kwargs.get("min_jitter_days", DEFAULT_MIN_JITTER_DAYS)),
+                max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
+                max_age=int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE)),
                 zip_mode=anonymizer_kwargs.get("zip_mode", "relaxed"),
             )
             ds = self.build_anonymizer_stage(

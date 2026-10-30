@@ -47,6 +47,21 @@ def is_null(value: Any) -> bool:
     return False
 
 
+# Strings that stand for a missing value in text-typed date columns (blank, pandas NaT and NA).
+BLANK_NULL_STRINGS = frozenset({"", "NaT", "<NA>"})
+
+
+def is_null_or_blank(value: Any) -> bool:
+    """Return True for a null scalar (see ``is_null``) or a blank/``"NaT"`` string.
+
+    Use it for date-like values that may arrive as text, where an empty or ``"NaT"``
+    cell means "missing" even though ``is_null`` does not treat it so.
+    """
+    if isinstance(value, str):
+        return value.strip() in BLANK_NULL_STRINGS
+    return is_null(value)
+
+
 def row_id_patient_part(patient_id: Any) -> str:
     """Return the patient part of a derived ``row_id``: ``"None"`` when missing or blank."""
     if is_null(patient_id) or str(patient_id).strip() == "":

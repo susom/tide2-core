@@ -651,9 +651,20 @@ resuming a run does not retry them.
 
 **Jitter column.** The anonymizer output has a `jitter` column: the date shift in
 days that was applied, taken from the input or derived. It is null when dates were
-masked or the row failed. With `anonymized_note_text` it undoes the date shift, so
-give it the same access control as `salt.bin` and `key.bin` and drop it before
-release. `patient_id` is written as a string, whatever its input type.
+masked or the row failed. It is a debugging aid, not part of the released data: with
+`anonymized_note_text` it undoes the date shift, and with a `birth_date` every capped
+date equals the birth date plus `max_age` years plus the jitter, so the real birth
+date can be recovered from any capped date and this column. Give it the same access
+control as `salt.bin` and `key.bin` and drop it before release, so that whoever
+receives the data gets shifted dates only. `patient_id` is written as a string,
+whatever its input type.
+
+**Jitter range.** `--min-jitter-days` (default 3, the lowest allowed) and
+`--max-jitter-days` (default 180) set the absolute size of the date shift for
+anonymizer and pipeline runs. Rows without a patient id get a random shift in the
+same range. The derived shift depends on the range, so keep it constant within one
+dataset or the same patient gets a new shift. A `jitter` value given in the input
+is used as it is; a value below 3 days in absolute terms masks the date.
 
 **Known limitations**
 
@@ -670,6 +681,104 @@ release. `patient_id` is written as a string, whatever its input type.
 - Some values are left unchanged on purpose: stopwords and single letters,
   titles and suffixes without a name, standalone months and years, gestational
   ages and single characters. A standalone birth year over 89 passes through.
+
+### Date formats
+
+Dates are shifted by the per-patient `jitter` (whole days) and keep the format of
+the input: numeric or named month, full or abbreviated name, case, zero padding,
+ordinal suffix, the word `of` and the separators. The time of day, the `T`
+separator, the timezone and the surrounding text are kept as they are. A weekday
+name is rotated by the same jitter, so it stays consistent with the shifted date
+and does not reveal the original weekday. Every date in a value is shifted.
+
+> **Output changed in this release.** Earlier versions rewrote the format and
+> mis-shifted some inputs: compact `yyyymmdd` dates were read as the wrong
+> month and day, `15 March 2023` lost its day, the time, timezone, weekday and
+> surrounding text were dropped, and yearless or two-digit-year dates depended on
+> the run date. Date output for those inputs differs from earlier versions. Plain
+> `YYYY-MM-DD` output is unchanged.
+
+| Input | Jitter | Output | Note |
+|---|---|---|---|
+| `2023-03-15` | +5 | `2023-03-20` | ISO dates are shifted exactly |
+| `2023-03-15T23:30:00-07:00` | +5 | `2023-03-20T23:30:00-07:00` | time and timezone are kept |
+| `2023-03-15 10:30` | +5 | `2023-03-20 10:30` | time of day is kept |
+| `Wed 2023-03-15` | +5 | `Mon 2023-03-20` | weekday rotated by the jitter, form and case kept |
+| `Visit on 2023-03-15 at noon` | +5 | `Visit on 2023-03-20 at noon` | surrounding text is kept |
+| `20231105` | +5 | `20231110` | compact `yyyymmdd` |
+| `3/5/2023` | +5 | `3/10/2023` | padding follows the input |
+| `03/05/2023` | +5 | `03/10/2023` | |
+| `15 March 2023` | +5 | `20 March 2023` | day-first with a month name |
+| `15-MAR-2023` | +5 | `20-MAR-2023` | month form and case are kept |
+| `MARCH 15, 2023` | +5 | `MARCH 20, 2023` | |
+| `March 15th, 2023` | +5 | `March 20th, 2023` | the ordinal suffix appears only when present |
+| `March of 2023` | +112 | `July of 2023` | `of` appears only when present |
+| `12/31/99` | +5 | `01/05/00` | two-digit years: 00-29 is 20xx, 30-99 is 19xx |
+| `Feb 29` | +5 | `Mar 5` | no year in the output; a leap year is used to shift |
+| `2023-03` | +112 | `2023-07` | month-only dates are shifted from the 15th of the month, by design |
+| `2023` | +5 | `2023` | a year alone is not shifted, by design (Safe Harbor allows the year) |
+| `13/45/2020` | +5 | `[DATE]` | not a date: `[DATE]`, and the row is `degraded` |
+
+A numeric date that starts with 01-12 is read as month first (`mm/dd/yyyy`); a
+leading 13-31 is read as day first. A shifted two-digit year keeps two digits, so a
+result that crosses the 29/30 pivot (December 2029 to January 2030) reads in the
+other century. The pivot can be changed with the `two_digit_year_pivot` operator
+parameter.
+
+**Ages over 89 (Safe Harbor).** Give the input a `birth_date` column (the real
+birth date, as a date or an ISO `YYYY-MM-DD` string) and every full or month date
+after the patient's 90th birthday is capped: the jitter is added first, and a
+shifted date later than the shifted 90th birthday (birth date plus 90 years plus the
+jitter) becomes that date, so no shifted date shows an age over 89. All events after
+it land on the same day, so their order and intervals are lost. The birth date
+itself and earlier dates are only shifted. `--max-age` (default 90, 1 to 150) changes
+the birthday; the CLI and the runners reject any other value before the job starts,
+while the anonymizers themselves leave the cap off for an invalid value. The column
+travels through the stages like `jitter` but is never written to the anonymizer
+output. For cells, pass `birth_date` (and `max_age`) to `anonymize_cell`.
+
+This is a per-event cap, not a Safe Harbor compliance guarantee on its own. Year-only
+and yearless values are not capped, so a note that holds a shifted birth date and a
+bare year (`1930-06-20` and `2023`) can still imply an age over 89. Ages written as
+text ("92-year-old") are not dates and are not covered. Other values that indicate an
+older age need their own generalization. Without the column, or with a null value,
+dates are shifted but not capped and a warning is logged; such a run is not Safe
+Harbor compliant for patients over 89.
+
+| Input | `birth_date` | Jitter | Output |
+|---|---|---|---|
+| `2023-03-15` | `1930-06-15` | +5 | `2020-06-20` (90th birthday + 5) |
+| `March 10th, 2023` | `1930-06-15` | +5 | `June 20th, 2020` |
+| `2019-01-10` | `1930-06-15` | +5 | `2019-01-15` (before the 90th birthday) |
+| `2023` | `1930-06-15` | +5 | `2023` |
+
+**Day, month and year columns.** A day, month or year stored on its own cannot be
+shifted alone (day 31 plus 5 days depends on the month and year). Use the entity
+types `DATE_DAY`, `DATE_MONTH` and `DATE_YEAR` with `anonymize_cell` and pass the
+row's real full date as `full_date` (a date, an ISO string, or a timestamp). The
+cell value only gives the format (zero padding, full or abbreviated month name and
+case, two- or four-digit year); the result is that part of the shifted full date,
+with the same jitter and `birth_date` cap as the full-date column. Passing the
+same `full_date` is not enough to keep the parts and the full-date column
+consistent: they must also get the same jitter. Pass the same non-null
+`patient_id` (with the same salt, key and jitter range) to every related call, or
+compute one jitter per row and pass it as `jitter` to every call. Without a
+`patient_id` or `jitter`, each call draws its own random shift and the parts do
+not line up. Unlike a year in free text, a year column is
+shifted, because it can change across 1 January and with the cap. A value that is
+not that part of `full_date`, or a null `full_date`, becomes `[DATE]`; a
+`full_date` that is not a date becomes `[DATE_DAY]` (and so on) and the row is
+`failed`. These types are for structured cells only; the note pipeline does not
+produce them. A four-digit year below 1000 is not zero padded, which is outside the
+supported range (the date patterns cover 1900 to 2099).
+
+| Entity type | Value | `full_date` | Jitter | Output |
+|---|---|---|---|---|
+| `DATE_DAY` | `30` | `2023-03-30` | +5 | `4` |
+| `DATE_MONTH` | `03` | `2023-03-30` | +5 | `04` |
+| `DATE_MONTH` | `March` | `2023-03-30` | +5 | `April` |
+| `DATE_YEAR` | `2023` | `2023-12-30` | +5 | `2024` |
+| `DATE_DAY` | `29` | `2023-03-30` | +5 | `[DATE]` (not the day of `full_date`) |
 
 ### What happens when a run wedges
 
@@ -727,6 +836,15 @@ Running the anonymizers on BigQuery columns through a Python UDF lives in the se
 one-span note. Its `ZIP_CODE` support (`zip_mode=...`) loads `tide2/anonymizers/zip_code.py` and
 `tide2/resources/zip3_population_2020.tsv` only when a ZIP is anonymized, so a bundle for other entity types does not
 need them.
+
+The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason column) with spans that the recognition
+stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
+index into `str(value)`, and no recognizer runs per cell. Dates in the text shift like the `DATE` cells of the row (same
+`patient_id`, `jitter` and `birth_date`), and `ACC_NUM` spans use `acc_num_salt` and `acc_num_study_id`. The result is
+`None` when the spans are null, malformed or outside the text; an entity whose operator fails is masked (for example
+`[PERSON]`) and the rest of the text is kept. Spans of the Faker types (email, URL, organization) get random values, so
+the output for such text is not deterministic. Without `presidio-analyzer` installed, the path does not load spaCy or
+torch.
 
 ## Docker Images
 
