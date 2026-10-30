@@ -39,24 +39,27 @@ FREE_TEXT_CHILD = """
 import importlib.abc, json, sys, types
 
 BLOCKED = tuple(sys.argv[2].split(","))
+ROOT = sys.argv[1]
+attempts = []
 
 
 class Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, name, path=None, target=None):
-        if name.split(".")[0] in BLOCKED:
-            raise ImportError(f"blocked: {name}")
+        if name.split(".")[0] not in BLOCKED:
+            return None
+        frame = sys._getframe(1)
+        while frame is not None and "importlib" in frame.f_code.co_filename:
+            frame = frame.f_back
+        attempts.append([name, frame.f_code.co_filename if frame is not None else ""])
+        raise ImportError(f"blocked: {name}")
 
 
 sys.meta_path.insert(0, Blocker())
 
-for name, sub in (
-    ("tide2", ""),
-    ("tide2.anonymizers", "anonymizers"),
-    ("tide2.actors", "actors"),
-    ("tide2.utils", "utils"),
-):
+# Only the two package roots are stubbed; tide2.actors and tide2.utils run their real initializers.
+for name, sub in (("tide2", ""), ("tide2.anonymizers", "anonymizers")):
     pkg = types.ModuleType(name)
-    pkg.__path__ = [sys.argv[1] + ("/" + sub if sub else "")]
+    pkg.__path__ = [ROOT + ("/" + sub if sub else "")]
     sys.modules[name] = pkg
 
 import tide2.anonymizers.cell as cell
@@ -67,7 +70,7 @@ spans = [
     {"entity_type": "MRN", "start": 26, "end": 34, "score": 1.0},
 ]
 out = cell.anonymize_cell(text, "FREE_TEXT", b"\\x01" * 32, b"\\x02" * 32, "P1", recognizer_results=spans)
-print(json.dumps({"out": out, "modules": sorted(sys.modules)}))
+print(json.dumps({"out": out, "modules": sorted(sys.modules), "attempts": attempts}))
 """
 
 
@@ -85,3 +88,6 @@ def test_free_text_loads_without_heavy_dependencies() -> None:
     loaded = result["modules"]
     for name in (*BLOCKED, "tide2.actors.recognizer", "tide2.actors.transformer"):
         assert not any(m == name or m.startswith(name + ".") for m in loaded), name
+    # An ImportError caught by an optional-import guard in tide2 code would pass the checks above.
+    tide2_attempts = [a for a in result["attempts"] if a[1].startswith(str(SRC))]
+    assert not tide2_attempts, tide2_attempts
