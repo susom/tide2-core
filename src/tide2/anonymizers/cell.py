@@ -43,6 +43,7 @@ FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     {
         "MRN",
         "HAR",
+        "ACC_NUM",
         "ID",
         "CSN_ID",
         "US_SSN",
@@ -148,6 +149,7 @@ def anonymize_cell(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     zip_mode: str | None = None,
+    acc_num_hash: bool = False,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -180,6 +182,9 @@ def anonymize_cell(
         zip_mode: ``"strict"`` or ``"relaxed"`` (the default, as in ``AnonymizerWorker``);
             used for ``ZIP_CODE`` and the ZIP codes in ``FREE_TEXT``. An integer ZIP is padded to 5 digits
             (see ``ZipCodeAnonymizer``).
+        acc_num_hash: Hash ``ACC_NUM`` spans of a ``FREE_TEXT`` cell with ``accession_number_hash``
+            instead of HIPS alphanumeric (``FREE_TEXT`` only). An ``ACC_NUM`` cell always uses HIPS
+            alphanumeric, matching the default ``AnonymizerWorker``.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -229,6 +234,7 @@ def anonymize_cell(
             acc_num_salt,
             acc_num_study_id,
             zip_mode,
+            acc_num_hash,
         )
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.

@@ -99,6 +99,7 @@ class AnonymizerWorker:
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
         zip_mode: str = DEFAULT_ZIP_MODE,
+        acc_num_hash: bool = False,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -117,6 +118,9 @@ class AnonymizerWorker:
                 runners reject it before they start.
             zip_mode: How ZIP codes (and the ZIP inside an address) are anonymized: ``"relaxed"``
                 (default; not Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
+            acc_num_hash: If True, ACC_NUM uses ``accession_number_hash`` (BigQuery-compatible
+                SHA256 with ``acc_num_salt``/``acc_num_study_id``/patient_id); otherwise it
+                uses ``hips_alphanumeric`` and the ``acc_num_*`` settings are ignored.
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -141,6 +145,7 @@ class AnonymizerWorker:
         self.key = key
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
+        self.acc_num_hash = acc_num_hash
         self.jitter_required = jitter_required
         self.min_jitter_days = min_jitter_days
         self.max_jitter_days = max_jitter_days
@@ -240,8 +245,11 @@ class AnonymizerWorker:
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key},
             ),
-            # ACC_NUM is handled separately with per-note patient_id
-            # See _create_operators_for_note()
+            # Overridden per note in _create_operators_for_note() when acc_num_hash is set
+            "ACC_NUM": OperatorConfig(
+                "hips_alphanumeric",
+                {"salt": self.salt, "key": self.key},
+            ),
             "ID": OperatorConfig(
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key},
@@ -296,15 +304,16 @@ class AnonymizerWorker:
             if val_str.lower() not in ("nan", "none", "null", ""):
                 clean_patient_id = val_str
 
-        # ACC_NUM uses accession_number_hash with per-note patient_id as SQL entity
-        operators["ACC_NUM"] = OperatorConfig(
-            "accession_number_hash",
-            {
-                "salt": self.acc_num_salt,
-                "study_id": self.acc_num_study_id,
-                "patient_id": clean_patient_id,
-            },
-        )
+        # Opt-in: ACC_NUM uses accession_number_hash with per-note patient_id as SQL entity
+        if self.acc_num_hash:
+            operators["ACC_NUM"] = OperatorConfig(
+                "accession_number_hash",
+                {
+                    "salt": self.acc_num_salt,
+                    "study_id": self.acc_num_study_id,
+                    "patient_id": clean_patient_id,
+                },
+            )
 
         return operators
 
@@ -736,6 +745,7 @@ def create_anonymizer_actor(
     max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     max_age: int = DEFAULT_MAX_AGE,
     zip_mode: str = DEFAULT_ZIP_MODE,
+    acc_num_hash: bool = False,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -754,6 +764,7 @@ def create_anonymizer_actor(
         max_jitter_days: Maximum absolute date jitter in days
         max_age: Dates after this birthday are moved to it for notes with a birth_date
         zip_mode: ``"relaxed"`` (default) or ``"strict"``; see ``AnonymizerWorker``
+        acc_num_hash: If True, hash ACC_NUM with accession_number_hash instead of hips_alphanumeric
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -786,6 +797,7 @@ def create_anonymizer_actor(
                 max_jitter_days=max_jitter_days,
                 max_age=max_age,
                 zip_mode=zip_mode,
+                acc_num_hash=acc_num_hash,
             )
 
     return ConfiguredAnonymizerActor
