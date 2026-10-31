@@ -118,6 +118,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_jitter_days=args.max_jitter_days,
                 max_age=args.max_age,
                 acc_num_hash=getattr(args, "acc_num_hash", False),
+                keep_entities=getattr(args, "keep_entities", None),
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -248,6 +249,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("batch_size", "batch_size"),
                 ("acc_num_salt", "acc_num_salt"),
                 ("acc_num_study_id", "acc_num_study_id"),
+                ("keep_entities", "keep_entities"),
                 ("read_cpus", "read_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -499,6 +501,11 @@ Examples:
     run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (requires --acc-num-hash)")
     run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (requires --acc-num-hash)")
     run_p.add_argument(
+        "--keep-entities",
+        help="Comma-separated entity types left as they are, for example DATE,DATE_TIME,AGE; DATE also covers "
+        "the date part types of cells. Kept text is not anonymized (anonymizer/pipeline jobs)",
+    )
+    run_p.add_argument(
         "--jitter-required",
         action="store_true",
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
@@ -640,11 +647,14 @@ Examples:
         _apply_config(args, run_p, argv)
 
     if args.command == "run":
+        from tide2.anonymizers.cell import parse_keep_entities
+
         is_valid, message = validate_jitter_parameters(args.max_jitter_days, args.min_jitter_days)
         if not is_valid:
             run_p.error(message)
         try:
             validate_max_age(args.max_age)
+            parse_keep_entities(args.keep_entities)
         except ValueError as err:
             run_p.error(str(err))
 

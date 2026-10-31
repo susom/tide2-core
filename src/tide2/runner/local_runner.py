@@ -1478,6 +1478,7 @@ class LocalJobRunner:
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
         acc_num_hash: bool = False,
+        keep_entities: str | Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1533,6 +1534,9 @@ class LocalJobRunner:
                 is logged.
             acc_num_hash: If True, hash ACC_NUM with accession_number_hash
                 (``acc_num_salt``/``acc_num_study_id``); otherwise use hips_alphanumeric.
+            keep_entities: Entity types left as they are, as a comma-separated string or a list
+                (for example ``DATE,AGE``). ``DATE`` also covers the date part types of cells.
+                An unknown name raises ``ValueError`` before Ray starts.
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1545,9 +1549,11 @@ class LocalJobRunner:
                 guard surfaces it as a hard error.
         """
         from tide2.actors import create_anonymizer_actor_class
+        from tide2.anonymizers.cell import parse_keep_entities
 
         _validate_id_column(_id_column)
         validate_max_age(max_age)
+        keep_entity_types = parse_keep_entities(keep_entities)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1626,6 +1632,7 @@ class LocalJobRunner:
             max_jitter_days=max_jitter_days,
             max_age=max_age,
             acc_num_hash=acc_num_hash,
+            keep_entities=keep_entity_types,
         )
 
         try:
@@ -2134,6 +2141,9 @@ class LocalJobRunner:
             if stage_kwargs and "_id_column" in stage_kwargs:
                 _validate_id_column(stage_kwargs["_id_column"])
         validate_max_age((anonymizer_kwargs or {}).get("max_age", DEFAULT_MAX_AGE))
+        from tide2.anonymizers.cell import parse_keep_entities
+
+        parse_keep_entities((anonymizer_kwargs or {}).get("keep_entities"))
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)
@@ -2546,6 +2556,7 @@ class LocalJobRunner:
         trade-offs. This method assumes the fallback checks have already run.
         """
         from tide2.actors import create_anonymizer_actor_class
+        from tide2.anonymizers.cell import parse_keep_entities
 
         logger.info(
             "streamed mode: only the final sink is checkpointed, so a rerun of the same input into the same "
@@ -2741,6 +2752,7 @@ class LocalJobRunner:
                 max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
                 max_age=int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE)),
                 acc_num_hash=bool(anonymizer_kwargs.get("acc_num_hash", False)),
+                keep_entities=parse_keep_entities(anonymizer_kwargs.get("keep_entities")),
             )
             ds = self.build_anonymizer_stage(
                 ds,

@@ -65,6 +65,8 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # jitter_required: false
 # min_jitter_days: 3
 # max_jitter_days: 180
+# Entity types left as they are, not anonymized (DATE also covers the cell date parts)
+# keep_entities: [DATE, DATE_TIME]
 
 # =========================================================================
 # Transformer-specific
