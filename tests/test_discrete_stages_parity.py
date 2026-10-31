@@ -367,6 +367,7 @@ def test_anonymizer_worker_patient_id_normalization():
     worker.acc_num_salt = "salt"
     worker.acc_num_study_id = "study"
     worker.acc_num_hash = True
+    worker.keep_entities = frozenset()
     worker._base_operators = {}
 
     # Valid patient_id

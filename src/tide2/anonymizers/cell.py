@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import logging
 import numbers
+from collections.abc import Iterable
 from typing import Any
 
 from presidio_anonymizer.operators import Operator
@@ -59,6 +60,62 @@ ZIP_ENTITY_TYPES: frozenset[str] = frozenset({"ZIP_CODE"})
 SUPPORTED_ENTITY_TYPES: frozenset[str] = (
     FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES | ZIP_ENTITY_TYPES
 )
+# Types a run may leave as they are: every type of the free-text operator map except DEFAULT, plus the dates.
+KEEPABLE_ENTITY_TYPES: frozenset[str] = (
+    FPE_ENTITY_TYPES
+    | DATE_ENTITY_TYPES
+    | DATE_PART_ENTITY_TYPES
+    | frozenset(
+        {
+            "PATIENT",
+            "DOCTOR",
+            "HCW",
+            "PERSON",
+            "HOSPITAL",
+            "LOCATION",
+            "AGE",
+            "WEB",
+            "OTHER",
+            "VENDOR",
+            "EMAIL_ADDRESS",
+            "URL",
+            "BASE64_IMAGE",
+            "GENETIC_SEQUENCE",
+            "ORGANIZATION",
+            "ZIP_CODE",
+            "ZIP",
+            "ZIPCODE",
+        }
+    )
+)
+
+
+def parse_keep_entities(value: str | Iterable[str] | None) -> frozenset[str]:
+    """Return the entity types to leave as they are, from a comma-separated string or a list.
+
+    Names are stripped and upper-cased. ``DATE`` also covers ``DATE_DAY``, ``DATE_MONTH`` and
+    ``DATE_YEAR``; ``DATE_TIME`` is listed on its own.
+
+    Args:
+        value: ``None``, a comma-separated string, or an iterable of names.
+
+    Returns:
+        The set of entity types to keep; empty for ``None`` or an empty value.
+
+    Raises:
+        ValueError: If a name is not in ``KEEPABLE_ENTITY_TYPES``.
+    """
+    if value is None:
+        return frozenset()
+    names = value.split(",") if isinstance(value, str) else value
+    kept = {str(name).strip().upper() for name in names if str(name).strip()}
+    unknown = sorted(kept - KEEPABLE_ENTITY_TYPES)
+    if unknown:
+        raise ValueError(f"Unknown keep_entities {unknown}; valid types: {sorted(KEEPABLE_ENTITY_TYPES)}")
+    if "DATE" in kept:
+        kept |= DATE_PART_ENTITY_TYPES
+    return frozenset(kept)
+
 
 MAX_ZIP5 = 99999
 _warned_integer_zip = False
@@ -133,7 +190,7 @@ def compute_jitter_for_patient(
     return resolve_date_jitter(patient_id, salt, key, max_jitter_days, min_jitter_days)
 
 
-def anonymize_cell(
+def anonymize_cell(  # noqa: PLR0911
     value: Any,
     entity_type: str | None,
     salt: bytes,
@@ -150,6 +207,7 @@ def anonymize_cell(
     acc_num_study_id: str | None = None,
     zip_mode: str | None = None,
     acc_num_hash: bool = False,
+    keep_entities: frozenset[str] = frozenset(),
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -185,6 +243,8 @@ def anonymize_cell(
         acc_num_hash: Hash ``ACC_NUM`` spans of a ``FREE_TEXT`` cell with ``accession_number_hash``
             instead of HIPS alphanumeric (``FREE_TEXT`` only). An ``ACC_NUM`` cell always uses HIPS
             alphanumeric, matching the default ``AnonymizerWorker``.
+        keep_entities: Entity types left as they are, from ``parse_keep_entities``. A cell of such a
+            type is returned as its text; in a ``FREE_TEXT`` cell their spans are left unchanged.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -235,11 +295,15 @@ def anonymize_cell(
             acc_num_study_id,
             zip_mode,
             acc_num_hash,
+            keep_entities,
         )
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
     if safe_entity_type(entity_type, text) != entity_type:
         return mask("ENTITY")
+
+    if entity_type in keep_entities:
+        return text
 
     if entity_type in ZIP_ENTITY_TYPES:
         return _zip_operator().operate(text, {"mode": zip_mode, "entity_type": entity_type})
