@@ -152,12 +152,15 @@ def read_output(output_dir):
     return pads.dataset(files).to_table().to_pandas()
 
 
-def run_mode(tmp_path, notes, mode, *, checkpoint=False, name=None):
+def run_mode(tmp_path, notes, mode, *, checkpoint=False, name=None, keep_entities=None):
     in_file = tmp_path / f"notes_{len(notes)}.parquet"
     if not in_file.exists():
         notes.to_parquet(in_file, index=False)
     out = tmp_path / (name or mode)
     runner = LocalJobRunner(hardware_autotune=False)
+    anonymizer_kwargs = {"num_actors": 2, "enable_checkpoint": checkpoint}
+    if keep_entities is not None:
+        anonymizer_kwargs["keep_entities"] = keep_entities
     try:
         manifest = runner.run_pipeline(
             input_path=str(in_file),
@@ -168,7 +171,7 @@ def run_mode(tmp_path, notes, mode, *, checkpoint=False, name=None):
             execution_mode=mode,
             transformer_kwargs={"num_gpus": 0, "num_transformer_actors": 1, "num_agg_actors": 0},
             recognizer_kwargs={"num_actors": 2, "enable_checkpoint": checkpoint},
-            anonymizer_kwargs={"num_actors": 2, "enable_checkpoint": checkpoint},
+            anonymizer_kwargs=anonymizer_kwargs,
         )
     finally:
         runner.shutdown()
@@ -234,6 +237,39 @@ class TestDiscreteStreamedEquivalence:
         _, streamed = equivalence["streamed"]
         assert "note_text" not in streamed.columns
         assert "anonymized_note_text" in streamed.columns
+
+
+@pytest.fixture(scope="module")
+def keep_equivalence(shared_dir, notes, stub_transformer):
+    return {
+        mode: run_mode(shared_dir, notes, mode, name=f"keep_{mode}", keep_entities="DATE,PERSON")
+        for mode in ("discrete", "streamed")
+    }
+
+
+class TestKeepEntities:
+    def test_both_modes_keep_the_listed_types_and_agree(self, keep_equivalence, equivalence):
+        _, discrete = keep_equivalence["discrete"]
+        _, streamed = keep_equivalence["streamed"]
+        d = discrete.set_index("row_id").sort_index()
+        s = streamed.set_index("row_id").sort_index()
+        pd.testing.assert_series_equal(d["anonymized_note_text"], s["anonymized_note_text"], check_names=False)
+        for row_id in d.index:
+            assert canonical_items(d.loc[row_id, "anonymizer_results_json"]) == canonical_items(
+                s.loc[row_id, "anonymizer_results_json"]
+            )
+
+        for df in (discrete, streamed):
+            assert df["anonymized_note_text"].str.contains(STUB_ENTITY).all()
+            assert not df["anonymized_note_text"].str.contains("MRN 1234").any()
+            items = [item for raw in df["anonymizer_results_json"] for item in json.loads(raw)]
+            assert {item["entity_type"] for item in items} >= {"PERSON", "MRN"}
+            for item in items:
+                assert (item["operator"] == "keep") == (item["entity_type"] in {"PERSON", "DATE"})
+
+        # Without the setting the same notes lose the name.
+        _, plain = equivalence["streamed"]
+        assert not plain["anonymized_note_text"].str.contains(STUB_ENTITY).any()
 
 
 @pytest.fixture(scope="module")
