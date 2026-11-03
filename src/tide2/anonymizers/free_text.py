@@ -37,6 +37,7 @@ def _worker(
     max_jitter_days: int,
     max_age: int,
     acc_num_hash: bool = False,
+    keep_entities: frozenset[str] = frozenset(),
 ) -> AnonymizerWorker:
     """Return the worker for these settings, built once per process (the engine setup is costly)."""
     return AnonymizerWorker(
@@ -48,6 +49,7 @@ def _worker(
         max_jitter_days=max_jitter_days,
         max_age=max_age,
         acc_num_hash=acc_num_hash,
+        keep_entities=keep_entities,
     )
 
 
@@ -65,6 +67,7 @@ def anonymize_free_text(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     acc_num_hash: bool = False,
+    keep_entities: frozenset[str] = frozenset(),
 ) -> str | None:
     """Anonymize a free-text cell with the spans found by the recognition stages.
 
@@ -88,6 +91,7 @@ def anonymize_free_text(
         acc_num_salt: Salt for accession number hashing.
         acc_num_study_id: Study ID for accession number hashing.
         acc_num_hash: Hash ``ACC_NUM`` spans with ``accession_number_hash`` instead of HIPS alphanumeric.
+        keep_entities: Entity types whose spans are left unchanged.
 
     Returns:
         The anonymized text, or ``None`` when the spans are unusable (null, malformed or outside
@@ -97,7 +101,17 @@ def anonymize_free_text(
     Raises:
         ValueError: If the keys or the jitter range are invalid.
     """
-    worker = _worker(salt, key, acc_num_salt, acc_num_study_id, min_jitter_days, max_jitter_days, max_age, acc_num_hash)
+    worker = _worker(
+        salt,
+        key,
+        acc_num_salt,
+        acc_num_study_id,
+        min_jitter_days,
+        max_jitter_days,
+        max_age,
+        acc_num_hash,
+        keep_entities,
+    )
     text_hash = AnonymizerWorker.compute_text_hash(text)
     try:
         result = worker.process_note(text, text_hash, recognizer_results, patient_id, jitter, birth_date)

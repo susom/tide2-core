@@ -96,6 +96,7 @@ class AnonymizerWorker:
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
         acc_num_hash: bool = False,
+        keep_entities: frozenset[str] = frozenset(),
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -115,6 +116,8 @@ class AnonymizerWorker:
             acc_num_hash: If True, ACC_NUM uses ``accession_number_hash`` (BigQuery-compatible
                 SHA256 with ``acc_num_salt``/``acc_num_study_id``/patient_id); otherwise it
                 uses ``hips_alphanumeric`` and the ``acc_num_*`` settings are ignored.
+            keep_entities: Entity types whose spans are left unchanged (Presidio ``keep``). Build it
+                with ``parse_keep_entities``; it is not validated here.
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -139,6 +142,7 @@ class AnonymizerWorker:
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
         self.acc_num_hash = acc_num_hash
+        self.keep_entities = frozenset(keep_entities)
         self.jitter_required = jitter_required
         self.min_jitter_days = min_jitter_days
         self.max_jitter_days = max_jitter_days
@@ -310,6 +314,7 @@ class AnonymizerWorker:
                 },
             )
 
+        operators.update({entity_type: OperatorConfig("keep") for entity_type in self.keep_entities})
         return operators
 
     def _parse_recognizer_results(self, results_json: str | list | None, note_text: str) -> list[RecognizerResult]:
@@ -526,7 +531,8 @@ class AnonymizerWorker:
             if is_null(jitter):
                 if self.jitter_required:
                     mask_dates = True
-                    record_error("DATE", "jitter_required")
+                    if not {"DATE", "DATE_TIME"} <= self.keep_entities:
+                        record_error("DATE", "jitter_required")
                 else:
                     jitter = self._compute_jitter_for_patient(patient_id)
 
@@ -740,6 +746,7 @@ def create_anonymizer_actor(
     max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     max_age: int = DEFAULT_MAX_AGE,
     acc_num_hash: bool = False,
+    keep_entities: frozenset[str] = frozenset(),
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -758,6 +765,7 @@ def create_anonymizer_actor(
         max_jitter_days: Maximum absolute date jitter in days
         max_age: Dates after this birthday are moved to it for notes with a birth_date
         acc_num_hash: If True, hash ACC_NUM with accession_number_hash instead of hips_alphanumeric
+        keep_entities: Entity types whose spans are left unchanged
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -790,6 +798,7 @@ def create_anonymizer_actor(
                 max_jitter_days=max_jitter_days,
                 max_age=max_age,
                 acc_num_hash=acc_num_hash,
+                keep_entities=keep_entities,
             )
 
     return ConfiguredAnonymizerActor
