@@ -441,8 +441,11 @@ def test_cli_and_runner_defaults_match_the_operator_constants() -> None:
 )
 def test_zip_mode_is_the_last_parameter_so_positional_calls_keep_their_meaning(func: Any) -> None:
     params = list(inspect.signature(func).parameters)
-    # acc_num_hash and keep_entities were added after zip_mode, so positional calls that end at zip_mode keep their meaning.
-    assert params[params.index("zip_mode") :] == ["zip_mode", "acc_num_hash", "keep_entities"]
+    # Later parameters were added after zip_mode, so positional calls that end at zip_mode keep their meaning.
+    expected = ["zip_mode", "acc_num_hash", "keep_entities"]
+    if func is cell.anonymize_cell:
+        expected.append("fpe_mode")
+    assert params[params.index("zip_mode") :] == expected
 
 
 def test_run_anonymization_positional_cpu_arguments_are_unchanged() -> None:
