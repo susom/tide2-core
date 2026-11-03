@@ -56,6 +56,7 @@ def test_strict_unchanged(strict: FormatPreservingEncryption) -> None:
         assert operator.operate(case["input"], {"salt": SALT, "key": KEY}) == case["output"], case["input"]
 
 
+@pytest.mark.slow
 def test_relaxed_exhaustive_small_width(relaxed: FormatPreservingEncryption) -> None:
     """A 22-bit signed domain (21-bit magnitude, 10/11 split) is a permutation that keeps the sign."""
     width = 21
@@ -106,6 +107,16 @@ def test_relaxed_eligible(relaxed: FormatPreservingEncryption, text: str) -> Non
     assert format_type == FormatPreservingEncryption.FORMAT_INT64
     assert out == str(relaxed.encrypt_int(int(text)))
     assert relaxed.decrypt(out) == text
+
+
+def test_zero_is_a_fixed_point_in_strict_mode_only(
+    relaxed: FormatPreservingEncryption, strict: FormatPreservingEncryption
+) -> None:
+    assert strict.encrypt_int(0) == 0
+    assert relaxed.encrypt_int(0) != 0
+    preimage = relaxed.decrypt_int(0)
+    assert preimage != 0
+    assert relaxed.encrypt_int(preimage) == 0
 
 
 @pytest.mark.parametrize(

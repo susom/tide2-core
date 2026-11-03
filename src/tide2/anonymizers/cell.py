@@ -211,8 +211,9 @@ def anonymize_cell(
             type is returned as its text; in a ``FREE_TEXT`` cell their spans are left unchanged.
         fpe_mode: ``"relaxed"`` (default) or ``"strict"``, for the FPE entity types. Relaxed sends a value
             that is an INT64 (an ``int`` or a digit string such as ``"123"`` or ``"-5"``, no leading zero)
-            through a faster keyed permutation of the INT64 range: no collisions, same sign, but not the
-            same digit count; other values use FF1. Strict uses FF1 for every value and matches
+            through a faster keyed permutation of the INT64 range: no collisions, non-negative values stay
+            non-negative and negative ones negative, but not the same digit count and zero is not a fixed
+            point (do not use ``0`` as a sentinel); other values use FF1. Strict uses FF1 for every value and matches
             ``process_note``. ``FREE_TEXT`` cells always use strict.
 
     Returns:

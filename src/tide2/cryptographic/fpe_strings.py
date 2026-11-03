@@ -25,8 +25,10 @@ Longer content uses FF1 with cycle-walking back into the input's class.
 
 Relaxed mode (``mode="relaxed"``) is a faster path for INT64 values. A value that is an INT64
 (a Python ``int`` or a digit string such as ``"123"`` or ``"-5"``, no leading zero) goes through a keyed
-Feistel permutation of the INT64 range built on FarmHash. Its output is an INT64 of the same sign with
-no collisions, but it does not keep the digit count. Everything else takes the FF1 path above.
+Feistel permutation of the INT64 range built on FarmHash. Its output is an INT64 with no collisions: a
+non-negative input gives a non-negative output and a negative input a negative one, but zero is not a
+fixed point (``0`` maps to another value, and another value maps to ``0``), so callers must not treat
+``0`` as a sentinel in relaxed mode. The digit count is not kept. Everything else takes the FF1 path above.
 Relaxed mode is keyed pseudonymization, not NIST-approved encryption: the permutation is exact, but
 its secrecy rests on FarmHash acting as a keyed PRF, for which there is no proof. Use strict mode (FF1)
 when an attacker may hold many known (input, output) pairs.
@@ -402,9 +404,10 @@ class FormatPreservingEncryption:
     def encrypt_int(self, value: int) -> int:
         """Encrypt an INT64 value; the result equals int(encrypt(str(value))) and stays in INT64.
 
-        The sign and zero are kept. In strict mode the minimum INT64 value (-2**63) maps to
-        itself, because the string mapping keeps the magnitude 2**63 fixed; in relaxed mode it
-        is permuted like any other value.
+        The sign is kept (non-negative stays non-negative, negative stays negative). In strict
+        mode zero is a fixed point and the minimum INT64 value (-2**63) maps to itself, because
+        the string mapping keeps the magnitude 2**63 fixed; in relaxed mode neither is a fixed
+        point, and a non-zero value can map to zero.
 
         Args:
             value: Integer in the INT64 range.
