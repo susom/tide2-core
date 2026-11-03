@@ -2156,7 +2156,7 @@ class LocalJobRunner:
         validate_max_age((anonymizer_kwargs or {}).get("max_age", DEFAULT_MAX_AGE))
         from tide2.anonymizers.cell import parse_keep_entities
 
-        parse_keep_entities((anonymizer_kwargs or {}).get("keep_entities"))
+        keep_entity_types = parse_keep_entities((anonymizer_kwargs or {}).get("keep_entities"))
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)
@@ -2216,6 +2216,9 @@ class LocalJobRunner:
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
         _validate_zip_mode(a_kw.get("zip_mode", "relaxed"))
+        if "keep_entities" in a_kw:
+            # A one-shot iterable was consumed by the validation above; forward the parsed set.
+            a_kw["keep_entities"] = keep_entity_types
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------
