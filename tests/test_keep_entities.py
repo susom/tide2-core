@@ -193,6 +193,37 @@ def test_runner_rejects_unknown_names_before_ray_starts(monkeypatch: pytest.Monk
         runner.run_pipeline("in", "out", "model", anonymizer_kwargs={"keep_entities": "NOPE"})
 
 
+@pytest.mark.parametrize("execution_mode", ["discrete", "streamed"])
+def test_pipeline_forwards_keep_entities_given_as_a_one_shot_iterable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, execution_mode: str
+) -> None:
+    runner = local_runner.LocalJobRunner()
+    forwarded: dict = {}
+
+    def capture(*_args, **kwargs):
+        forwarded.update(kwargs.get("anonymizer_kwargs") or _args[-1])
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(local_runner, "resolve_input_files", lambda _path: ["in.parquet"])
+    monkeypatch.setattr(local_runner, "_inspect_pipeline_input", lambda _files: MagicMock())
+    monkeypatch.setattr(runner, "_streamed_fallback_reason", lambda **_kw: None)
+    monkeypatch.setattr(runner, "_run_pipeline_streamed", capture)
+    monkeypatch.setattr(runner, "_apply_pipeline_recommendations", capture)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        runner.run_pipeline(
+            "in",
+            str(tmp_path),
+            "model",
+            salt_hex="00" * 32,
+            key_hex="11" * 32,
+            anonymizer_kwargs={"keep_entities": iter(["DATE"])},
+            execution_mode=execution_mode,
+        )
+
+    assert cell.parse_keep_entities(forwarded["keep_entities"]) == cell.parse_keep_entities("DATE")
+
+
 @pytest.fixture
 def fake_runner(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     runner = MagicMock()
