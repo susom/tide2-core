@@ -72,9 +72,30 @@ def test_matches_process_note(worker: AnonymizerWorker, case: dict) -> None:
         jitter=case["jitter"],
     )["anonymized_note_text"]
     got = cell.anonymize_cell(
-        value, case["entity_type"], SALT, KEY, patient_id=case["patient_id"], jitter=case["jitter"]
+        value, case["entity_type"], SALT, KEY, patient_id=case["patient_id"], jitter=case["jitter"], fpe_mode="strict"
     )
     assert got == expected
+
+
+def test_relaxed_differs_from_process_note_for_an_int64_value(worker: AnonymizerWorker) -> None:
+    value = "48291037"
+    expected = worker.process_note(
+        note_text=value,
+        original_text_hash=worker.compute_text_hash(value),
+        recognizer_results_json=[{"entity_type": "MRN", "start": 0, "end": len(value), "score": 1.0}],
+    )["anonymized_note_text"]
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY) != expected
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="strict") == expected
+
+
+@pytest.mark.parametrize("value", ["00482910", "ACC123456", "AB-9021-X7", "(555) 014-8821", "900-12-3456"])
+def test_relaxed_matches_process_note_for_a_value_that_is_not_an_int64(worker: AnonymizerWorker, value: str) -> None:
+    expected = worker.process_note(
+        note_text=value,
+        original_text_hash=worker.compute_text_hash(value),
+        recognizer_results_json=[{"entity_type": "MRN", "start": 0, "end": len(value), "score": 1.0}],
+    )["anonymized_note_text"]
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY) == expected
 
 
 def test_null_patient_gets_a_random_shift() -> None:
@@ -98,6 +119,14 @@ def test_null_value_stays_null() -> None:
 
 def test_numeric_value_is_stringified() -> None:
     assert cell.anonymize_cell(48291037, "MRN", SALT, KEY) == cell.anonymize_cell("48291037", "MRN", SALT, KEY)
+
+
+@pytest.mark.parametrize("value", [1, 7, 604821, 48291037, 9182736455463728191])
+def test_int64_style_value_round_trips_through_int_without_losing_a_digit(value: int) -> None:
+    out = cell.anonymize_cell(str(value), "ID", SALT, KEY, fpe_mode="strict")
+    assert not out.startswith("0")
+    assert len(out) == len(str(value))
+    assert len(str(int(out))) == len(str(value))
 
 
 @pytest.mark.parametrize("entity_type", ["PERSON", "", None])

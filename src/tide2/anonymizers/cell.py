@@ -1,7 +1,9 @@
 """Cell-level anonymization of one structured value.
 
 ``anonymize_cell`` gives the result ``AnonymizerWorker.process_note`` gives for the value as a one-span
-note of the given entity type, without a Presidio engine. Backends that anonymize table columns (Ray,
+note of the given entity type, without a Presidio engine. This holds with ``fpe_mode="strict"``, and in
+the default relaxed mode for every value that is not an INT64 (see ``anonymize_cell``). Backends that
+anonymize table columns (Ray,
 BigQuery) call it once per cell.
 
 This module is shipped on its own in the BigQuery UDF bundle, where ``tide2`` and ``tide2.anonymizers``
@@ -32,13 +34,15 @@ from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
-from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
+from tide2.cryptographic.fpe_strings import MODE_RELAXED
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
 
 __docformat__ = "google"
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_FPE_MODE = MODE_RELAXED
 
 FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     {
@@ -120,7 +124,6 @@ def _operators() -> tuple[Operator, Operator]:
 
     Keys travel in the per-call params, so the instances do not depend on them.
     """
-    FormatPreservingEncryption.suppress_short_input_warnings = True
     return guarded(HipsAlphaNumericAnonymizer)(), guarded(DateJitterAnonymizer)()
 
 
@@ -171,6 +174,7 @@ def anonymize_cell(
     acc_num_study_id: str | None = None,
     acc_num_hash: bool = False,
     keep_entities: frozenset[str] = frozenset(),
+    fpe_mode: str = DEFAULT_FPE_MODE,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -205,6 +209,12 @@ def anonymize_cell(
             alphanumeric, matching the default ``AnonymizerWorker``.
         keep_entities: Entity types left as they are, from ``parse_keep_entities``. A cell of such a
             type is returned as its text; in a ``FREE_TEXT`` cell their spans are left unchanged.
+        fpe_mode: ``"relaxed"`` (default) or ``"strict"``, for the FPE entity types. Relaxed sends a value
+            that is an INT64 (an ``int`` or a digit string such as ``"123"`` or ``"-5"``, no leading zero)
+            through a faster keyed permutation of the INT64 range: no collisions, non-negative values stay
+            non-negative and negative ones negative, but not the same digit count and zero is not a fixed
+            point (do not use ``0`` as a sentinel); other values use FF1. Strict uses FF1 for every value and matches
+            ``process_note``. ``FREE_TEXT`` cells always use strict.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -272,7 +282,7 @@ def anonymize_cell(
         if entity_type in DATE_PART_ENTITY_TYPES:
             params["full_date"] = full_date
     else:
-        operator, params = fpe, {"salt": salt, "key": key}
+        operator, params = fpe, {"salt": salt, "key": key, "fpe_mode": fpe_mode}
     params["entity_type"] = entity_type
 
     # The guarded operator validates inside operate() and masks on error.

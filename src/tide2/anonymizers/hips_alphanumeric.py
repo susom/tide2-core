@@ -1,7 +1,8 @@
 """Format-preserving encryption operator for alphanumeric identifiers.
 
-Uses FF3-based FPE to deterministically encrypt identifiers (MRNs, accession
-numbers, etc.) while preserving their character format and length.
+Uses collision-free FF1-based FPE to deterministically encrypt identifiers (MRNs, accession
+numbers, etc.) while preserving their character format and length. With ``fpe_mode="relaxed"``
+INT64 values use a faster permutation of the INT64 range that does not keep the digit count.
 """
 
 from functools import lru_cache
@@ -9,11 +10,13 @@ from functools import lru_cache
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.cryptographic.fpe_strings import FPE_MODES
+from tide2.cryptographic.fpe_strings import MODE_STRICT
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 
 
 @lru_cache(maxsize=16)
-def _get_cached_fpe(salt: bytes, key: bytes) -> FormatPreservingEncryption:
+def _get_cached_fpe(salt: bytes, key: bytes, mode: str = MODE_STRICT) -> FormatPreservingEncryption:
     """
     Get a cached FormatPreservingEncryption instance.
 
@@ -23,11 +26,12 @@ def _get_cached_fpe(salt: bytes, key: bytes) -> FormatPreservingEncryption:
     Args:
         salt: 32-byte salt
         key: 32-byte key
+        mode: "strict" or "relaxed"
 
     Returns:
         Cached FormatPreservingEncryption instance
     """
-    return FormatPreservingEncryption(salt, key)
+    return FormatPreservingEncryption(salt, key, mode)
 
 
 class HipsAlphaNumericAnonymizer(Operator):
@@ -42,20 +46,18 @@ class HipsAlphaNumericAnonymizer(Operator):
         """Initialize the HIPS alphanumeric anonymizer."""
         super().__init__()
 
-        self.entities_supported = set(
-            [
-                "DEFAULT",
-                "PHONE",
-                "PHONE_NUMBER",
-                "US_SSN",
-                "MEDICAL_LICENSE",
-                "MRN",
-                "HAR",
-                "ACC_NUM",
-                "ID",
-                "CSN_ID",
-            ]
-        )
+        self.entities_supported = {
+            "DEFAULT",
+            "PHONE",
+            "PHONE_NUMBER",
+            "US_SSN",
+            "MEDICAL_LICENSE",
+            "MRN",
+            "HAR",
+            "ACC_NUM",
+            "ID",
+            "CSN_ID",
+        }
 
     def operate(self, text: str, params: dict) -> str:
         """Anonymize the input text using format-preserving encryption.
@@ -65,6 +67,7 @@ class HipsAlphaNumericAnonymizer(Operator):
             params: Operator parameters. Required keys:
                 - salt (str): Cryptographic salt for deterministic output.
                 - key (str): Encryption key for FPE.
+                - fpe_mode (str, optional): "strict" (default) or "relaxed".
 
         Returns:
             The encrypted text preserving the original character format.
@@ -74,7 +77,7 @@ class HipsAlphaNumericAnonymizer(Operator):
         key = params["key"]
 
         # Use cached FPE instance for performance
-        fpe = _get_cached_fpe(salt, key)
+        fpe = _get_cached_fpe(salt, key, params.get("fpe_mode", MODE_STRICT))
 
         new_text, _type_recognized = fpe.encrypt(text)
 
@@ -92,6 +95,10 @@ class HipsAlphaNumericAnonymizer(Operator):
         key = params.get("key")
         if not salt or not key:
             raise ValueError("Both 'salt' and 'key' must be provided for HipsAlphaNumericAnonymizer.")
+
+        fpe_mode = params.get("fpe_mode", MODE_STRICT)
+        if fpe_mode not in FPE_MODES:
+            raise ValueError(f"Unknown fpe_mode {fpe_mode!r}; valid modes: {list(FPE_MODES)}")
 
     def operator_name(self) -> str:
         """Return the operator name."""

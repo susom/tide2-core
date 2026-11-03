@@ -128,6 +128,32 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Deterministic date jitter**: Batch-capable date shift derivation from cryptographic keys
 - **String Selection**: HMAC-based cached string selection
 
+#### Format-preserving encryption (FPE)
+
+Identifier entity types (`MRN`, `HAR`, `ID`, `CSN_ID`, `US_SSN`, `PHONE_NUMBER`, `PHONE`, `MEDICAL_LICENSE`) are pseudonymized with **NIST FF1** (AES-256, via the `fastfpe` package). Non-alphanumeric characters stay where they are; the alphanumeric content is permuted inside its class and keeps its length. The mapping is one-to-one and reversible, has no length limit, and does not depend on the entity type or on whether the value is stored as `STRING` or `INT64`.
+
+| Class | Content | Output |
+|---|---|---|
+| N | digits, no leading zero | digits, no leading zero (`int()` is safe; 19-digit values stay on the same side of 2^63-1) |
+| Z | exactly `0` | `0` |
+| S | digit string starting with `0` (two or more characters) | digit string starting with `0` |
+| A | contains a letter | contains a letter |
+
+Content shorter than FF1's minimum domain (fewer than 6 digits or 4 alphanumeric characters) is permuted with keyed tables built on first use; longer content uses FF1 with cycle-walking back into the same class. `FormatPreservingEncryption.encrypt_int` and `decrypt_int` apply the same mapping to `INT64` values. How collision-freeness is tested, and the results for `INT64`, are in the [FPE verification guide](guides/fpe_collision_free_verification.md).
+
+FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **Every FPE pseudonym differs from releases that used FF3**, in notes and in tables, so outputs from before and after this change do not join. Re-run from source data to regenerate them.
+
+##### Relaxed mode for `INT64` cells
+
+`anonymize_cell(..., fpe_mode="relaxed")` (the default) pseudonymizes a cell that is an `INT64` with a keyed permutation of the `INT64` range instead of FF1: an 8-round Feistel network whose round function is FarmHash (`cityhash==0.4.10`, module `farmhash`), with the sign handled outside the permutation. Measured through `anonymize_cell` (Apple Silicon, Python 3.12), it takes about 2.7 µs per value against 10 to 12 µs for FF1. An `INT64` is a Python `int` or a string of digits in the `INT64` range with no leading zero and no `-0` (for example `123456` or `-5`). Anything else (leading zeros, separators, letters, values beyond `INT64`) still uses FF1.
+
+- **No collisions:** distinct `INT64` values always get distinct outputs, whatever the number of values. A keyed hash cut to 63 bits would give a 5% chance of a collision at 10^9 distinct values and near certainty at 10^10.
+- **Sign, but not zero:** a non-negative value stays non-negative and a negative one stays negative. Zero is not a fixed point: `0` maps to another value, and another value maps to `0`. Strict mode keeps `0` as `0`. Do not rely on `0` as a sentinel in relaxed mode.
+- **The digit count changes.** About 89% of non-negative outputs have 19 digits. A column that must keep the length uses `fpe_mode="strict"`.
+- **Cells and notes no longer match:** the same MRN gets a relaxed pseudonym in a cell and an FF1 pseudonym in a note, so a pseudonymized `INT64` ID no longer links a table row to a note. Set `fpe_mode="strict"` when that link is needed. A dataset must use one mode throughout, because the two modes give different outputs for the same value.
+- **Notes are not affected:** free-text notes and `FREE_TEXT` cells always use strict mode.
+- **Security:** relaxed mode is keyed pseudonymization, not NIST-approved encryption. One-to-one output is guaranteed by the Feistel structure; secrecy rests on FarmHash, keyed with a 32-byte prefix, behaving like a keyed PRF, which has no proof. It protects against someone holding pseudonymized tables without the key. It does not cover an attacker with many known (input, output) pairs; use strict mode for that.
+
 ### Ray-based Batch Processing
 - **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
 - **Ray actors**: `RecognizerActor`, `AnonymizerActor`, `TransformerInferenceActor`, `BIOAggregationActor` for `ray.data.map_batches`
@@ -894,6 +920,9 @@ uv run pytest tests/test_masking_anonymizer.py
 
 # Skip slow integration tests
 uv run pytest -m "not integration"
+
+# Skip the exhaustive FPE tests (about a minute)
+uv run pytest -m "not slow"
 ```
 
 Coverage is configured in `pyproject.toml` and runs automatically with `pytest`. Three reports are generated on each run:
