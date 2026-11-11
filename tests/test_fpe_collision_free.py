@@ -214,8 +214,8 @@ def test_fpe_cf_int64_min_string_and_cell_agree(fpe: FormatPreservingEncryption)
     """The magnitude 2**63 is a fixed point, so the string path (used by anonymize_cell) stays in range."""
     assert fpe.encrypt("-9223372036854775808")[0] == "-9223372036854775808"
     assert fpe.decrypt("-9223372036854775808") == "-9223372036854775808"
-    assert cell.anonymize_cell("-9223372036854775808", "ID", SALT, KEY) == "-9223372036854775808"
-    assert cell.anonymize_cell(INT64_MIN, "ID", SALT, KEY) == str(fpe.encrypt_int(INT64_MIN))
+    assert cell.anonymize_cell("-9223372036854775808", "ID", SALT, KEY, fpe_mode="strict") == "-9223372036854775808"
+    assert cell.anonymize_cell(INT64_MIN, "ID", SALT, KEY, fpe_mode="strict") == str(fpe.encrypt_int(INT64_MIN))
 
 
 def test_fpe_cf_int64_min_magnitude_is_reserved(fpe: FormatPreservingEncryption) -> None:

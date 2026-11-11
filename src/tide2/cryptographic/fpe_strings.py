@@ -23,16 +23,28 @@ Classes (each (class, length) map is a permutation, so the mapping is one-to-one
 Content shorter than FF1's minimum domain (10**6) is permuted with keyed tables.
 Longer content uses FF1 with cycle-walking back into the input's class.
 
+Relaxed mode (``mode="relaxed"``) is a faster path for INT64 values. A value that is an INT64
+(a Python ``int`` or a digit string such as ``"123"`` or ``"-5"``, no leading zero) goes through a keyed
+Feistel permutation of the INT64 range built on FarmHash. Its output is an INT64 with no collisions: a
+non-negative input gives a non-negative output and a negative input a negative one, but zero is not a
+fixed point (``0`` maps to another value, and another value maps to ``0``), so callers must not treat
+``0`` as a sentinel in relaxed mode. The digit count is not kept. Everything else takes the FF1 path above.
+Relaxed mode is keyed pseudonymization, not NIST-approved encryption: the permutation is exact, but
+its secrecy rests on FarmHash acting as a keyed PRF, for which there is no proof. Use strict mode (FF1)
+when an attacker may hold many known (input, output) pairs.
+
 All operations are deterministic and reversible.
 """
 
 import hashlib
 import hmac
 import itertools
+import re
 import string
 import threading
 import warnings
 
+from farmhash import Fingerprint128  # ty: ignore[unresolved-import]
 from fastfpe import ff1
 
 # Character sets for fast membership testing
@@ -55,6 +67,37 @@ _CLASS_ALPHANUMERIC = "A"
 _KEY_LABEL = b"tide2-fpe-ff1-v1"
 _SMALL_DOMAIN_LABEL = b"tide2-fpe-small-domain-v1"
 _TWEAK_LABEL = "tide2-fpe-v2:"
+_RELAXED_LABEL = b"tide2-fpe-relaxed-int64-v1"
+
+MODE_STRICT = "strict"
+MODE_RELAXED = "relaxed"
+FPE_MODES = (MODE_STRICT, MODE_RELAXED)
+
+_RELAXED_ROUNDS = 8
+_INT64_MAGNITUDE_BITS = 63
+# No leading zero and no "-0", so that str(int(text)) == text.
+_INT64_TEXT = re.compile(r"0|-?[1-9][0-9]*")
+# One past the longest INT64 string ("-9223372036854775808").
+_INT64_TEXT_MAX_LENGTH = 20
+
+
+def _feistel(x: int, prefixes: tuple[bytes, ...], width: int = _INT64_MAGNITUDE_BITS, decrypt: bool = False) -> int:
+    """Apply the keyed Feistel permutation of ``[0, 2**width)`` to ``x``, or its inverse.
+
+    The halves have ``width // 2`` and ``width - width // 2`` bits and swap sizes every round.
+    The round function is FarmHash of a per-round key prefix and the other half.
+    """
+    low_bits = width // 2
+    high_bits = width - low_bits
+    masks = ((1 << low_bits) - 1, (1 << high_bits) - 1)
+    a, b = x >> high_bits, x & masks[1]
+    if decrypt:
+        for i in range(len(prefixes) - 1, -1, -1):
+            a, b = b ^ (Fingerprint128(prefixes[i] + a.to_bytes(4, "little")) & masks[i & 1]), a
+    else:
+        for i, prefix in enumerate(prefixes):
+            a, b = b, a ^ (Fingerprint128(prefix + b.to_bytes(4, "little")) & masks[i & 1])
+    return (a << high_bits) | b
 
 
 class FormatPreservingEncryption:
@@ -71,6 +114,7 @@ class FormatPreservingEncryption:
     FORMAT_ALPHANUMERIC = "alphanumeric"
     FORMAT_EMPTY = "empty"
     FORMAT_PASSTHROUGH = "passthrough"
+    FORMAT_INT64 = "int64"
 
     # Alphabets for FF1
     ALPHABET_DIGITS = "0123456789"
@@ -88,21 +132,26 @@ class FormatPreservingEncryption:
     # Cycle-walking cap; unreachable in practice
     MAX_WALK_STEPS = 10_000
 
-    def __init__(self, salt: bytes, key: bytes):
+    def __init__(self, salt: bytes, key: bytes, mode: str = MODE_STRICT):
         """Initialize FPE with salt and key.
 
         Args:
             salt: 32-byte salt.
             key: Key (any length).
+            mode: ``"strict"`` encrypts every value with FF1. ``"relaxed"`` sends INT64 values
+                through a faster permutation of the INT64 range and the rest through FF1.
 
         Raises:
-            ValueError: If the salt is not exactly 32 bytes.
+            ValueError: If the salt is not exactly 32 bytes or the mode is unknown.
         """
         if len(salt) != self.SALT_LENGTH:
             raise ValueError("Salt must be exactly 32 bytes (256 bits)")
+        if mode not in FPE_MODES:
+            raise ValueError(f"Unknown FPE mode {mode!r}; valid modes: {list(FPE_MODES)}")
 
         self.salt = salt
         self.key = key
+        self.mode = mode
 
         # AES-256 key; the label separates it from any other use of the same salt and key
         self.encryption_key = hashlib.sha256(_KEY_LABEL + salt + key).digest()
@@ -115,6 +164,35 @@ class FormatPreservingEncryption:
 
         self._tables: dict[tuple[str, int], tuple[dict[str, str], dict[str, str]]] = {}
         self._tables_lock = threading.Lock()
+
+        # Index 0 is for values >= 0 and 1 for values < 0; the sign tag makes the two halves independent.
+        self._relaxed_prefixes: tuple[tuple[bytes, ...], tuple[bytes, ...]] = ((), ())
+        if mode == MODE_RELAXED:
+            master = hashlib.sha256(_RELAXED_LABEL + salt + key).digest()
+            round_keys = [hmac.digest(master, f"round:{i}".encode(), "sha256") for i in range(_RELAXED_ROUNDS)]
+            self._relaxed_prefixes = (
+                tuple(k + b"\x00" for k in round_keys),
+                tuple(k + b"\x01" for k in round_keys),
+            )
+
+    def _relaxed_int64(self, value: int, decrypt: bool = False, width: int = _INT64_MAGNITUDE_BITS) -> int:
+        """Permute ``value`` inside ``[-2**width, 2**width)``, keeping its sign.
+
+        A negative ``v`` is mapped to ``-1 - v`` in ``[0, 2**width)``, so each sign half has its own
+        permutation and the minimum INT64 value needs no special case.
+        """
+        if value >= 0:
+            return _feistel(value, self._relaxed_prefixes[0], width, decrypt)
+        return -1 - _feistel(-1 - value, self._relaxed_prefixes[1], width, decrypt)
+
+    def _is_relaxed(self, text: str) -> bool:
+        """Return True if ``text`` is an INT64 value that relaxed mode permutes directly."""
+        return (
+            self.mode == MODE_RELAXED
+            and len(text) <= _INT64_TEXT_MAX_LENGTH
+            and _INT64_TEXT.fullmatch(text) is not None
+            and INT64_MIN <= int(text) <= INT64_MAX
+        )
 
     def _extract_template(self, text: str) -> tuple[str, list[tuple[int, str]]]:
         """Extract alphanumeric content and record positions of other characters.
@@ -242,6 +320,8 @@ class FormatPreservingEncryption:
 
         Any non-alphanumeric characters are preserved at their original positions.
         Only alphanumeric content is encrypted, and it keeps its class and length.
+        In relaxed mode an INT64 string is permuted inside the INT64 range instead; it keeps
+        its sign but not its length.
 
         Args:
             plaintext: Text to encrypt.
@@ -259,6 +339,9 @@ class FormatPreservingEncryption:
         # Handle empty/whitespace
         if not plaintext or not plaintext.strip():
             return plaintext, self.FORMAT_EMPTY
+
+        if self._is_relaxed(plaintext):
+            return str(self._relaxed_int64(int(plaintext))), self.FORMAT_INT64
 
         # Extract template and content
         content, template = self._extract_template(plaintext)
@@ -289,6 +372,10 @@ class FormatPreservingEncryption:
         if not ciphertext or not ciphertext.strip():
             return ciphertext
 
+        # A relaxed output is an INT64 string, and no FF1 output is one.
+        if format_type != self.FORMAT_EMPTY and self._is_relaxed(ciphertext):
+            return str(self._relaxed_int64(int(ciphertext), decrypt=True))
+
         # Extract template and content
         content, template = self._extract_template(ciphertext)
 
@@ -317,8 +404,10 @@ class FormatPreservingEncryption:
     def encrypt_int(self, value: int) -> int:
         """Encrypt an INT64 value; the result equals int(encrypt(str(value))) and stays in INT64.
 
-        The sign and zero are kept. The minimum INT64 value (-2**63) maps to itself,
-        because the string mapping keeps the magnitude 2**63 fixed.
+        The sign is kept (non-negative stays non-negative, negative stays negative). In strict
+        mode zero is a fixed point and the minimum INT64 value (-2**63) maps to itself, because
+        the string mapping keeps the magnitude 2**63 fixed; in relaxed mode neither is a fixed
+        point, and a non-zero value can map to zero.
 
         Args:
             value: Integer in the INT64 range.
@@ -331,6 +420,8 @@ class FormatPreservingEncryption:
             ValueError: If value is outside the INT64 range.
         """
         self._check_int64(value)
+        if self.mode == MODE_RELAXED:
+            return self._relaxed_int64(value)
         return int(self.encrypt(str(value))[0])
 
     def decrypt_int(self, value: int) -> int:
@@ -347,6 +438,8 @@ class FormatPreservingEncryption:
             ValueError: If value is outside the INT64 range.
         """
         self._check_int64(value)
+        if self.mode == MODE_RELAXED:
+            return self._relaxed_int64(value, decrypt=True)
         return int(self.decrypt(str(value)))
 
     # Legacy method for backward compatibility
