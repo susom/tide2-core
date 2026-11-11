@@ -1488,6 +1488,8 @@ class LocalJobRunner:
         zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
         text_operators: str | Mapping[str, str] | Iterable[str | tuple[str, str]] | None = None,
         fpe_mode: str | None = None,
+        transformer_score_threshold: float | None = None,
+        recognizer_score_threshold: float | None = None,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1548,6 +1550,9 @@ class LocalJobRunner:
                 strings. Methods: ``keep``, ``hash``, ``acc_num_hash`` (needs ``acc_num_salt`` and ``acc_num_study_id``).
                 An invalid value raises ``ValueError`` before Ray starts.
             fpe_mode: ``"strict"`` (FF1, the default) or ``"relaxed"`` (faster for INT64 values).
+            transformer_score_threshold: Lowest score, 0.0 to 1.0, at which a transformer span is anonymized
+                (default 0.0). A lower span stays clear text.
+            recognizer_score_threshold: The same for a span of any other recognizer.
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1575,6 +1580,8 @@ class LocalJobRunner:
                 "fpe_mode": fpe_mode,
                 "zip_mode": zip_mode,
                 "jitter_required": jitter_required,
+                "transformer_score_threshold": transformer_score_threshold,
+                "recognizer_score_threshold": recognizer_score_threshold,
             }
         )
         check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id)

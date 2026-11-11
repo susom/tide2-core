@@ -76,6 +76,15 @@ REQUIRED_KEY_SIZE = 32
 # Must match or exceed recognizer chunk size so entities don't cross boundaries.
 MAX_ANON_CHUNK_SIZE = 100_000
 
+# recognizer_name of a transformer span: "TransformersRecognizer[<model>]" live, or the cached recognizer's name
+TRANSFORMER_RECOGNIZER_PREFIXES = ("TransformersRecognizer", "CachedResultsTransformerRecognizer")
+
+
+def _is_transformer_span(metadata: Any) -> bool:
+    """Return True if a transformer model produced the span, as its ``recognizer_name`` tells."""
+    name = metadata.get("recognizer_name") if isinstance(metadata, dict) else None
+    return isinstance(name, str) and name.startswith(TRANSFORMER_RECOGNIZER_PREFIXES)
+
 
 class AnonymizerWorker:
     """
@@ -306,6 +315,9 @@ class AnonymizerWorker:
     def _parse_recognizer_results(self, results_json: str | list | None, note_text: str) -> list[RecognizerResult]:
         """Parse and validate recognizer results.
 
+        Spans below the ``transformer_score_threshold`` or ``recognizer_score_threshold`` of the policy are
+        left out, after they pass the checks below.
+
         Args:
             results_json: A JSON list (string or already parsed) of results.
             note_text: The note; every span must lie inside it, and an entity type that is the
@@ -331,12 +343,16 @@ class AnonymizerWorker:
             raise NoteError("recognizer_results")
 
         parsed = []
+        transformer_min = self.policy.transformer_score_threshold
+        recognizer_min = self.policy.recognizer_score_threshold
         for item in results_list:
             if isinstance(item, RecognizerResult):
                 entity_type, start, end, score = item.entity_type, item.start, item.end, item.score
+                metadata = None
             elif isinstance(item, dict):
                 entity_type = item.get("entity_type", "UNKNOWN")
                 start, end, score = item.get("start"), item.get("end"), item.get("score", 1.0)
+                metadata = item.get("recognition_metadata")
             else:
                 raise NoteError("invalid_span")
 
@@ -348,6 +364,10 @@ class AnonymizerWorker:
             ):
                 raise NoteError("invalid_span")
             safe_type = safe_entity_type(entity_type, note_text[start:end])
+            # A span below the threshold of its recognizer type stays clear text. Dropping it here, before
+            # conflict resolution, keeps it from hiding an overlapping span of another recognizer.
+            if score < (transformer_min if _is_transformer_span(metadata) else recognizer_min):
+                continue
             if isinstance(item, RecognizerResult) and safe_type == entity_type:
                 parsed.append(item)
             else:

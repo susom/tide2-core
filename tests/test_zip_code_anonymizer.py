@@ -434,7 +434,13 @@ def test_cli_and_runner_defaults_match_the_operator_constants() -> None:
 def test_zip_mode_is_after_the_older_run_anonymization_parameters() -> None:
     params = list(inspect.signature(local_runner.LocalJobRunner.run_anonymization).parameters)
     # Later parameters were added after zip_mode, so positional calls that end at zip_mode keep their meaning.
-    assert params[params.index("zip_mode") :] == ["zip_mode", "text_operators", "fpe_mode"]
+    assert params[params.index("zip_mode") :] == [
+        "zip_mode",
+        "text_operators",
+        "fpe_mode",
+        "transformer_score_threshold",
+        "recognizer_score_threshold",
+    ]
 
 
 def test_run_anonymization_positional_cpu_arguments_are_unchanged() -> None:

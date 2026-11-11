@@ -123,6 +123,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 zip_mode=getattr(args, "zip_mode", DEFAULT_ZIP_MODE),
                 text_operators=getattr(args, "text_operators", None),
                 fpe_mode=args.fpe_mode,
+                transformer_score_threshold=args.transformer_score_threshold,
+                recognizer_score_threshold=args.recognizer_score_threshold,
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -254,6 +256,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("acc_num_study_id", "acc_num_study_id"),
                 ("text_operators", "text_operators"),
                 ("fpe_mode", "fpe_mode"),
+                ("transformer_score_threshold", "transformer_score_threshold"),
+                ("recognizer_score_threshold", "recognizer_score_threshold"),
                 ("read_cpus", "read_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -506,6 +510,18 @@ Examples:
     run_p.add_argument(
         "--fpe-mode",
         help="strict (FF1, default) or relaxed (faster for INT64 IDs) (anonymizer/pipeline jobs)",
+    )
+    run_p.add_argument(
+        "--transformer-score-threshold",
+        type=float,
+        help="Lowest score, 0.0 to 1.0, at which a transformer span is anonymized; a lower span stays clear text "
+        "(anonymizer/pipeline jobs, default: 0.0)",
+    )
+    run_p.add_argument(
+        "--recognizer-score-threshold",
+        type=float,
+        help="Lowest score, 0.0 to 1.0, at which a span of any other recognizer (regex, known values) is "
+        "anonymized; a lower span stays clear text (anonymizer/pipeline jobs, default: 0.0)",
     )
     run_p.add_argument(
         "--jitter-required",
