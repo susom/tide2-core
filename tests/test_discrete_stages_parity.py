@@ -366,6 +366,7 @@ def test_anonymizer_worker_patient_id_normalization():
     worker.key = b"\x11" * 32
     worker.acc_num_salt = "salt"
     worker.acc_num_study_id = "study"
+    worker.acc_num_hash = True
     worker._base_operators = {}
 
     # Valid patient_id
