@@ -13,6 +13,7 @@ import pytest
 from farmhash import Fingerprint128  # ty: ignore[unresolved-import]
 
 from tide2.anonymizers import cell
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
 from tide2.cryptographic.fpe_strings import INT64_MAX
 from tide2.cryptographic.fpe_strings import INT64_MIN
@@ -20,6 +21,7 @@ from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 
 SALT = b"\x01" * 32
 KEY = b"\x02" * 32
+RELAXED_POLICY = AnonymizationPolicy(fpe_mode="relaxed")
 FIXTURES = Path(__file__).parent / "fixtures"
 EDGES = [INT64_MIN, INT64_MIN + 1, -2, -1, 0, 1, 2, INT64_MAX - 1, INT64_MAX]
 
@@ -172,8 +174,8 @@ def test_relaxed_cross_path_injective(relaxed: FormatPreservingEncryption) -> No
 
 @pytest.mark.parametrize("value", [*EDGES, 48291037, -48291037, 604821])
 def test_relaxed_int_string_parity(value: int) -> None:
-    from_int = cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="relaxed")
-    assert from_int == cell.anonymize_cell(str(value), "MRN", SALT, KEY, fpe_mode="relaxed")
+    from_int = cell.anonymize_cell(value, "MRN", SALT, KEY, policy=RELAXED_POLICY)
+    assert from_int == cell.anonymize_cell(str(value), "MRN", SALT, KEY, policy=RELAXED_POLICY)
     assert from_int == str(FormatPreservingEncryption(SALT, KEY, "relaxed").encrypt_int(value))
 
 
@@ -194,8 +196,14 @@ def test_relaxed_differs_from_strict(relaxed: FormatPreservingEncryption, strict
 SPANS = [{"entity_type": "MRN", "start": 4, "end": 12, "score": 1.0}]
 
 
-def test_notes_stay_strict(strict: FormatPreservingEncryption) -> None:
-    out = cell.anonymize_cell("MRN 48291037 seen", "FREE_TEXT", SALT, KEY, recognizer_results=SPANS, fpe_mode="relaxed")
+def test_free_text_cell_follows_fpe_mode(
+    relaxed: FormatPreservingEncryption, strict: FormatPreservingEncryption
+) -> None:
+    out = cell.anonymize_cell(
+        "MRN 48291037 seen", "FREE_TEXT", SALT, KEY, recognizer_results=SPANS, policy=RELAXED_POLICY
+    )
+    assert out == f"MRN {relaxed.encrypt('48291037')[0]} seen"
+    out = cell.anonymize_cell("MRN 48291037 seen", "FREE_TEXT", SALT, KEY, recognizer_results=SPANS)
     assert out == f"MRN {strict.encrypt('48291037')[0]} seen"
 
 
@@ -204,7 +212,8 @@ def test_fpe_mode_validation() -> None:
         FormatPreservingEncryption(SALT, KEY, "fast")
     with pytest.raises(ValueError, match="Unknown fpe_mode"):
         HipsAlphaNumericAnonymizer().validate({"entity_type": "MRN", "salt": SALT, "key": KEY, "fpe_mode": "fast"})
-    assert cell.anonymize_cell("123456", "MRN", SALT, KEY, fpe_mode="fast") == "[MRN]"
+    with pytest.raises(ValueError, match="Unknown fpe_mode"):
+        AnonymizationPolicy(fpe_mode="fast")
 
 
 _DETERMINISM_CHILD = """

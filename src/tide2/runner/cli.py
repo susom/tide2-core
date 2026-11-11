@@ -23,8 +23,6 @@ from pathlib import Path
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
-from tide2.cryptographic.date_jitter import validate_jitter_parameters
-from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
@@ -125,6 +123,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 zip_mode=getattr(args, "zip_mode", DEFAULT_ZIP_MODE),
                 acc_num_hash=getattr(args, "acc_num_hash", False),
                 keep_entities=getattr(args, "keep_entities", None),
+                fpe_mode=args.fpe_mode,
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -257,6 +256,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("acc_num_salt", "acc_num_salt"),
                 ("acc_num_study_id", "acc_num_study_id"),
                 ("keep_entities", "keep_entities"),
+                ("fpe_mode", "fpe_mode"),
                 ("read_cpus", "read_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -513,6 +513,10 @@ Examples:
         "the date part types of cells. Kept text is not anonymized (anonymizer/pipeline jobs)",
     )
     run_p.add_argument(
+        "--fpe-mode",
+        help="strict (FF1, default) or relaxed (faster for INT64 IDs) (anonymizer/pipeline jobs)",
+    )
+    run_p.add_argument(
         "--jitter-required",
         action="store_true",
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
@@ -665,14 +669,10 @@ Examples:
         _apply_config(args, run_p, argv)
 
     if args.command == "run":
-        from tide2.anonymizers.cell import parse_keep_entities
+        from tide2.anonymizers.cell import AnonymizationPolicy
 
-        is_valid, message = validate_jitter_parameters(args.max_jitter_days, args.min_jitter_days)
-        if not is_valid:
-            run_p.error(message)
         try:
-            validate_max_age(args.max_age)
-            parse_keep_entities(args.keep_entities)
+            AnonymizationPolicy.from_mapping(vars(args))
         except ValueError as err:
             run_p.error(str(err))
     # argparse checks the flag, but a value from --config YAML bypasses its choices
