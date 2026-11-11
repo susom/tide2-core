@@ -509,8 +509,8 @@ Examples:
     run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (requires --acc-num-hash)")
     run_p.add_argument(
         "--keep-entities",
-        help="Comma-separated entity types left as they are, for example DATE,DATE_TIME,AGE; DATE also covers "
-        "the date part types of cells. Kept text is not anonymized (anonymizer/pipeline jobs)",
+        help="Comma-separated entity types left as they are in the notes, for example DATE,DATE_TIME,AGE. "
+        "Kept text is not anonymized (anonymizer/pipeline jobs)",
     )
     run_p.add_argument(
         "--fpe-mode",

@@ -1545,8 +1545,8 @@ class LocalJobRunner:
                 ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
             acc_num_hash: If True, hash ACC_NUM with accession_number_hash
                 (``acc_num_salt``/``acc_num_study_id``); otherwise use hips_alphanumeric.
-            keep_entities: Entity types left as they are, as a comma-separated string or a list
-                (for example ``DATE,AGE``). ``DATE`` also covers the date part types of cells.
+            keep_entities: Entity types left as they are in the notes, as a comma-separated string or a
+                list (for example ``DATE,AGE``).
                 An unknown name raises ``ValueError`` before Ray starts.
             fpe_mode: ``"strict"`` (FF1, the default) or ``"relaxed"`` (faster for INT64 values).
 
