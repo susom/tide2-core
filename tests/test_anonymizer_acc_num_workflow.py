@@ -15,6 +15,7 @@ import ray
 from tide2.actors.anonymizer import MAX_ANON_CHUNK_SIZE
 from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.anonymizers.accession_number_hash import AccessionNumberHashAnonymizer
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
 
 
@@ -35,8 +36,7 @@ def _get_worker_instance(acc_num_salt: str = "test_salt", acc_num_study_id: str 
         salt=b"0" * 32,
         key=b"1" * 32,
         acc_num_salt=acc_num_salt,
-        acc_num_study_id=acc_num_study_id,
-        acc_num_hash=True,
+        policy=AnonymizationPolicy(acc_num_study_id=acc_num_study_id, acc_num_hash=True),
     )
 
 
@@ -303,7 +303,7 @@ class TestAnonymizerWorkerAccNumDefault:
         assert expected != _compute_expected_hash(None, None, "p", "ACC776655")
 
     def test_acc_num_settings_ignored_without_flag(self):
-        assert self._anonymize(acc_num_salt="s", acc_num_study_id="u") == self._anonymize()
+        assert self._anonymize(acc_num_salt="s", policy=AnonymizationPolicy(acc_num_study_id="u")) == self._anonymize()
 
 
 @pytest.mark.integration
@@ -328,8 +328,7 @@ class TestAnonymizerWorkerRayWorkflow:
             salt=b"0" * 32,
             key=b"1" * 32,
             acc_num_salt="ray_salt",
-            acc_num_study_id="ray_study",
-            acc_num_hash=True,
+            policy=AnonymizationPolicy(acc_num_study_id="ray_study", acc_num_hash=True),
         )
 
         note = "Order accession: ACC776655."

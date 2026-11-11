@@ -6,6 +6,7 @@ import pytest
 
 from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.anonymizers import cell
+from tide2.anonymizers.cell import AnonymizationPolicy
 
 SALT = b"\x01" * 32
 KEY = b"\x02" * 32
@@ -72,7 +73,7 @@ def test_matches_process_note(worker: AnonymizerWorker, case: dict) -> None:
         jitter=case["jitter"],
     )["anonymized_note_text"]
     got = cell.anonymize_cell(
-        value, case["entity_type"], SALT, KEY, patient_id=case["patient_id"], jitter=case["jitter"], fpe_mode="strict"
+        value, case["entity_type"], SALT, KEY, patient_id=case["patient_id"], jitter=case["jitter"]
     )
     assert got == expected
 
@@ -84,7 +85,7 @@ def test_relaxed_differs_from_process_note_for_an_int64_value(worker: Anonymizer
         original_text_hash=worker.compute_text_hash(value),
         recognizer_results_json=[{"entity_type": "MRN", "start": 0, "end": len(value), "score": 1.0}],
     )["anonymized_note_text"]
-    assert cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="relaxed") != expected
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY, policy=AnonymizationPolicy(fpe_mode="relaxed")) != expected
     assert cell.anonymize_cell(value, "MRN", SALT, KEY) == expected
 
 
@@ -95,7 +96,7 @@ def test_relaxed_matches_process_note_for_a_value_that_is_not_an_int64(worker: A
         original_text_hash=worker.compute_text_hash(value),
         recognizer_results_json=[{"entity_type": "MRN", "start": 0, "end": len(value), "score": 1.0}],
     )["anonymized_note_text"]
-    assert cell.anonymize_cell(value, "MRN", SALT, KEY) == expected
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY, policy=AnonymizationPolicy(fpe_mode="relaxed")) == expected
 
 
 def test_null_patient_gets_a_random_shift() -> None:
@@ -108,7 +109,9 @@ def test_null_patient_gets_a_random_shift() -> None:
 
 def test_null_patient_random_shift_follows_the_range() -> None:
     for _ in range(200):
-        out = cell.anonymize_cell("2024-05-20", "DATE", SALT, KEY, min_jitter_days=10, max_jitter_days=20)
+        out = cell.anonymize_cell(
+            "2024-05-20", "DATE", SALT, KEY, policy=AnonymizationPolicy(min_jitter_days=10, max_jitter_days=20)
+        )
         assert 10 <= abs((date.fromisoformat(out) - date(2024, 5, 20)).days) <= 20
 
 
@@ -123,7 +126,7 @@ def test_numeric_value_is_stringified() -> None:
 
 @pytest.mark.parametrize("value", [1, 7, 604821, 48291037, 9182736455463728191])
 def test_int64_style_value_round_trips_through_int_without_losing_a_digit(value: int) -> None:
-    out = cell.anonymize_cell(str(value), "ID", SALT, KEY, fpe_mode="strict")
+    out = cell.anonymize_cell(str(value), "ID", SALT, KEY)
     assert not out.startswith("0")
     assert len(out) == len(str(value))
     assert len(str(int(out))) == len(str(value))

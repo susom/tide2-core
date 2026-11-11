@@ -9,6 +9,7 @@ from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.anonymizers import cell
 from tide2.anonymizers import free_text
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.runner import cli
 from tide2.runner import local_runner
 
@@ -41,7 +42,7 @@ def _fresh_workers():
 
 
 def _note(**worker_kwargs) -> dict:
-    worker = AnonymizerWorker(SALT, KEY, **worker_kwargs)
+    worker = AnonymizerWorker(SALT, KEY, policy=AnonymizationPolicy(**worker_kwargs))
     return worker.process_note(TEXT, worker.compute_text_hash(TEXT), json.dumps(SPANS), "FAKE-P0001", 7)
 
 
@@ -83,31 +84,46 @@ def test_keepable_types_cover_the_operator_map() -> None:
 )
 def test_cell_of_a_kept_type_is_returned_as_is(value: str, entity_type: str) -> None:
     kept = cell.parse_keep_entities(entity_type)
-    assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001", keep_entities=kept) == value
+    assert (
+        cell.anonymize_cell(
+            value, entity_type, SALT, KEY, patient_id="FAKE-P0001", policy=AnonymizationPolicy(keep_entities=kept)
+        )
+        == value
+    )
     assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001") != value
 
 
 def test_cell_of_a_type_not_listed_is_unchanged() -> None:
     kept = cell.parse_keep_entities("DATE")
     plain = cell.anonymize_cell("48291037", "MRN", SALT, KEY)
-    assert cell.anonymize_cell("48291037", "MRN", SALT, KEY, keep_entities=kept) == plain != "48291037"
+    assert (
+        cell.anonymize_cell("48291037", "MRN", SALT, KEY, policy=AnonymizationPolicy(keep_entities=kept))
+        == plain
+        != "48291037"
+    )
 
 
 def test_cell_date_keeps_the_part_types_and_date_month_alone_keeps_only_the_month() -> None:
     date_kept = cell.parse_keep_entities("DATE")
     for entity_type, value in [("DATE_DAY", 3.0), ("DATE_MONTH", 4), ("DATE_YEAR", "2024")]:
-        assert cell.anonymize_cell(value, entity_type, SALT, KEY, keep_entities=date_kept) == str(int(value))
+        assert cell.anonymize_cell(
+            value, entity_type, SALT, KEY, policy=AnonymizationPolicy(keep_entities=date_kept)
+        ) == str(int(value))
 
     month_kept = cell.parse_keep_entities("DATE_MONTH")
-    kwargs = {"patient_id": "FAKE-P0001", "full_date": "2024-03-15", "keep_entities": month_kept}
+    kwargs = {
+        "patient_id": "FAKE-P0001",
+        "full_date": "2024-03-15",
+        "policy": AnonymizationPolicy(keep_entities=month_kept),
+    }
     assert cell.anonymize_cell(3, "DATE_MONTH", SALT, KEY, **kwargs) == "3"
     assert cell.anonymize_cell(15, "DATE_DAY", SALT, KEY, **kwargs) != "15"
 
 
 def test_cell_null_and_empty_stay_null_and_empty() -> None:
     kept = cell.parse_keep_entities("MRN")
-    assert cell.anonymize_cell(None, "MRN", SALT, KEY, keep_entities=kept) is None
-    assert cell.anonymize_cell("", "MRN", SALT, KEY, keep_entities=kept) == ""
+    assert cell.anonymize_cell(None, "MRN", SALT, KEY, policy=AnonymizationPolicy(keep_entities=kept)) is None
+    assert cell.anonymize_cell("", "MRN", SALT, KEY, policy=AnonymizationPolicy(keep_entities=kept)) == ""
 
 
 # --- free text -----------------------------------------------------------------
@@ -123,7 +139,7 @@ def test_free_text_cell_keeps_listed_spans_only() -> None:
         patient_id="FAKE-P0001",
         jitter=7,
         recognizer_results=json.dumps(SPANS),
-        keep_entities=kept,
+        policy=AnonymizationPolicy(keep_entities=kept),
     )
     assert "03/14/2025" in result
     for value in ("Rhea Orleans", "48291037", "555-019-3344", "Springfield"):
@@ -141,7 +157,7 @@ def test_free_text_cell_matches_the_worker() -> None:
         patient_id="FAKE-P0001",
         jitter=7,
         recognizer_results=json.dumps(SPANS),
-        keep_entities=kept,
+        policy=AnonymizationPolicy(keep_entities=kept),
     )
     assert result == expected
 
@@ -162,19 +178,23 @@ def test_an_empty_set_changes_nothing() -> None:
 
 
 def test_kept_dates_are_not_failed_when_jitter_is_required() -> None:
-    worker = AnonymizerWorker(SALT, KEY, jitter_required=True, keep_entities=frozenset({"DATE", "DATE_TIME"}))
+    worker = AnonymizerWorker(
+        SALT, KEY, policy=AnonymizationPolicy(jitter_required=True, keep_entities=frozenset({"DATE", "DATE_TIME"}))
+    )
     result = worker.process_note(TEXT, worker.compute_text_hash(TEXT), json.dumps(SPANS), "FAKE-P0001", None)
     assert result["stage_status"] == "success"
     assert "03/14/2025" in result["anonymized_note_text"]
 
-    only_date = AnonymizerWorker(SALT, KEY, jitter_required=True, keep_entities=frozenset({"DATE"}))
+    only_date = AnonymizerWorker(
+        SALT, KEY, policy=AnonymizationPolicy(jitter_required=True, keep_entities=frozenset({"DATE"}))
+    )
     result = only_date.process_note(TEXT, only_date.compute_text_hash(TEXT), json.dumps(SPANS), "FAKE-P0001", None)
     assert result["stage_status"] == "failed"
 
 
 def test_factory_passes_keep_entities() -> None:
-    actor = create_anonymizer_actor(SALT, KEY, keep_entities=frozenset({"DATE"}))()
-    assert actor.keep_entities == {"DATE"}
+    actor = create_anonymizer_actor(SALT, KEY, policy=AnonymizationPolicy(keep_entities=frozenset({"DATE"})))()
+    assert actor.keep_entities == cell.parse_keep_entities("DATE")
 
 
 # --- runner and CLI -------------------------------------------------------------

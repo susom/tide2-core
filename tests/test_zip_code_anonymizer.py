@@ -16,6 +16,7 @@ from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.anonymizers import ZipCodeAnonymizer
 from tide2.anonymizers import cell
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE
 from tide2.anonymizers.zip_code import MODE_RELAXED
@@ -212,7 +213,7 @@ def test_default_mode_is_relaxed_and_there_are_only_two_modes() -> None:
     for entity in ("ZIP_CODE", "ZIP", "ZIPCODE"):
         assert worker._base_operators[entity].operator_name == "zip_code_safe_harbor"
         assert worker._base_operators[entity].params == {"mode": MODE_RELAXED}
-    explicit = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=MODE_RELAXED)
+    explicit = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=MODE_RELAXED))
     note = "Lives at 02139 and 03601."
     spans = [(9, 14, "ZIP_CODE"), (19, 24, "ZIP_CODE")]
     assert _anonymize_note(worker, note, spans) == _anonymize_note(explicit, note, spans) == "Lives at 02139 and 036."
@@ -221,31 +222,31 @@ def test_default_mode_is_relaxed_and_there_are_only_two_modes() -> None:
 @pytest.mark.parametrize("label", ["ZIP_CODE", "ZIP", "ZIPCODE"])
 @pytest.mark.parametrize(("mode", "expected"), [(MODE_STRICT, "021 and 000"), (MODE_RELAXED, "02139 and 036")])
 def test_safe_harbor_modes_in_a_note(label: str, mode: str, expected: str) -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=mode)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=mode))
     note = "02139 and 03601"
     out = _anonymize_note(worker, note, [(0, 5, label), (10, 15, label)])
     assert out == expected
 
 
 def test_zip_with_plus_four_in_a_note() -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=MODE_STRICT)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=MODE_STRICT))
     assert _anonymize_note(worker, "ZIP 94305-1234.", [(4, 14, "ZIP_CODE")]) == "ZIP 943."
 
 
 def test_non_zip_span_is_masked_in_a_note() -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=MODE_STRICT)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=MODE_STRICT))
     assert _anonymize_note(worker, "ZIP 2139.", [(4, 8, "ZIP_CODE")]) == "ZIP [ZIP_CODE]."
 
 
-def test_invalid_worker_mode_is_rejected() -> None:
+def test_invalid_zip_mode_is_rejected_by_the_policy() -> None:
     for mode in ("safe-harbor-strict", "hips"):
         with pytest.raises(ValueError, match="zip mode"):
-            AnonymizerWorker(salt=SALT, key=KEY, zip_mode=mode)
+            AnonymizationPolicy(zip_mode=mode)
 
 
 @pytest.mark.parametrize("entity", ["LOCATION", "HOSPITAL", "VENDOR"])
 def test_location_operators_carry_the_zip_mode(entity: str) -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=MODE_STRICT)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=MODE_STRICT))
     assert worker._base_operators[entity].operator_name == "hips_location"
     assert worker._base_operators[entity].params["zip_mode"] == MODE_STRICT
 
@@ -269,7 +270,7 @@ ADDRESS = "123 Main Street, Cambridge, MA 02139"
     ],
 )
 def test_zip_inside_an_address_follows_the_mode(address: str, mode: str, zip_part: str) -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=mode)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=mode))
     out = _anonymize_note(worker, address, [(0, len(address), "LOCATION")])
     assert out.endswith(zip_part)
     assert "-4307" not in out
@@ -325,7 +326,7 @@ def test_address_zip_is_validated_as_written_not_after_punctuation_cleaning(malf
 
 
 def test_address_zip_plus_four_is_still_accepted() -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=MODE_STRICT)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(zip_mode=MODE_STRICT))
     address = "123 Main Street, Cambridge, MA 02139-4307"
     assert _anonymize_note(worker, address, [(0, len(address), "LOCATION")]).endswith(", MA 021")
 
@@ -366,7 +367,7 @@ def test_hips_location_validates_zip_mode() -> None:
 
 
 def test_actor_factory_forwards_zip_mode() -> None:
-    actor = create_anonymizer_actor(SALT, KEY, zip_mode=MODE_RELAXED)()  # ty: ignore[missing-argument]
+    actor = create_anonymizer_actor(SALT, KEY, policy=AnonymizationPolicy(zip_mode=MODE_RELAXED))()  # ty: ignore[missing-argument]
     assert actor.zip_mode == MODE_RELAXED
     assert actor._base_operators["ZIP_CODE"].operator_name == "zip_code_safe_harbor"
 
@@ -379,41 +380,42 @@ def test_actor_factory_forwards_zip_mode() -> None:
 @pytest.mark.parametrize("mode", ZIP_MODES)
 @pytest.mark.parametrize("value", ["02139", "03601", "94305-1234", "00601", "2139", "ABCDE"])
 def test_cell_matches_process_note(mode: str, value: str) -> None:
-    worker = AnonymizerWorker(salt=SALT, key=KEY, zip_mode=mode)
+    policy = AnonymizationPolicy(zip_mode=mode)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=policy)
     expected = _anonymize_note(worker, value, [(0, len(value), "ZIP_CODE")])
-    assert cell.anonymize_cell(value, "ZIP_CODE", SALT, KEY, zip_mode=mode) == expected
+    assert cell.anonymize_cell(value, "ZIP_CODE", SALT, KEY, policy=policy) == expected
 
 
-def test_cell_defaults_to_relaxed_and_rejects_invalid_modes() -> None:
+def test_cell_defaults_to_relaxed() -> None:
     assert cell.anonymize_cell("02139", "ZIP_CODE", SALT, KEY) == "02139"
     assert cell.anonymize_cell("03601", "ZIP_CODE", SALT, KEY) == "036"
-    for mode in ("hips", "safe-harbor-strict"):
-        with pytest.raises(ValueError, match="zip mode"):
-            cell.anonymize_cell("02139", "ZIP_CODE", SALT, KEY, zip_mode=mode)
     # Other entity types ignore zip_mode.
     assert cell.anonymize_cell("48291037", "MRN", SALT, KEY) is not None
 
 
 def test_cell_nulls_and_empty() -> None:
-    assert cell.anonymize_cell(None, "ZIP_CODE", SALT, KEY, zip_mode=MODE_STRICT) is None
-    assert cell.anonymize_cell(float("nan"), "ZIP_CODE", SALT, KEY, zip_mode=MODE_STRICT) is None
-    assert cell.anonymize_cell("", "ZIP_CODE", SALT, KEY, zip_mode=MODE_STRICT) == ""
+    strict = AnonymizationPolicy(zip_mode=MODE_STRICT)
+    assert cell.anonymize_cell(None, "ZIP_CODE", SALT, KEY, policy=strict) is None
+    assert cell.anonymize_cell(float("nan"), "ZIP_CODE", SALT, KEY, policy=strict) is None
+    assert cell.anonymize_cell("", "ZIP_CODE", SALT, KEY, policy=strict) == ""
 
 
 def test_cell_pads_integer_zips_and_warns_once(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(cell, "_warned_integer_zip", False)
+    relaxed, strict = AnonymizationPolicy(zip_mode=MODE_RELAXED), AnonymizationPolicy(zip_mode=MODE_STRICT)
     with caplog.at_level(logging.WARNING, logger=cell.logger.name):
-        assert cell.anonymize_cell(2139, "ZIP_CODE", SALT, KEY, zip_mode=MODE_RELAXED) == "02139"
-        assert cell.anonymize_cell(601, "ZIP_CODE", SALT, KEY, zip_mode=MODE_STRICT) == "006"
-        assert cell.anonymize_cell(0, "ZIP_CODE", SALT, KEY, zip_mode=MODE_STRICT) == "000"
+        assert cell.anonymize_cell(2139, "ZIP_CODE", SALT, KEY, policy=relaxed) == "02139"
+        assert cell.anonymize_cell(601, "ZIP_CODE", SALT, KEY, policy=strict) == "006"
+        assert cell.anonymize_cell(0, "ZIP_CODE", SALT, KEY, policy=strict) == "000"
     assert len([r for r in caplog.records if "leading zeros" in r.message]) == 1
 
 
 @pytest.mark.parametrize("value", [-1, 100000, True])
 def test_cell_masks_integers_that_are_not_zips(value: object) -> None:
-    assert cell.anonymize_cell(value, "ZIP_CODE", SALT, KEY, zip_mode=MODE_STRICT) == "[ZIP_CODE]"
+    policy = AnonymizationPolicy(zip_mode=MODE_STRICT)
+    assert cell.anonymize_cell(value, "ZIP_CODE", SALT, KEY, policy=policy) == "[ZIP_CODE]"
 
 
 # ---------------------------------------------------------------------------
@@ -426,26 +428,13 @@ def test_cli_and_runner_defaults_match_the_operator_constants() -> None:
     assert cli.DEFAULT_ZIP_MODE == DEFAULT_ZIP_MODE
     run_anonymization = inspect.signature(local_runner.LocalJobRunner.run_anonymization)
     assert run_anonymization.parameters["zip_mode"].default == DEFAULT_ZIP_MODE
-    assert inspect.signature(create_anonymizer_actor).parameters["zip_mode"].default == DEFAULT_ZIP_MODE
+    assert AnonymizationPolicy().zip_mode is None  # None gives the operator default, DEFAULT_ZIP_MODE
 
 
-@pytest.mark.parametrize(
-    "func",
-    [
-        local_runner.LocalJobRunner.run_anonymization,
-        AnonymizerWorker.__init__,
-        create_anonymizer_actor,
-        cell.anonymize_cell,
-    ],
-    ids=["run_anonymization", "AnonymizerWorker", "create_anonymizer_actor", "anonymize_cell"],
-)
-def test_zip_mode_is_the_last_parameter_so_positional_calls_keep_their_meaning(func: Any) -> None:
-    params = list(inspect.signature(func).parameters)
+def test_zip_mode_is_after_the_older_run_anonymization_parameters() -> None:
+    params = list(inspect.signature(local_runner.LocalJobRunner.run_anonymization).parameters)
     # Later parameters were added after zip_mode, so positional calls that end at zip_mode keep their meaning.
-    expected = ["zip_mode", "acc_num_hash", "keep_entities"]
-    if func is cell.anonymize_cell:
-        expected.append("fpe_mode")
-    assert params[params.index("zip_mode") :] == expected
+    assert params[params.index("zip_mode") :] == ["zip_mode", "acc_num_hash", "keep_entities", "fpe_mode"]
 
 
 def test_run_anonymization_positional_cpu_arguments_are_unchanged() -> None:

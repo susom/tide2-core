@@ -10,6 +10,7 @@ import pytest
 
 from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.actors.anonymizer import create_anonymizer_actor
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.cryptographic.date_jitter import derive_date_jitter
 from tide2.cryptographic.date_jitter import random_date_jitter
 from tide2.cryptographic.date_jitter import resolve_date_jitter
@@ -71,7 +72,11 @@ def test_known_patient_is_derived_and_whitespace_is_stripped() -> None:
 
 
 def _worker(min_jitter_days: int = 3, max_jitter_days: int = 180) -> AnonymizerWorker:
-    return AnonymizerWorker(salt=SALT, key=KEY, min_jitter_days=min_jitter_days, max_jitter_days=max_jitter_days)
+    return AnonymizerWorker(
+        salt=SALT,
+        key=KEY,
+        policy=AnonymizationPolicy(min_jitter_days=min_jitter_days, max_jitter_days=max_jitter_days),
+    )
 
 
 def test_worker_defaults() -> None:
@@ -107,7 +112,7 @@ def test_worker_rejects_invalid_range(max_days: int, min_days: int) -> None:
 
 
 def test_actor_factory_passes_the_range() -> None:
-    actor_cls = create_anonymizer_actor(SALT, KEY, min_jitter_days=10, max_jitter_days=20)
+    actor_cls = create_anonymizer_actor(SALT, KEY, policy=AnonymizationPolicy(min_jitter_days=10, max_jitter_days=20))
     worker_cls = getattr(getattr(actor_cls, "__ray_metadata__", None), "modified_class", actor_cls)
     worker = worker_cls()
     assert (worker.min_jitter_days, worker.max_jitter_days) == (10, 20)
