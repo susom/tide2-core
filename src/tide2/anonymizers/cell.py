@@ -166,6 +166,9 @@ class AnonymizationPolicy:
     Secrets (``salt``, ``key``, ``acc_num_salt``) and row context (``patient_id``, ``jitter``, ...) are not
     part of it. A frozen policy is hashable, so it can be a cache key.
 
+    ``keep_entities`` applies to free text only (notes and ``FREE_TEXT`` cells), where one value mixes many
+    entity types. A structured cell is always anonymized: to keep a column, do not send it to anonymization.
+
     Raises:
         ValueError: If a value is out of range, a name is unknown, or one entity type gets two options.
     """
@@ -291,17 +294,16 @@ def anonymize_cell(  # noqa: PLR0911
             a parsed list. Required for ``FREE_TEXT``, where they index into ``str(value)``;
             ignored otherwise.
         acc_num_salt: Salt for accession number hashing (a secret, not in the policy).
-        policy: Run options (see ``AnonymizationPolicy``). It is not checked here. ``keep_entities`` types are
-            returned as their text. ``fpe_mode`` selects FF1 (``"strict"``, matches ``process_note``) or, for a
-            value that is an INT64 (an ``int`` or a digit string such as ``"123"`` or ``"-5"``, no leading zero),
-            a faster keyed permutation of the INT64 range (``"relaxed"``): no collisions, the sign is kept, but
-            not the digit count, and zero is not a fixed point (do not use ``0`` as a sentinel); other values
-            use FF1. With ``acc_num_hash``, an ``ACC_NUM`` cell uses ``accession_number_hash`` with
-            ``acc_num_salt``, ``acc_num_study_id`` and ``patient_id``. With ``jitter_required``, a date cell with
-            no ``jitter`` gives the date mask. ``zip_mode`` (``"strict"`` or ``"relaxed"``; ``None`` gives the
-            default of ``AnonymizerWorker``) applies to ``ZIP_CODE`` and the ZIP codes in ``FREE_TEXT``; an integer ZIP
-            is padded to 5 digits (see ``ZipCodeAnonymizer``). A ``FREE_TEXT`` cell gives the policy to the note
-            worker.
+        policy: Run options (see ``AnonymizationPolicy``). It is not checked here. ``keep_entities`` applies only to
+            ``FREE_TEXT``; a cell of a kept type is still anonymized. ``fpe_mode`` selects FF1 (``"strict"``, matches
+            ``process_note``) or, for a value that is an INT64 (an ``int`` or a digit string such as ``"123"`` or
+            ``"-5"``, no leading zero), a faster keyed permutation of the INT64 range (``"relaxed"``): no collisions,
+            the sign is kept, but not the digit count, and zero is not a fixed point (do not use ``0`` as a sentinel);
+            other values use FF1. With ``acc_num_hash``, an ``ACC_NUM`` cell uses ``accession_number_hash`` with
+            ``acc_num_salt``, ``acc_num_study_id`` and ``patient_id``. With ``jitter_required``, a date cell with no
+            ``jitter`` gives the date mask. ``zip_mode`` (``"strict"`` or ``"relaxed"``; ``None`` gives the default of
+            ``AnonymizerWorker``) applies to ``ZIP_CODE`` and the ZIP codes in ``FREE_TEXT``; an integer ZIP is padded
+            to 5 digits (see ``ZipCodeAnonymizer``). A ``FREE_TEXT`` cell gives the policy to the note worker.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -347,9 +349,6 @@ def anonymize_cell(  # noqa: PLR0911
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
     if safe_entity_type(entity_type, text) != entity_type:
         return mask("ENTITY")
-
-    if entity_type in policy.keep_entities:
-        return text
 
     if entity_type in ZIP_ENTITY_TYPES:
         return _zip_operator().operate(text, {"mode": zip_mode, "entity_type": entity_type})

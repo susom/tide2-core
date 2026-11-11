@@ -1,4 +1,4 @@
-"""Tests for keep_entities: entity types left as they are in cells, free text and the runner."""
+"""Tests for keep_entities: entity types left as they are in free text, not in structured cells."""
 
 import json
 from unittest.mock import MagicMock
@@ -82,42 +82,20 @@ def test_keepable_types_cover_the_operator_map() -> None:
     ("value", "entity_type"),
     [("48291037", "MRN"), ("555-019-3344", "PHONE_NUMBER"), ("2024-03-15", "DATE"), ("2024-03-15 10:20", "DATE_TIME")],
 )
-def test_cell_of_a_kept_type_is_returned_as_is(value: str, entity_type: str) -> None:
+def test_cell_of_a_kept_type_is_still_anonymized(value: str, entity_type: str) -> None:
     kept = cell.parse_keep_entities(entity_type)
-    assert (
-        cell.anonymize_cell(
-            value, entity_type, SALT, KEY, patient_id="FAKE-P0001", policy=AnonymizationPolicy(keep_entities=kept)
-        )
-        == value
-    )
-    assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001") != value
+    plain = cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001")
+    policy = AnonymizationPolicy(keep_entities=kept)
+    assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001", policy=policy) == plain
+    assert plain != value
 
 
-def test_cell_of_a_type_not_listed_is_unchanged() -> None:
-    kept = cell.parse_keep_entities("DATE")
-    plain = cell.anonymize_cell("48291037", "MRN", SALT, KEY)
-    assert (
-        cell.anonymize_cell("48291037", "MRN", SALT, KEY, policy=AnonymizationPolicy(keep_entities=kept))
-        == plain
-        != "48291037"
-    )
-
-
-def test_cell_date_keeps_the_part_types_and_date_month_alone_keeps_only_the_month() -> None:
-    date_kept = cell.parse_keep_entities("DATE")
-    for entity_type, value in [("DATE_DAY", 3.0), ("DATE_MONTH", 4), ("DATE_YEAR", "2024")]:
-        assert cell.anonymize_cell(
-            value, entity_type, SALT, KEY, policy=AnonymizationPolicy(keep_entities=date_kept)
-        ) == str(int(value))
-
-    month_kept = cell.parse_keep_entities("DATE_MONTH")
-    kwargs = {
-        "patient_id": "FAKE-P0001",
-        "full_date": "2024-03-15",
-        "policy": AnonymizationPolicy(keep_entities=month_kept),
-    }
-    assert cell.anonymize_cell(3, "DATE_MONTH", SALT, KEY, **kwargs) == "3"
-    assert cell.anonymize_cell(15, "DATE_DAY", SALT, KEY, **kwargs) != "15"
+def test_cell_date_parts_are_still_jittered_when_date_is_kept() -> None:
+    kwargs = {"patient_id": "FAKE-P0001", "full_date": "2024-03-15"}
+    policy = AnonymizationPolicy(keep_entities=cell.parse_keep_entities("DATE"))
+    for entity_type, value in [("DATE_DAY", 15), ("DATE_MONTH", 3), ("DATE_YEAR", 2024)]:
+        plain = cell.anonymize_cell(value, entity_type, SALT, KEY, **kwargs)
+        assert cell.anonymize_cell(value, entity_type, SALT, KEY, policy=policy, **kwargs) == plain
 
 
 def test_cell_null_and_empty_stay_null_and_empty() -> None:

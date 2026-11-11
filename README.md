@@ -116,23 +116,23 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Date Jittering**: Deterministic, privacy-preserving date shifts derived from patient keys
 - **Age Grouping**: Age range categorization
 - **ZIP code Safe Harbor**: HIPAA Safe Harbor ZIP reduction (3-digit prefix, or `000` for small areas) from 2020 Census populations, for ZIP entities and the ZIP inside addresses; see [ZIP code anonymization](#zip-code-anonymization-hipaa-safe-harbor)
-- **Keeping entity types** (opt-in with `--keep-entities`): leave chosen entity types as they
-  are, for example `--keep-entities DATE,DATE_TIME,AGE`. Every other type is still
-  anonymized. `DATE` also covers the date part types of cells (`DATE_DAY`, `DATE_MONTH`,
-  `DATE_YEAR`); `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The
+- **Keeping entity types** (opt-in with `--keep-entities`): in free text, leave chosen entity
+  types as they are, for example `--keep-entities DATE,DATE_TIME,AGE`. Every other type is still
+  anonymized. `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The
   recognizers still find every type, and kept spans appear in `anonymizer_results_json` with
-  operator `keep`. In cells, pass `policy=AnonymizationPolicy(keep_entities=...)` to `anonymize_cell`.
+  operator `keep`. `keep_entities` applies to notes and `FREE_TEXT` cells only: a structured cell
+  is always anonymized, so to keep a column, do not send it to anonymization.
   `ACC_NUM` with `--acc-num-hash` is an error: one entity type gets one option.
 - **Policy** (`AnonymizationPolicy`, `tide2.anonymizers.cell`): one frozen, checked set of options that
   `AnonymizerWorker`, `create_anonymizer_actor`, `anonymize_free_text` and `anonymize_cell` take as `policy=`.
   Secrets (`salt`, `key`, `acc_num_salt`) stay separate arguments. The same fields apply to notes, cells and
-  `FREE_TEXT` cells:
+  `FREE_TEXT` cells, except `keep_entities` (free text only):
 
   | Field | Default | CLI |
   |---|---|---|
   | `min_jitter_days`, `max_jitter_days` | 3, 180 | `--min-jitter-days`, `--max-jitter-days` |
   | `max_age` | 90 | `--max-age` |
-  | `keep_entities` | none | `--keep-entities` |
+  | `keep_entities` (free text only) | none | `--keep-entities` |
   | `acc_num_hash`, `acc_num_study_id` | off, none | `--acc-num-hash`, `--acc-num-study-id` |
   | `jitter_required` | off | `--jitter-required` |
   | `fpe_mode` | `strict` | `--fpe-mode` |
