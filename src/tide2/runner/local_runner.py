@@ -39,6 +39,7 @@ import math
 import os
 import time
 from collections.abc import Iterable
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
@@ -1485,8 +1486,7 @@ class LocalJobRunner:
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
         zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
-        acc_num_hash: bool = False,
-        keep_entities: str | Iterable[str] | None = None,
+        text_operators: str | Mapping[str, str] | Iterable[str | tuple[str, str]] | None = None,
         fpe_mode: str | None = None,
     ) -> dict[str, Any]:
         """
@@ -1543,11 +1543,10 @@ class LocalJobRunner:
                 is logged.
             zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
                 ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
-            acc_num_hash: If True, hash ACC_NUM with accession_number_hash
-                (``acc_num_salt``/``acc_num_study_id``); otherwise use hips_alphanumeric.
-            keep_entities: Entity types left as they are in the notes, as a comma-separated string or a
-                list (for example ``DATE,AGE``).
-                An unknown name raises ``ValueError`` before Ray starts.
+            text_operators: Method for each entity type in the notes: a string such as
+                ``"DATE=keep,ACC_NUM=acc_num_hash"``, a mapping of type to method, or a list of ``TYPE=method``
+                strings. Methods: ``keep``, ``acc_num_hash`` (needs ``acc_num_salt`` and ``acc_num_study_id``).
+                An invalid value raises ``ValueError`` before Ray starts.
             fpe_mode: ``"strict"`` (FF1, the default) or ``"relaxed"`` (faster for INT64 values).
 
         Returns:
@@ -1571,10 +1570,9 @@ class LocalJobRunner:
                 "min_jitter_days": min_jitter_days,
                 "max_jitter_days": max_jitter_days,
                 "max_age": max_age,
-                "keep_entities": keep_entities,
+                "text_operators": text_operators,
                 "fpe_mode": fpe_mode,
                 "zip_mode": zip_mode,
-                "acc_num_hash": acc_num_hash,
                 "acc_num_study_id": acc_num_study_id,
                 "jitter_required": jitter_required,
             }
@@ -2221,9 +2219,9 @@ class LocalJobRunner:
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
         _validate_zip_mode(a_kw.get("zip_mode", "relaxed"))
-        if "keep_entities" in a_kw:
-            # A one-shot iterable was consumed by the validation above; forward the parsed set.
-            a_kw["keep_entities"] = anon_policy.keep_entities
+        if "text_operators" in a_kw:
+            # A one-shot iterable was consumed by the validation above; forward the parsed pairs.
+            a_kw["text_operators"] = anon_policy.text_operators
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------

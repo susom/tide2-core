@@ -152,15 +152,15 @@ def read_output(output_dir):
     return pads.dataset(files).to_table().to_pandas()
 
 
-def run_mode(tmp_path, notes, mode, *, checkpoint=False, name=None, keep_entities=None):
+def run_mode(tmp_path, notes, mode, *, checkpoint=False, name=None, text_operators=None):
     in_file = tmp_path / f"notes_{len(notes)}.parquet"
     if not in_file.exists():
         notes.to_parquet(in_file, index=False)
     out = tmp_path / (name or mode)
     runner = LocalJobRunner(hardware_autotune=False)
     anonymizer_kwargs = {"num_actors": 2, "enable_checkpoint": checkpoint}
-    if keep_entities is not None:
-        anonymizer_kwargs["keep_entities"] = keep_entities
+    if text_operators is not None:
+        anonymizer_kwargs["text_operators"] = text_operators
     try:
         manifest = runner.run_pipeline(
             input_path=str(in_file),
@@ -242,12 +242,12 @@ class TestDiscreteStreamedEquivalence:
 @pytest.fixture(scope="module")
 def keep_equivalence(shared_dir, notes, stub_transformer):
     return {
-        mode: run_mode(shared_dir, notes, mode, name=f"keep_{mode}", keep_entities="DATE,PERSON")
+        mode: run_mode(shared_dir, notes, mode, name=f"keep_{mode}", text_operators="DATE=keep,PERSON=keep")
         for mode in ("discrete", "streamed")
     }
 
 
-class TestKeepEntities:
+class TestKeepTextOperator:
     def test_both_modes_keep_the_listed_types_and_agree(self, keep_equivalence, equivalence):
         _, discrete = keep_equivalence["discrete"]
         _, streamed = keep_equivalence["streamed"]

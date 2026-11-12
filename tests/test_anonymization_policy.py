@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from tide2.anonymizers.cell import AnonymizationPolicy
-from tide2.anonymizers.cell import parse_keep_entities
+from tide2.anonymizers.cell import parse_text_operators
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
@@ -22,24 +22,24 @@ def test_defaults() -> None:
     assert policy.min_jitter_days == DEFAULT_MIN_JITTER_DAYS
     assert policy.max_jitter_days == DEFAULT_MAX_JITTER_DAYS
     assert policy.max_age == DEFAULT_MAX_AGE
-    assert policy.keep_entities == frozenset()
-    assert policy.acc_num_hash is False
+    assert policy.text_operators == ()
     assert policy.acc_num_study_id is None
     assert policy.jitter_required is False
 
 
 def test_frozen_and_hashable() -> None:
-    policy = AnonymizationPolicy(keep_entities=frozenset({"AGE"}))
+    policy = AnonymizationPolicy(text_operators=(("AGE", "keep"),))
     with pytest.raises(dataclasses.FrozenInstanceError):
         policy.max_age = 90  # ty: ignore[invalid-assignment]
-    assert policy == AnonymizationPolicy.from_mapping({"keep_entities": ["age"]})
-    assert hash(policy) == hash(AnonymizationPolicy.from_mapping({"keep_entities": "AGE"}))
+    assert policy == AnonymizationPolicy.from_mapping({"text_operators": ["age=keep"]})
+    assert hash(policy) == hash(AnonymizationPolicy.from_mapping({"text_operators": {"AGE": "keep"}}))
 
 
-def test_keep_parsed() -> None:
-    assert AnonymizationPolicy.from_mapping({"keep_entities": "date, age"}).keep_entities == parse_keep_entities(
-        "date, age"
-    )
+def test_text_operators_parsed() -> None:
+    policy = AnonymizationPolicy.from_mapping({"text_operators": "date=keep, age=KEEP"})
+    assert policy.text_operators == parse_text_operators("date=keep, age=KEEP") == (("AGE", "keep"), ("DATE", "keep"))
+    assert policy.text_operator("DATE") == "keep"
+    assert policy.text_operator("MRN") is None
 
 
 def test_bad_jitter() -> None:
@@ -54,15 +54,16 @@ def test_bad_max_age(max_age: int) -> None:
         AnonymizationPolicy(max_age=max_age)
 
 
-def test_unknown_keep() -> None:
-    with pytest.raises(ValueError, match="keep_entities"):
-        AnonymizationPolicy.from_mapping({"keep_entities": "NOPE"})
+def test_unknown_text_operator() -> None:
+    with pytest.raises(ValueError, match="text_operators"):
+        AnonymizationPolicy.from_mapping({"text_operators": "NOPE=keep"})
 
 
-def test_acc_num_conflict() -> None:
-    with pytest.raises(ValueError, match="ACC_NUM"):
-        AnonymizationPolicy(keep_entities=frozenset({"ACC_NUM"}), acc_num_hash=True)
-    assert AnonymizationPolicy(keep_entities=frozenset({"MRN"}), acc_num_hash=True).acc_num_hash is True
+def test_acc_num_hash_needs_study_id() -> None:
+    with pytest.raises(ValueError, match="acc_num_study_id"):
+        AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
+    policy = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"}, acc_num_study_id="S1")
+    assert policy.text_operator("ACC_NUM") == "acc_num_hash"
 
 
 def test_from_mapping_ignores_other_keys() -> None:
@@ -76,7 +77,7 @@ def test_no_secrets() -> None:
 
 @pytest.mark.parametrize(
     "extra",
-    [["--keep-entities", "ACC_NUM", "--acc-num-hash"], ["--min-jitter-days", "1"], ["--max-age", "0"]],
+    [["--text-operators", "ACC_NUM=acc_num_hash"], ["--min-jitter-days", "1"], ["--max-age", "0"]],
 )
 def test_cli_rejects(monkeypatch: pytest.MonkeyPatch, extra: list[str]) -> None:
     monkeypatch.setattr(cli, "cmd_run", lambda _args: None)
@@ -89,12 +90,12 @@ def test_runners_reject_before_ray(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = local_runner.LocalJobRunner()
     init_ray = MagicMock()
     monkeypatch.setattr(runner, "_init_ray", init_ray)
-    with pytest.raises(ValueError, match="ACC_NUM"):
+    with pytest.raises(ValueError, match="acc_num_study_id"):
         runner.run_anonymization(
-            "in", "out", salt_hex="00" * 32, key_hex="11" * 32, keep_entities="ACC_NUM", acc_num_hash=True
+            "in", "out", salt_hex="00" * 32, key_hex="11" * 32, text_operators="ACC_NUM=acc_num_hash"
         )
-    with pytest.raises(ValueError, match="ACC_NUM"):
-        runner.run_pipeline("in", "out", "model", anonymizer_kwargs={"keep_entities": "ACC_NUM", "acc_num_hash": True})
+    with pytest.raises(ValueError, match="acc_num_study_id"):
+        runner.run_pipeline("in", "out", "model", anonymizer_kwargs={"text_operators": "ACC_NUM=acc_num_hash"})
     init_ray.assert_not_called()
 
 

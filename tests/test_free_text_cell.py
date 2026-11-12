@@ -42,7 +42,8 @@ def _fresh_workers():
 
 
 def _free_text(text: str = TEXT, spans=SPANS, acc_num_hash: bool = False, zip_mode: str | None = None, **kwargs):
-    policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY, acc_num_hash=acc_num_hash, zip_mode=zip_mode)
+    text_operators = {"ACC_NUM": "acc_num_hash"} if acc_num_hash else None
+    policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY, text_operators=text_operators, zip_mode=zip_mode)
     params = {"patient_id": "FAKE-P0001", "acc_num_salt": ACC_SALT, "policy": policy, **kwargs}
     return cell.anonymize_cell(text, "FREE_TEXT", SALT, KEY, recognizer_results=json.dumps(spans), **params)
 
@@ -84,7 +85,10 @@ def test_acc_num_uses_accession_settings() -> None:
     text = "Accession ACC123456 reviewed."
     spans = [_span(text, "ACC123456", "ACC_NUM")]
     worker = AnonymizerWorker(
-        SALT, KEY, policy=AnonymizationPolicy(acc_num_study_id=ACC_STUDY, acc_num_hash=True), acc_num_salt=ACC_SALT
+        SALT,
+        KEY,
+        policy=AnonymizationPolicy(acc_num_study_id=ACC_STUDY, text_operators={"ACC_NUM": "acc_num_hash"}),
+        acc_num_salt=ACC_SALT,
     )
     expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans), "FAKE-P0001")[
         "anonymized_note_text"

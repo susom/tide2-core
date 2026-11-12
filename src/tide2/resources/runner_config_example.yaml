@@ -67,7 +67,7 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # max_jitter_days: 180
 # zip_mode: relaxed  # or strict (HIPAA Safe Harbor); relaxed is NOT HIPAA Safe Harbor compliant
 # Entity types left as they are, not anonymized (DATE also covers the cell date parts)
-# keep_entities: [DATE, DATE_TIME]
+# text_operators: {DATE: keep, DATE_TIME: keep}
 
 # =========================================================================
 # Transformer-specific

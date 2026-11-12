@@ -122,8 +122,8 @@ class AnonymizerWorker:
         self.policy = policy
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = policy.acc_num_study_id
-        self.acc_num_hash = policy.acc_num_hash
-        self.keep_entities = policy.keep_entities
+        if policy.text_operator("ACC_NUM") == "acc_num_hash" and acc_num_salt is None:
+            raise ValueError("text_operators uses acc_num_hash, which needs acc_num_salt")
         self.jitter_required = policy.jitter_required
         self.min_jitter_days = policy.min_jitter_days
         self.max_jitter_days = policy.max_jitter_days
@@ -223,7 +223,7 @@ class AnonymizerWorker:
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
-            # Overridden per note in _create_operators_for_note() when acc_num_hash is set
+            # Overridden per note in _create_operators_for_note() when text_operators sets acc_num_hash
             "ACC_NUM": OperatorConfig(
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
@@ -282,18 +282,19 @@ class AnonymizerWorker:
             if val_str.lower() not in ("nan", "none", "null", ""):
                 clean_patient_id = val_str
 
-        # Opt-in: ACC_NUM uses accession_number_hash with per-note patient_id as SQL entity
-        if self.acc_num_hash:
-            operators["ACC_NUM"] = OperatorConfig(
-                "accession_number_hash",
-                {
-                    "salt": self.acc_num_salt,
-                    "study_id": self.acc_num_study_id,
-                    "patient_id": clean_patient_id,
-                },
-            )
-
-        operators.update({entity_type: OperatorConfig("keep") for entity_type in self.keep_entities})
+        for entity_type, method in self.policy.text_operators:
+            if method == "keep":
+                operators[entity_type] = OperatorConfig("keep")
+            elif method == "acc_num_hash":
+                # accession_number_hash takes the per-note patient_id as its SQL entity
+                operators[entity_type] = OperatorConfig(
+                    "accession_number_hash",
+                    {
+                        "salt": self.acc_num_salt,
+                        "study_id": self.acc_num_study_id,
+                        "patient_id": clean_patient_id,
+                    },
+                )
         return operators
 
     def _parse_recognizer_results(self, results_json: str | list | None, note_text: str) -> list[RecognizerResult]:
@@ -510,7 +511,7 @@ class AnonymizerWorker:
             if is_null(jitter):
                 if self.jitter_required:
                     mask_dates = True
-                    if not {"DATE", "DATE_TIME"} <= self.keep_entities:
+                    if not all(self.policy.text_operator(t) == "keep" for t in ("DATE", "DATE_TIME")):
                         record_error("DATE", "jitter_required")
                 else:
                     jitter = self._compute_jitter_for_patient(patient_id)
