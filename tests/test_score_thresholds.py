@@ -3,14 +3,19 @@
 import json
 from unittest.mock import MagicMock
 
+import pyarrow as pa
 import pytest
+from presidio_analyzer import RecognizerResult
 
+from tide2.actors import recognizer as recognizer_module
 from tide2.actors.anonymizer import AnonymizerWorker
+from tide2.actors.recognizer import RecognizerWorker
 from tide2.anonymizers import cell
 from tide2.anonymizers import free_text
 from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.runner import cli
 from tide2.runner import local_runner
+from tide2.utils.span_metrics import dedupe_exact_spans
 
 SALT = b"\x01" * 32
 KEY = b"\x02" * 32
@@ -106,6 +111,84 @@ def test_dropped_transformer_span_does_not_hide_overlapping_regex_span() -> None
     out = _run(AnonymizationPolicy(transformer_score_threshold=0.5), spans)
     assert "48291037" not in out
     assert "MRN" in out
+
+
+def test_dedupe_exact_spans_keeps_best_score_and_overlaps() -> None:
+    low = _span("PERSON", PERSON, 0.3, TRANSFORMER)
+    high = _span("PERSON", PERSON, 0.9, CACHED)
+    overlap = _span("MRN", (30, 40), 0.5, REGEX)
+    out = dedupe_exact_spans([overlap, low, high])
+    assert out == [high, overlap]
+    assert out[0]["recognition_metadata"] == CACHED
+    assert dedupe_exact_spans([high, low, overlap]) == out
+    objects = [RecognizerResult(**span) for span in (low, high, overlap)]
+    assert [(r.entity_type, r.score) for r in dedupe_exact_spans(objects)] == [("PERSON", 0.9), ("MRN", 0.5)]
+
+
+def test_dedupe_keeps_identical_spans_of_different_threshold_classes() -> None:
+    regex, transformer = _span("PERSON", PERSON, 0.7, REGEX), _span("PERSON", PERSON, 0.8, TRANSFORMER)
+    assert dedupe_exact_spans([regex, transformer]) == [regex, transformer]
+    # The transformer span fails its threshold; the regex span must still pass its own.
+    policy = AnonymizationPolicy(transformer_score_threshold=0.9, recognizer_score_threshold=0.6)
+    assert "Rhea Orleans" not in _run(policy, dedupe_exact_spans([regex, transformer]))
+
+
+def test_dedupe_keeps_input_order_for_equal_bounds() -> None:
+    mrn, other = _span("MRN", MRN, 0.9, REGEX), _span("ID", MRN, 0.9, CACHED)
+    assert [s["entity_type"] for s in dedupe_exact_spans([mrn, other])] == ["MRN", "ID"]
+    assert [s["entity_type"] for s in dedupe_exact_spans([other, mrn])] == ["ID", "MRN"]
+    bare = {"entity_type": "MRN", "start": 26, "end": 34, "score": 0.5}  # no recognition_metadata
+    assert dedupe_exact_spans([bare, mrn]) == [mrn]  # both are non-transformer spans: the higher score wins
+
+
+def _merged_row(regex: list[dict], llm: list[dict]) -> list[dict]:
+    batch = pa.table({"results_regex": [json.dumps(regex)], "results_llm": [json.dumps(llm)]})
+    return json.loads(local_runner._resolve_merged_batch(batch).to_pydict()["recognizer_results_json"][0])
+
+
+def test_merge_keeps_recognition_metadata_for_the_thresholds() -> None:
+    spans = _merged_row([_span("PERSON", PERSON, 0.8, CACHED)], [])
+    assert spans[0]["recognition_metadata"] == CACHED
+    policy = AnonymizationPolicy(transformer_score_threshold=0.0, recognizer_score_threshold=0.9)
+    assert "Rhea Orleans" not in _run(policy, spans)
+
+
+def test_merge_keeps_overlaps_so_a_dropped_span_cannot_hide_another() -> None:
+    spans = _merged_row([_span("PERSON", (26, 40), 0.3, CACHED), _span("MRN", MRN, 0.95, REGEX)], [])
+    assert {s["entity_type"] for s in spans} == {"PERSON", "MRN"}
+    out = _run(AnonymizationPolicy(transformer_score_threshold=0.5), spans)
+    assert "48291037" not in out
+
+
+def _long_note() -> str:
+    return "A short visit note. " * 4 + TEXT + " The plan is to follow up next month, with no change to care."
+
+
+def test_long_note_keeps_low_score_span_from_hiding_a_passing_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(recognizer_module, "MAX_NOTE_CHUNK_SIZE", 120)
+    monkeypatch.setattr(recognizer_module, "CHUNK_OVERLAP", 30)
+    note = _long_note()
+    start = note.index("Rhea")
+    cached = json.dumps([_span("PERSON", (start, note.index("Marlowe") - 2), 0.3, CACHED)])
+    assert len(note) > 120
+    worker = RecognizerWorker()
+    result = worker.process_note(note, "hash", cached, None)
+    spans = json.loads(result["recognizer_results_json"])
+    assert {"PERSON", "MRN"} <= {s["entity_type"] for s in spans}
+    out = _run(AnonymizationPolicy(transformer_score_threshold=0.5), spans, note)
+    assert "48291037" not in out
+    assert "Rhea Orleans" in out
+
+
+def test_long_and_normal_notes_anonymize_alike_at_default_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    note = _long_note()
+    worker = RecognizerWorker()
+    normal = json.loads(worker.process_note(note, "hash", None, None)["recognizer_results_json"])
+    monkeypatch.setattr(recognizer_module, "MAX_NOTE_CHUNK_SIZE", 120)
+    monkeypatch.setattr(recognizer_module, "CHUNK_OVERLAP", 30)
+    long = json.loads(worker.process_note(note, "hash", None, None)["recognizer_results_json"])
+    policy = AnonymizationPolicy()
+    assert _run(policy, long, note) == _run(policy, normal, note)
 
 
 def test_free_text_cell_obeys_thresholds() -> None:

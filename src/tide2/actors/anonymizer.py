@@ -61,6 +61,7 @@ from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
+from tide2.utils.span_metrics import is_transformer_span
 from tide2.utils.span_metrics import resolve_recognizer_results
 from tide2.utils.stage_status import FAILED
 from tide2.utils.stage_status import NoteError
@@ -75,15 +76,6 @@ REQUIRED_KEY_SIZE = 32
 # to avoid O(n*m) string concatenation in Presidio's TextReplaceBuilder.
 # Must match or exceed recognizer chunk size so entities don't cross boundaries.
 MAX_ANON_CHUNK_SIZE = 100_000
-
-# recognizer_name of a transformer span: "TransformersRecognizer[<model>]" live, or the cached recognizer's name
-TRANSFORMER_RECOGNIZER_PREFIXES = ("TransformersRecognizer", "CachedResultsTransformerRecognizer")
-
-
-def _is_transformer_span(metadata: Any) -> bool:
-    """Return True if a transformer model produced the span, as its ``recognizer_name`` tells."""
-    name = metadata.get("recognizer_name") if isinstance(metadata, dict) else None
-    return isinstance(name, str) and name.startswith(TRANSFORMER_RECOGNIZER_PREFIXES)
 
 
 class AnonymizerWorker:
@@ -366,7 +358,7 @@ class AnonymizerWorker:
             safe_type = safe_entity_type(entity_type, note_text[start:end])
             # A span below the threshold of its recognizer type stays clear text. Dropping it here, before
             # conflict resolution, keeps it from hiding an overlapping span of another recognizer.
-            if score < (transformer_min if _is_transformer_span(metadata) else recognizer_min):
+            if score < (transformer_min if is_transformer_span(metadata) else recognizer_min):
                 continue
             if isinstance(item, RecognizerResult) and safe_type == entity_type:
                 parsed.append(item)

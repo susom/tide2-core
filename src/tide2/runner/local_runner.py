@@ -370,10 +370,11 @@ def _read_stage_source(
 
 
 def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
-    """Resolve regex and LLM recognizer results per row with longest_wins strategy."""
-    from presidio_anonymizer.entities import RecognizerResult
+    """Merge regex and LLM recognizer results per row, dropping exact duplicates.
 
-    from tide2.utils.span_metrics import resolve_recognizer_results
+    Overlaps are resolved later by the anonymizer, after the score thresholds.
+    """
+    from tide2.utils.span_metrics import dedupe_exact_spans
 
     n = len(batch)
     if n == 0:
@@ -401,36 +402,7 @@ def _resolve_merged_batch(batch: pa.Table) -> pa.Table:  # noqa: PLR0915
         r_list = json.loads(r_json) if r_json else []
         l_list = json.loads(l_json) if l_json else []
 
-        regex_results = [
-            RecognizerResult(
-                entity_type=r["entity_type"],
-                start=r["start"],
-                end=r["end"],
-                score=r["score"],
-            )
-            for r in r_list
-        ]
-        llm_results = [
-            RecognizerResult(
-                entity_type=r["entity_type"],
-                start=r["start"],
-                end=r["end"],
-                score=r["score"],
-            )
-            for r in l_list
-        ]
-
-        combined = regex_results + llm_results
-        resolved = resolve_recognizer_results(combined, strategy="longest_wins") if combined else []
-        resolved_dicts = [
-            {
-                "entity_type": r.entity_type,
-                "start": r.start,
-                "end": r.end,
-                "score": r.score,
-            }
-            for r in resolved
-        ]
+        resolved_dicts = dedupe_exact_spans(r_list + l_list)
         resolved_jsons.append(json.dumps(resolved_dicts))
         entity_counts.append(len(resolved_dicts))
 

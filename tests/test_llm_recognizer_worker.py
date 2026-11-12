@@ -96,3 +96,24 @@ def test_llm_recognizer_worker_handles_pd_na_and_nulls():
         raise ValueError(f"Expected no failures, got {out['stage_status_json']}")
     if worker.recognizer.analyze.called:
         raise ValueError("analyze should not have been called for null/empty notes")
+
+
+def test_llm_long_note_keeps_overlapping_spans_for_the_anonymizer(monkeypatch):
+    """Chunking removes exact copies only; overlapping spans are left for the anonymizer."""
+    with (
+        patch(f"{MODULE}.load_llm_prompt", return_value=PHI_PROMPT_CONFIG),
+        patch(f"{MODULE}.LlmModel"),
+    ):
+        worker = LlmRecognizerWorker(project_id="test-proj", provider_type="google", model_name="gemini-2.5-flash")
+    monkeypatch.setattr("tide2.actors.llm_recognizer.LLM_CHUNK_OVERLAP", 10)
+    worker.max_chunk_size = 50
+    worker.recognizer = Mock()
+    worker.recognizer.analyze.return_value = [
+        RecognizerResult(entity_type="PATIENT", start=0, end=30, score=0.3),
+        RecognizerResult(entity_type="DATE", start=5, end=15, score=0.9),
+    ]
+
+    results = worker._process_note("x" * 120)
+
+    assert {(r.entity_type, r.start, r.end) for r in results} >= {("PATIENT", 0, 30), ("DATE", 5, 15)}
+    assert len({(r.entity_type, r.start, r.end) for r in results}) == len(results)

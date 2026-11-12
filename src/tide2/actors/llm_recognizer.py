@@ -28,7 +28,7 @@ from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import copy_passthrough
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
-from tide2.utils.span_metrics import resolve_recognizer_results
+from tide2.utils.span_metrics import dedupe_exact_spans
 from tide2.utils.stage_status import handle_row
 
 # Chunking parameters for long notes
@@ -143,9 +143,9 @@ class LlmRecognizerWorker:
             chunk_num += 1
             chunk_start = chunk_end - LLM_CHUNK_OVERLAP if chunk_end < note_len else note_len
 
-        # Deduplicate overlapping results from chunk boundaries
-        if all_results:
-            all_results = resolve_recognizer_results(all_results, strategy="longest_wins")
+        # Chunk overlap makes exact copies of a span. Overlapping spans are kept: the anonymizer resolves them
+        # after the score thresholds, as it does for a normal note.
+        all_results = dedupe_exact_spans(all_results)
 
         logger.debug(
             "Processed %d chars in %d chunks, found %d deduplicated entities",
