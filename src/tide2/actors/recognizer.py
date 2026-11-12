@@ -53,7 +53,7 @@ from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import row_id_patient_part
-from tide2.utils.span_metrics import resolve_recognizer_results
+from tide2.utils.span_metrics import dedupe_exact_spans
 from tide2.utils.stage_status import NoteError
 from tide2.utils.stage_status import handle_row
 
@@ -468,10 +468,9 @@ class RecognizerWorker:
             cached_results = rec.analyze(note_text, ALL_SUPPORTED_ENTITIES)
             all_results.extend(cached_results)
 
-        # Deduplicate overlapping results from chunk boundaries
-        # Using the O(n log n) resolution algorithm
-        if len(all_results) > 0:
-            all_results = resolve_recognizer_results(all_results, strategy="longest_wins")
+        # Chunk overlap makes exact copies of a span. Overlapping spans are kept: the anonymizer resolves them
+        # after the score thresholds, as it does for a normal note.
+        all_results = dedupe_exact_spans(all_results)
 
         logger.debug(
             f"Processed {note_len:,} chars in {chunk_num} chunks, found {len(all_results)} deduplicated entities"

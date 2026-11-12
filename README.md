@@ -152,6 +152,7 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
   `recognition_metadata["recognizer_name"]` starts with `TransformersRecognizer` or is
   `CachedResultsTransformerRecognizer`; every other span (regex, known values, no metadata) uses
   `recognizer_score_threshold`. The recognizer stage still records every span. The default 0.0 anonymizes all of them.
+  Overlaps are resolved once, in the anonymizer, after the thresholds.
   A below-threshold PHI span is real PHI in the output, as with `keep` in `text_operators`.
 
   ```python
