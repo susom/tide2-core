@@ -52,6 +52,7 @@ from tide2.anonymizers.guarded import summarize
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
 from tide2.anonymizers.hips_locations import HipsLocationAnonymizer
 from tide2.anonymizers.hips_names import HipsNamesAnonymizer
+from tide2.anonymizers.keyed_hash import KeyedHashAnonymizer
 from tide2.anonymizers.masking import MaskingAnonymizer
 from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE
 from tide2.anonymizers.zip_code import ZIP_ENTITY_ALIASES
@@ -145,6 +146,7 @@ class AnonymizerWorker:
             HipsLocationAnonymizer,
             AgeGroupAnonymizer,
             ZipCodeAnonymizer,
+            KeyedHashAnonymizer,
         ):
             self.anonymizer_engine.add_anonymizer(guarded(operator_cls))
         self.anonymizer_engine.add_anonymizer(MaskingAnonymizer)
@@ -287,6 +289,8 @@ class AnonymizerWorker:
         for entity_type, method in self.policy.text_operators:
             if method == "keep":
                 operators[entity_type] = OperatorConfig("keep")
+            elif method == "hash":
+                operators[entity_type] = OperatorConfig("keyed_hash", {"salt": self.salt, "key": self.key})
             elif method == "acc_num_hash":
                 # accession_number_hash takes the per-note patient_id as its SQL entity
                 operators[entity_type] = OperatorConfig(
