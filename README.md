@@ -110,36 +110,38 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Anonymization Strategies
 - **HIPS (Healthcare Identity Protection System)**: Cryptographic deterministic anonymization for names, locations, and alphanumeric identifiers
-- **Accession number hashing** (opt-in with `--acc-num-hash`): SHA256-based, compatible with BigQuery UDF. By default
-  accession numbers use HIPS alphanumeric encryption like MRN and HAR
 - **Faker Integration**: Realistic fake data generation
 - **Date Jittering**: Deterministic, privacy-preserving date shifts derived from patient keys
 - **Age Grouping**: Age range categorization
 - **ZIP code Safe Harbor**: HIPAA Safe Harbor ZIP reduction (3-digit prefix, or `000` for small areas) from 2020 Census populations, for ZIP entities and the ZIP inside addresses; see [ZIP code anonymization](#zip-code-anonymization-hipaa-safe-harbor)
-- **Keeping entity types** (opt-in with `--keep-entities`): in free text, leave chosen entity
-  types as they are, for example `--keep-entities DATE,DATE_TIME,AGE`. Every other type is still
-  anonymized. `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The
-  recognizers still find every type, and kept spans appear in `anonymizer_results_json` with
-  operator `keep`. `keep_entities` applies to notes and `FREE_TEXT` cells only: a structured cell
-  is always anonymized, so to keep a column, do not send it to anonymization.
-  `ACC_NUM` with `--acc-num-hash` is an error: one entity type gets one option.
+- **Free-text operators** (opt-in with `--text-operators TYPE=METHOD,...`): in free text, choose a method for
+  each entity type. Every other type keeps its default anonymization. Methods:
+  - `keep`: leave the type as it is, for example `--text-operators DATE=keep,DATE_TIME=keep,AGE=keep`.
+    `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The recognizers still find every type,
+    and kept spans appear in `anonymizer_results_json` with operator `keep`.
+  - `acc_num_hash` (`ACC_NUM` only): SHA256-based, compatible with BigQuery UDF; needs `--acc-num-salt` and
+    `--acc-num-study-id`. Without it, accession numbers use HIPS alphanumeric encryption like MRN and HAR.
+
+  `text_operators` applies to notes and `FREE_TEXT` cells only. A structured cell has one entity type, so the
+  caller chooses its method: the `method` argument of `anonymize_cell` (`None` for the default, or
+  `"acc_num_hash"`). `keep` is not a cell method: to keep a column, do not send it to anonymization.
 - **Policy** (`AnonymizationPolicy`, `tide2.anonymizers.cell`): one frozen, checked set of options that
   `AnonymizerWorker`, `create_anonymizer_actor`, `anonymize_free_text` and `anonymize_cell` take as `policy=`.
   Secrets (`salt`, `key`, `acc_num_salt`) stay separate arguments. The same fields apply to notes, cells and
-  `FREE_TEXT` cells, except `keep_entities` (free text only):
+  `FREE_TEXT` cells, except `text_operators` (free text only):
 
   | Field | Default | CLI |
   |---|---|---|
   | `min_jitter_days`, `max_jitter_days` | 3, 180 | `--min-jitter-days`, `--max-jitter-days` |
   | `max_age` | 90 | `--max-age` |
-  | `keep_entities` (free text only) | none | `--keep-entities` |
-  | `acc_num_hash`, `acc_num_study_id` | off, none | `--acc-num-hash`, `--acc-num-study-id` |
+  | `text_operators` (free text only) | none | `--text-operators` |
+  | `acc_num_study_id` | none | `--acc-num-study-id` |
   | `jitter_required` | off | `--jitter-required` |
   | `fpe_mode` | `strict` | `--fpe-mode` |
   | `zip_mode` | `relaxed` (when unset) | `--zip-mode` |
 
   ```python
-  policy = AnonymizationPolicy(fpe_mode="relaxed", keep_entities="DATE")
+  policy = AnonymizationPolicy(fpe_mode="relaxed", text_operators="DATE=keep")
   worker = AnonymizerWorker(salt, key, policy=policy)
   anonymize_cell(value, "MRN", salt, key, policy=policy)
   ```
@@ -895,7 +897,7 @@ The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason c
 stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
 index into `str(value)`, and no recognizer runs per cell. Dates in the text shift like the `DATE` cells of the row (same
 `patient_id`, `jitter` and `birth_date`), and `ACC_NUM` spans use HIPS alphanumeric, or the accession hash with
-`acc_num_salt` and the policy's `acc_num_study_id` when its `acc_num_hash` is set. The text follows the same `policy`
+`acc_num_salt` and the policy's `acc_num_study_id` when its `text_operators` uses `acc_num_hash`. The text follows the same `policy`
 as a note. The result is
 `None` when the spans are null, malformed or outside the text; an entity whose operator fails is masked (for example
 `[PERSON]`) and the rest of the text is kept. Spans of the Faker types (email, URL, organization) get random values, so

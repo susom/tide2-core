@@ -68,7 +68,7 @@ ZIP_ENTITY_TYPES: frozenset[str] = frozenset({"ZIP_CODE"})
 SUPPORTED_ENTITY_TYPES: frozenset[str] = (
     FPE_ENTITY_TYPES | DATE_ENTITY_TYPES | DATE_PART_ENTITY_TYPES | FREE_TEXT_ENTITY_TYPES | ZIP_ENTITY_TYPES
 )
-# Types a run may leave as they are: every type of the free-text operator map except DEFAULT, plus the dates.
+# Types a free-text run may leave as they are: every type of the free-text operator map except DEFAULT, plus the dates.
 KEEPABLE_ENTITY_TYPES: frozenset[str] = (
     FPE_ENTITY_TYPES
     | DATE_ENTITY_TYPES
@@ -98,31 +98,59 @@ KEEPABLE_ENTITY_TYPES: frozenset[str] = (
 )
 
 
-def parse_keep_entities(value: str | Iterable[str] | None) -> frozenset[str]:
-    """Return the entity types to leave as they are, from a comma-separated string or a list.
+TEXT_METHODS: tuple[str, ...] = ("keep", "acc_num_hash")
+# Types each free-text method accepts. A date part exists only in a cell, never as a span of a note.
+_TEXT_METHOD_TYPES: dict[str, frozenset[str]] = {
+    "keep": KEEPABLE_ENTITY_TYPES - DATE_PART_ENTITY_TYPES,
+    "acc_num_hash": frozenset({"ACC_NUM"}),
+}
 
-    Names are stripped and upper-cased. ``DATE`` also covers ``DATE_DAY``, ``DATE_MONTH`` and
-    ``DATE_YEAR``; ``DATE_TIME`` is listed on its own.
+
+def parse_text_operators(
+    value: str | Mapping[str, str] | Iterable[str | tuple[str, str]] | None,
+) -> tuple[tuple[str, str], ...]:
+    """Return the free-text method of each entity type, from a string, a mapping or a list.
+
+    Types are stripped and upper-cased, methods stripped and lower-cased.
 
     Args:
-        value: ``None``, a comma-separated string, or an iterable of names.
+        value: ``None``; a string such as ``"DATE=keep,ACC_NUM=acc_num_hash"``; a mapping of type to method;
+            or an iterable of ``"TYPE=method"`` strings or ``(type, method)`` pairs.
 
     Returns:
-        The set of entity types to keep; empty for ``None`` or an empty value.
+        ``(entity_type, method)`` pairs sorted by type, so a policy that holds them stays hashable. Empty for
+        ``None`` or an empty value.
 
     Raises:
-        ValueError: If a name is not in ``KEEPABLE_ENTITY_TYPES``.
+        ValueError: If an item is malformed, a type is given twice, a method is unknown, or a method does not
+            accept the type (see ``TEXT_METHODS``).
     """
     if value is None:
-        return frozenset()
-    names = value.split(",") if isinstance(value, str) else value
-    kept = {str(name).strip().upper() for name in names if str(name).strip()}
-    unknown = sorted(kept - KEEPABLE_ENTITY_TYPES)
-    if unknown:
-        raise ValueError(f"Unknown keep_entities {unknown}; valid types: {sorted(KEEPABLE_ENTITY_TYPES)}")
-    if "DATE" in kept:
-        kept |= DATE_PART_ENTITY_TYPES
-    return frozenset(kept)
+        return ()
+    if isinstance(value, Mapping):
+        items: list[Any] = list(value.items())
+    else:
+        items = [part for part in value.split(",") if part.strip()] if isinstance(value, str) else list(value)
+    pairs: dict[str, str] = {}
+    for item in items:
+        if isinstance(item, str):
+            entity_type, separator, method = item.partition("=")
+            if not separator:
+                raise ValueError(f"Invalid text_operators item {item!r}; use TYPE=method")
+        else:
+            entity_type, method = item
+        entity_type, method = str(entity_type).strip().upper(), str(method).strip().lower()
+        if entity_type in pairs:
+            raise ValueError(f"Entity type {entity_type} is given twice in text_operators")
+        if method not in TEXT_METHODS:
+            raise ValueError(f"Unknown text_operators method {method!r}; valid methods: {list(TEXT_METHODS)}")
+        if entity_type not in _TEXT_METHOD_TYPES[method]:
+            raise ValueError(
+                f"text_operators method {method!r} does not accept {entity_type!r}; "
+                f"valid types: {sorted(_TEXT_METHOD_TYPES[method])}"
+            )
+        pairs[entity_type] = method
+    return tuple(sorted(pairs.items()))
 
 
 MAX_ZIP5 = 99999
@@ -166,32 +194,34 @@ class AnonymizationPolicy:
     Secrets (``salt``, ``key``, ``acc_num_salt``) and row context (``patient_id``, ``jitter``, ...) are not
     part of it. A frozen policy is hashable, so it can be a cache key.
 
-    ``keep_entities`` applies to free text only (notes and ``FREE_TEXT`` cells), where one value mixes many
-    entity types. A structured cell is always anonymized: to keep a column, do not send it to anonymization.
+    The method of a structured cell is not a policy field: the caller picks it per column with the ``method``
+    argument of ``anonymize_cell``. Free text (notes and ``FREE_TEXT`` cells) mixes many entity types in one value,
+    so ``text_operators`` picks a method for each entity type there. A structured cell is always anonymized: to
+    keep a column, do not send it to anonymization.
 
     Raises:
-        ValueError: If a value is out of range, a name is unknown, or one entity type gets two options.
+        ValueError: If a value is out of range, or ``text_operators`` is invalid or uses ``acc_num_hash`` without
+            ``acc_num_study_id``.
     """
 
     min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS
     max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS
     max_age: int = DEFAULT_MAX_AGE
-    keep_entities: frozenset[str] = frozenset()
-    acc_num_hash: bool = False
+    text_operators: tuple[tuple[str, str], ...] = ()
     acc_num_study_id: str | None = None
     jitter_required: bool = False
     fpe_mode: str = MODE_STRICT
     zip_mode: str | None = None
 
     def __post_init__(self) -> None:
-        """Check the options and store ``keep_entities`` in parsed form."""
+        """Check the options and store ``text_operators`` in parsed form."""
         is_valid, message = validate_jitter_parameters(self.max_jitter_days, self.min_jitter_days)
         if not is_valid:
             raise ValueError(message)
         validate_max_age(self.max_age)
-        object.__setattr__(self, "keep_entities", parse_keep_entities(self.keep_entities))
-        if self.acc_num_hash and "ACC_NUM" in self.keep_entities:
-            raise ValueError("acc_num_hash and keep_entities both set an option for ACC_NUM; use one")
+        object.__setattr__(self, "text_operators", parse_text_operators(self.text_operators))
+        if "acc_num_hash" in dict(self.text_operators).values() and not self.acc_num_study_id:
+            raise ValueError("text_operators uses acc_num_hash, which needs acc_num_study_id")
         if self.fpe_mode not in FPE_MODES:
             raise ValueError(f"Unknown fpe_mode {self.fpe_mode!r}; valid modes: {list(FPE_MODES)}")
         if self.zip_mode is not None:
@@ -199,12 +229,16 @@ class AnonymizationPolicy:
 
             validate_zip_mode(self.zip_mode)
 
+    def text_operator(self, entity_type: str) -> str | None:
+        """Return the free-text method of ``entity_type``, or ``None`` when the default applies."""
+        return dict(self.text_operators).get(entity_type)
+
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> AnonymizationPolicy:
         """Make a policy from the policy keys of a mapping, for example CLI args or runner kwargs.
 
-        Other keys and ``None`` values are ignored, so the field defaults apply. ``keep_entities`` may be a
-        comma-separated string or a list.
+        Other keys and ``None`` values are ignored, so the field defaults apply. ``text_operators`` may be a
+        string such as ``"DATE=keep"``, a mapping of type to method, or a list.
         """
         names = {field.name for field in fields(cls)}
         return cls(**{name: value for name, value in values.items() if name in names and value is not None})
@@ -226,6 +260,22 @@ def _operators() -> tuple[Operator, Operator]:
 def _acc_num_hash() -> Operator:
     """Return the guarded ``accession_number_hash`` operator, built once per process."""
     return guarded(AccessionNumberHashAnonymizer)()
+
+
+def _check_method(method: str | None, entity_type: str, acc_num_salt: str | None, policy: AnonymizationPolicy) -> None:
+    """Raise ``ValueError`` if ``method`` cannot apply to a cell of ``entity_type``."""
+    if method is None:
+        return
+    if method == "keep":
+        raise ValueError("Method 'keep' is for free text only (text_operators); leave the column out")
+    if method not in TEXT_METHODS:
+        raise ValueError(f"Unknown method {method!r}; valid methods: {[m for m in TEXT_METHODS if m != 'keep']}")
+    if entity_type in FREE_TEXT_ENTITY_TYPES:
+        raise ValueError("A FREE_TEXT cell takes its methods from policy.text_operators, not from method")
+    if entity_type not in _TEXT_METHOD_TYPES[method]:
+        raise ValueError(f"Method {method!r} does not accept entity_type {entity_type!r}")
+    if method == "acc_num_hash" and (acc_num_salt is None or not policy.acc_num_study_id):
+        raise ValueError("Method 'acc_num_hash' needs acc_num_salt and policy.acc_num_study_id")
 
 
 @functools.cache
@@ -269,6 +319,7 @@ def anonymize_cell(  # noqa: PLR0911
     full_date: Any = None,
     recognizer_results: Any = None,
     acc_num_salt: str | None = None,
+    method: str | None = None,
     policy: AnonymizationPolicy = DEFAULT_POLICY,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
@@ -294,13 +345,15 @@ def anonymize_cell(  # noqa: PLR0911
             a parsed list. Required for ``FREE_TEXT``, where they index into ``str(value)``;
             ignored otherwise.
         acc_num_salt: Salt for accession number hashing (a secret, not in the policy).
-        policy: Run options (see ``AnonymizationPolicy``). It is not checked here. ``keep_entities`` applies only to
-            ``FREE_TEXT``; a cell of a kept type is still anonymized. ``fpe_mode`` selects FF1 (``"strict"``, matches
+        method: Method for this cell, chosen by the caller for the column. ``None`` gives the default of the entity
+            type. ``"acc_num_hash"`` (``ACC_NUM`` only) uses ``accession_number_hash`` with ``acc_num_salt``,
+            ``policy.acc_num_study_id`` and ``patient_id``. ``"keep"`` is not allowed: leave the column out.
+            ``FREE_TEXT`` takes no method; it takes its methods from ``policy.text_operators``.
+        policy: Run options (see ``AnonymizationPolicy``). It is not checked here. ``fpe_mode`` selects FF1 (``"strict"``, matches
             ``process_note``) or, for a value that is an INT64 (an ``int`` or a digit string such as ``"123"`` or
             ``"-5"``, no leading zero), a faster keyed permutation of the INT64 range (``"relaxed"``): no collisions,
             the sign is kept, but not the digit count, and zero is not a fixed point (do not use ``0`` as a sentinel);
-            other values use FF1. With ``acc_num_hash``, an ``ACC_NUM`` cell uses ``accession_number_hash`` with
-            ``acc_num_salt``, ``acc_num_study_id`` and ``patient_id``. With ``jitter_required``, a date cell with no
+            other values use FF1. With ``jitter_required``, a date cell with no
             ``jitter`` gives the date mask. ``zip_mode`` (``"strict"`` or ``"relaxed"``; ``None`` gives the default of
             ``AnonymizerWorker``) applies to ``ZIP_CODE`` and the ZIP codes in ``FREE_TEXT``; an integer ZIP is padded
             to 5 digits (see ``ZipCodeAnonymizer``). A ``FREE_TEXT`` cell gives the policy to the note worker.
@@ -312,10 +365,12 @@ def anonymize_cell(  # noqa: PLR0911
         organization) give random, non-deterministic values.
 
     Raises:
-        ValueError: If ``entity_type`` is missing or not supported.
+        ValueError: If ``entity_type`` is missing or not supported, or ``method`` is unknown, not allowed for the
+            entity type, or ``"acc_num_hash"`` without ``acc_num_salt`` or ``policy.acc_num_study_id``.
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
+    _check_method(method, entity_type, acc_num_salt, policy)
     zip_mode = policy.zip_mode
     if entity_type in ZIP_ENTITY_TYPES and zip_mode is None:
         from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE  # see _zip_operator
@@ -369,7 +424,7 @@ def anonymize_cell(  # noqa: PLR0911
             params["max_age"] = policy.max_age
         if entity_type in DATE_PART_ENTITY_TYPES:
             params["full_date"] = full_date
-    elif entity_type == "ACC_NUM" and policy.acc_num_hash:
+    elif method == "acc_num_hash":
         patient = None if is_null(patient_id) else str(patient_id).strip()
         if patient is not None and patient.lower() in ("nan", "none", "null", ""):
             patient = None

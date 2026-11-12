@@ -42,7 +42,7 @@ def _note(policy: AnonymizationPolicy, spans=SPANS, jitter: int | None = None) -
 def test_worker_default_policy() -> None:
     worker = AnonymizerWorker(SALT, KEY)
     assert worker.policy == DEFAULT_POLICY
-    assert worker.keep_entities == frozenset()
+    assert worker.policy.text_operators == ()
 
 
 def test_worker_reads_fpe_mode() -> None:
@@ -61,14 +61,26 @@ def test_cell_default_strict() -> None:
 
 @pytest.mark.parametrize("patient_id", ["FAKE-P0001", None])
 def test_cell_acc_num_hash(patient_id: str | None) -> None:
-    policy = AnonymizationPolicy(acc_num_hash=True, acc_num_study_id=ACC_STUDY)
+    policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY)
     expected = AccessionNumberHashAnonymizer().operate(
         "ACC123456", {"salt": ACC_SALT, "study_id": ACC_STUDY, "patient_id": patient_id}
     )
     out = cell.anonymize_cell(
-        "ACC123456", "ACC_NUM", SALT, KEY, patient_id=patient_id, acc_num_salt=ACC_SALT, policy=policy
+        "ACC123456",
+        "ACC_NUM",
+        SALT,
+        KEY,
+        patient_id=patient_id,
+        acc_num_salt=ACC_SALT,
+        method="acc_num_hash",
+        policy=policy,
     )
     assert out == expected
+    note_policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY, text_operators={"ACC_NUM": "acc_num_hash"})
+    worker = AnonymizerWorker(SALT, KEY, policy=note_policy, acc_num_salt=ACC_SALT)
+    span = [{"entity_type": "ACC_NUM", "start": 0, "end": 9, "score": 1.0}]
+    note = worker.process_note("ACC123456", worker.compute_text_hash("ACC123456"), json.dumps(span), patient_id, 0)
+    assert note["anonymized_note_text"] == expected
     plain = cell.anonymize_cell("ACC123456", "ACC_NUM", SALT, KEY, patient_id=patient_id, acc_num_salt=ACC_SALT)
     assert plain != expected
 
@@ -87,7 +99,7 @@ def test_cell_jitter_required() -> None:
     [
         (AnonymizationPolicy(fpe_mode="relaxed"), 7),
         (AnonymizationPolicy(jitter_required=True), None),
-        (AnonymizationPolicy(keep_entities=frozenset({"PERSON"})), 7),
+        (AnonymizationPolicy(text_operators="PERSON=keep"), 7),
     ],
 )
 def test_free_text_cell_equals_note(policy: AnonymizationPolicy, jitter: int | None) -> None:

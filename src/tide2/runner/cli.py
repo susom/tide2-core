@@ -121,8 +121,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_jitter_days=args.max_jitter_days,
                 max_age=args.max_age,
                 zip_mode=getattr(args, "zip_mode", DEFAULT_ZIP_MODE),
-                acc_num_hash=getattr(args, "acc_num_hash", False),
-                keep_entities=getattr(args, "keep_entities", None),
+                text_operators=getattr(args, "text_operators", None),
                 fpe_mode=args.fpe_mode,
                 dry_run=dry_run,
                 **optional_kwargs,
@@ -244,8 +243,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw: dict = {}
             if getattr(args, "jitter_required", False):
                 a_kw["jitter_required"] = True
-            if getattr(args, "acc_num_hash", False):
-                a_kw["acc_num_hash"] = True
             a_kw["min_jitter_days"] = args.min_jitter_days
             a_kw["max_jitter_days"] = args.max_jitter_days
             a_kw["max_age"] = args.max_age
@@ -255,7 +252,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("batch_size", "batch_size"),
                 ("acc_num_salt", "acc_num_salt"),
                 ("acc_num_study_id", "acc_num_study_id"),
-                ("keep_entities", "keep_entities"),
+                ("text_operators", "text_operators"),
                 ("fpe_mode", "fpe_mode"),
                 ("read_cpus", "read_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
@@ -499,18 +496,12 @@ Examples:
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")
+    run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (text_operators acc_num_hash)")
+    run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (text_operators acc_num_hash)")
     run_p.add_argument(
-        "--acc-num-hash",
-        action="store_true",
-        help="Hash ACC_NUM with the BigQuery-compatible SHA256 instead of the default hips_alphanumeric "
-        "(anonymizer/pipeline jobs)",
-    )
-    run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (requires --acc-num-hash)")
-    run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (requires --acc-num-hash)")
-    run_p.add_argument(
-        "--keep-entities",
-        help="Comma-separated entity types left as they are in the notes, for example DATE,DATE_TIME,AGE. "
-        "Kept text is not anonymized (anonymizer/pipeline jobs)",
+        "--text-operators",
+        help="TYPE=METHOD,... method per entity type in free text; methods keep, acc_num_hash, for example "
+        "DATE=keep,ACC_NUM=acc_num_hash (anonymizer/pipeline jobs)",
     )
     run_p.add_argument(
         "--fpe-mode",
