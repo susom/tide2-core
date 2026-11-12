@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tide2.anonymizers import cell
 from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.anonymizers.cell import parse_text_operators
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
@@ -52,6 +53,25 @@ def test_bad_jitter() -> None:
 def test_bad_max_age(max_age: int) -> None:
     with pytest.raises(ValueError, match="max_age"):
         AnonymizationPolicy(max_age=max_age)
+
+
+def test_whole_number_options_become_ints() -> None:
+    policy = AnonymizationPolicy(min_jitter_days=3.0, max_jitter_days="180", max_age=90.0)
+    assert (policy.min_jitter_days, policy.max_jitter_days, policy.max_age) == (3, 180, 90)
+    assert all(type(v) is int for v in (policy.min_jitter_days, policy.max_jitter_days, policy.max_age))
+    assert cell.anonymize_cell("2024-03-15", "DATE", b"s" * 32, b"k" * 32, patient_id=None, policy=policy)
+
+
+@pytest.mark.parametrize("bad", [3.5, True, "x", None])
+def test_fractional_or_non_numeric_jitter_is_rejected(bad: object) -> None:
+    with pytest.raises(ValueError, match="min_jitter_days must be an integer"):
+        AnonymizationPolicy(min_jitter_days=bad)
+
+
+@pytest.mark.parametrize("bad", [[None], [["DATE"]], 5])
+def test_malformed_text_operators_raise_value_error(bad: object) -> None:
+    with pytest.raises(ValueError, match="text_operators"):
+        AnonymizationPolicy(text_operators=bad)
 
 
 def test_unknown_text_operator() -> None:

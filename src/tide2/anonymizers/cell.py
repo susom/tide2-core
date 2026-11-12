@@ -106,6 +106,20 @@ _TEXT_METHOD_TYPES: dict[str, frozenset[str]] = {
 }
 
 
+def _as_int(name: str, value: Any) -> int:
+    """Return ``value`` as an int: an int, a whole-number float or a numeric string; anything else is an error."""
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, numbers.Real) and not isinstance(value, bool) and float(value).is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            pass
+    raise ValueError(f"{name} must be an integer, got {value!r}")
+
+
 def parse_text_operators(
     value: str | Mapping[str, str] | Iterable[str | tuple[str, str]] | None,
 ) -> tuple[tuple[str, str], ...]:
@@ -129,8 +143,15 @@ def parse_text_operators(
         return ()
     if isinstance(value, Mapping):
         items: list[Any] = list(value.items())
+    elif isinstance(value, str):
+        items = [part for part in value.split(",") if part.strip()]
     else:
-        items = [part for part in value.split(",") if part.strip()] if isinstance(value, str) else list(value)
+        try:
+            items = list(value)
+        except TypeError:
+            raise ValueError(
+                f"Invalid text_operators {value!r}; use a string, a mapping or a list of TYPE=method"
+            ) from None
     pairs: dict[str, str] = {}
     for item in items:
         if isinstance(item, str):
@@ -138,7 +159,10 @@ def parse_text_operators(
             if not separator:
                 raise ValueError(f"Invalid text_operators item {item!r}; use TYPE=method")
         else:
-            entity_type, method = item
+            try:
+                entity_type, method = item
+            except (TypeError, ValueError):
+                raise ValueError(f"Invalid text_operators item {item!r}; use TYPE=method") from None
         entity_type, method = str(entity_type).strip().upper(), str(method).strip().lower()
         if entity_type in pairs:
             raise ValueError(f"Entity type {entity_type} is given twice in text_operators")
@@ -215,10 +239,12 @@ class AnonymizationPolicy:
 
     def __post_init__(self) -> None:
         """Check the options and store ``text_operators`` in parsed form."""
+        for name in ("min_jitter_days", "max_jitter_days"):
+            object.__setattr__(self, name, _as_int(name, getattr(self, name)))
         is_valid, message = validate_jitter_parameters(self.max_jitter_days, self.min_jitter_days)
         if not is_valid:
             raise ValueError(message)
-        validate_max_age(self.max_age)
+        object.__setattr__(self, "max_age", validate_max_age(self.max_age))
         object.__setattr__(self, "text_operators", parse_text_operators(self.text_operators))
         if "acc_num_hash" in dict(self.text_operators).values() and not self.acc_num_study_id:
             raise ValueError("text_operators uses acc_num_hash, which needs acc_num_study_id")
