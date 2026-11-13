@@ -236,3 +236,17 @@ def test_run_anonymization_rejects_bad_threshold_before_ray(bad: str) -> None:
         local_runner.LocalJobRunner.run_anonymization(
             MagicMock(), "in", "out", salt_path="s", key_path="k", transformer_score_threshold=float(bad)
         )
+
+
+def test_long_note_cached_span_without_metadata_counts_as_transformer(monkeypatch: pytest.MonkeyPatch) -> None:
+    note = _long_note()
+    start = note.index("Rhea")
+    cached = json.dumps([_span("PERSON", (start, start + len("Rhea Orleans")), 0.8, None)])
+    policy = AnonymizationPolicy(transformer_score_threshold=0.0, recognizer_score_threshold=0.9)
+    worker = RecognizerWorker()
+    normal = json.loads(worker.process_note(note, "hash", cached, None)["recognizer_results_json"])
+    monkeypatch.setattr(recognizer_module, "MAX_NOTE_CHUNK_SIZE", 120)
+    monkeypatch.setattr(recognizer_module, "CHUNK_OVERLAP", 30)
+    long = json.loads(worker.process_note(note, "hash", cached, None)["recognizer_results_json"])
+    assert "Rhea Orleans" not in _run(policy, long, note)
+    assert _run(policy, long, note) == _run(policy, normal, note)
