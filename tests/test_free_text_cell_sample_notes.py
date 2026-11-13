@@ -12,12 +12,11 @@ from tide2.actors.recognizer import RecognizerWorker
 from tide2.anonymizers import cell
 from tide2.anonymizers import free_text
 from tide2.anonymizers import presidio_patches
-from tide2.anonymizers.cell import AnonymizationPolicy
 
 SAMPLE = Path(__file__).resolve().parents[1] / "notebooks" / "sample_data"
 SALT = b"\x00" * 32
 KEY = b"\x11" * 32
-ACC = {"acc_num_salt": "s", "policy": AnonymizationPolicy(acc_num_study_id="study")}
+ACC = {"acc_num_salt": "s", "acc_num_study_id": "study"}
 DOB = re.compile(r"\b(?:DOB|Date of Birth)\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})", re.I)
 SERVICE = re.compile(r"\b(?:Date of Service|Date of Visit|Admission Date|Date)\s*:\s*(\d{1,2}/\d{1,2}/\d{4})", re.I)
 

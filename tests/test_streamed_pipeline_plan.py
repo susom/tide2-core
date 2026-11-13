@@ -298,6 +298,18 @@ class TestPlanShape:
         assert result["execution_mode"] == "streamed"
         assert result["input_rows"] == 2
 
+    def test_acc_num_secrets_reach_the_anonymizer_actor(self, monkeypatch, streamed_env, df):
+        factory = MagicMock(return_value=MagicMock())
+        monkeypatch.setattr("tide2.actors.create_anonymizer_actor_class", factory)
+        kwargs = {
+            "acc_num_salt": "FAKE-SALT",
+            "acc_num_study_id": "FAKE-STUDY",
+            "text_operators": "ACC_NUM=acc_num_hash",
+        }
+        run_streamed(lr.LocalJobRunner(), df, streamed_env["output_dir"], anonymizer_kwargs=kwargs)
+        assert factory.call_args.kwargs["acc_num_salt"] == "FAKE-SALT"
+        assert factory.call_args.kwargs["acc_num_study_id"] == "FAKE-STUDY"
+
     @pytest.mark.parametrize("written_rows", [1, 0])
     def test_a_short_write_raises(self, streamed_env, df, written_rows):
         streamed_env["input_rows"] = written_rows

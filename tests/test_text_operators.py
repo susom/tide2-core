@@ -41,8 +41,8 @@ def _fresh_workers():
     free_text._worker.cache_clear()
 
 
-def _note(acc_num_salt: str | None = None, **policy_kwargs) -> dict:
-    worker = AnonymizerWorker(SALT, KEY, policy=AnonymizationPolicy(**policy_kwargs), acc_num_salt=acc_num_salt)
+def _note(**policy_kwargs) -> dict:
+    worker = AnonymizerWorker(SALT, KEY, policy=AnonymizationPolicy(**policy_kwargs))
     return worker.process_note(TEXT, worker.compute_text_hash(TEXT), json.dumps(SPANS), "FAKE-P0001", 7)
 
 
@@ -124,11 +124,12 @@ def test_cell_keep_method_is_rejected() -> None:
 @pytest.mark.parametrize(
     ("entity_type", "method", "kwargs"),
     [
-        ("MRN", "acc_num_hash", {"acc_num_salt": "s", "policy": AnonymizationPolicy(acc_num_study_id="u")}),
-        ("FREE_TEXT", "acc_num_hash", {"acc_num_salt": "s", "policy": AnonymizationPolicy(acc_num_study_id="u")}),
+        ("MRN", "acc_num_hash", {"acc_num_salt": "s", "acc_num_study_id": "u"}),
+        ("FREE_TEXT", "acc_num_hash", {"acc_num_salt": "s", "acc_num_study_id": "u"}),
         ("ACC_NUM", "nope", {}),
-        ("ACC_NUM", "acc_num_hash", {"policy": AnonymizationPolicy(acc_num_study_id="u")}),
+        ("ACC_NUM", "acc_num_hash", {"acc_num_study_id": "u"}),
         ("ACC_NUM", "acc_num_hash", {"acc_num_salt": "s"}),
+        ("ACC_NUM", "acc_num_hash", {"acc_num_salt": "s", "acc_num_study_id": ""}),
     ],
 )
 def test_cell_method_fails_closed(entity_type: str, method: str, kwargs: dict) -> None:
@@ -137,10 +138,11 @@ def test_cell_method_fails_closed(entity_type: str, method: str, kwargs: dict) -
 
 
 def test_cell_acc_num_hash_matches_the_note_and_the_default_is_fpe() -> None:
-    policy = AnonymizationPolicy(acc_num_study_id="FAKE-STUDY", text_operators={"ACC_NUM": "acc_num_hash"})
-    kwargs = {"patient_id": "FAKE-P0001", "acc_num_salt": "fake-acc-salt", "policy": policy}
+    policy = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
+    secrets = {"acc_num_salt": "fake-acc-salt", "acc_num_study_id": "FAKE-STUDY"}
+    kwargs = {"patient_id": "FAKE-P0001", "policy": policy, **secrets}
     hashed = cell.anonymize_cell("ACC123456", "ACC_NUM", SALT, KEY, method="acc_num_hash", **kwargs)
-    worker = AnonymizerWorker(SALT, KEY, policy=policy, acc_num_salt="fake-acc-salt")
+    worker = AnonymizerWorker(SALT, KEY, policy=policy, **secrets)
     span = [{"entity_type": "ACC_NUM", "start": 0, "end": 9, "score": 1.0}]
     note = worker.process_note("ACC123456", worker.compute_text_hash("ACC123456"), json.dumps(span), "FAKE-P0001", 0)
     assert hashed == note["anonymized_note_text"]

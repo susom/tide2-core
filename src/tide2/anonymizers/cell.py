@@ -215,8 +215,8 @@ def _zip_text(value: Any) -> str:
 class AnonymizationPolicy:
     """Anonymization options of a run, checked one time when the policy is made.
 
-    Secrets (``salt``, ``key``, ``acc_num_salt``) and row context (``patient_id``, ``jitter``, ...) are not
-    part of it. A frozen policy is hashable, so it can be a cache key.
+    Secrets (``salt``, ``key``, ``acc_num_salt``, ``acc_num_study_id``) and row context (``patient_id``,
+    ``jitter``, ...) are not part of it. A frozen policy is hashable, so it can be a cache key.
 
     The method of a structured cell is not a policy field: the caller picks it per column with the ``method``
     argument of ``anonymize_cell``. Free text (notes and ``FREE_TEXT`` cells) mixes many entity types in one value,
@@ -224,15 +224,13 @@ class AnonymizationPolicy:
     keep a column, do not send it to anonymization.
 
     Raises:
-        ValueError: If a value is out of range, or ``text_operators`` is invalid or uses ``acc_num_hash`` without
-            ``acc_num_study_id``.
+        ValueError: If a value is out of range or ``text_operators`` is invalid.
     """
 
     min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS
     max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS
     max_age: int = DEFAULT_MAX_AGE
     text_operators: tuple[tuple[str, str], ...] = ()
-    acc_num_study_id: str | None = None
     jitter_required: bool = False
     fpe_mode: str = MODE_STRICT
     zip_mode: str | None = None
@@ -246,8 +244,6 @@ class AnonymizationPolicy:
             raise ValueError(message)
         object.__setattr__(self, "max_age", validate_max_age(self.max_age))
         object.__setattr__(self, "text_operators", parse_text_operators(self.text_operators))
-        if "acc_num_hash" in dict(self.text_operators).values() and not self.acc_num_study_id:
-            raise ValueError("text_operators uses acc_num_hash, which needs acc_num_study_id")
         if self.fpe_mode not in FPE_MODES:
             raise ValueError(f"Unknown fpe_mode {self.fpe_mode!r}; valid modes: {list(FPE_MODES)}")
         if self.zip_mode is not None:
@@ -288,7 +284,22 @@ def _acc_num_hash() -> Operator:
     return guarded(AccessionNumberHashAnonymizer)()
 
 
-def _check_method(method: str | None, entity_type: str, acc_num_salt: str | None, policy: AnonymizationPolicy) -> None:
+def check_acc_num_secrets(
+    policy: AnonymizationPolicy, acc_num_salt: str | None, acc_num_study_id: str | None, method: str | None = None
+) -> None:
+    """Raise ``ValueError`` if ``acc_num_hash`` is used (``method`` or ``policy.text_operators``) without both secrets."""
+    uses_acc_num_hash = method == "acc_num_hash" or "acc_num_hash" in dict(policy.text_operators).values()
+    if uses_acc_num_hash and (acc_num_salt is None or not acc_num_study_id):
+        raise ValueError("acc_num_hash needs acc_num_salt and acc_num_study_id")
+
+
+def _check_method(
+    method: str | None,
+    entity_type: str,
+    acc_num_salt: str | None,
+    acc_num_study_id: str | None,
+    policy: AnonymizationPolicy,
+) -> None:
     """Raise ``ValueError`` if ``method`` cannot apply to a cell of ``entity_type``."""
     if method is None:
         return
@@ -300,8 +311,7 @@ def _check_method(method: str | None, entity_type: str, acc_num_salt: str | None
         raise ValueError("A FREE_TEXT cell takes its methods from policy.text_operators, not from method")
     if entity_type not in _TEXT_METHOD_TYPES[method]:
         raise ValueError(f"Method {method!r} does not accept entity_type {entity_type!r}")
-    if method == "acc_num_hash" and (acc_num_salt is None or not policy.acc_num_study_id):
-        raise ValueError("Method 'acc_num_hash' needs acc_num_salt and policy.acc_num_study_id")
+    check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id, method)
 
 
 @functools.cache
@@ -345,6 +355,7 @@ def anonymize_cell(  # noqa: PLR0911
     full_date: Any = None,
     recognizer_results: Any = None,
     acc_num_salt: str | None = None,
+    acc_num_study_id: str | None = None,
     method: str | None = None,
     policy: AnonymizationPolicy = DEFAULT_POLICY,
 ) -> str | None:
@@ -371,9 +382,10 @@ def anonymize_cell(  # noqa: PLR0911
             a parsed list. Required for ``FREE_TEXT``, where they index into ``str(value)``;
             ignored otherwise.
         acc_num_salt: Salt for accession number hashing (a secret, not in the policy).
+        acc_num_study_id: Study ID for accession number hashing (a secret, not in the policy).
         method: Method for this cell, chosen by the caller for the column. ``None`` gives the default of the entity
             type. ``"acc_num_hash"`` (``ACC_NUM`` only) uses ``accession_number_hash`` with ``acc_num_salt``,
-            ``policy.acc_num_study_id`` and ``patient_id``. ``"keep"`` is not allowed: leave the column out.
+            ``acc_num_study_id`` and ``patient_id``. ``"keep"`` is not allowed: leave the column out.
             ``FREE_TEXT`` takes no method; it takes its methods from ``policy.text_operators``.
         policy: Run options (see ``AnonymizationPolicy``). It is not checked here. ``fpe_mode`` selects FF1 (``"strict"``, matches
             ``process_note``) or, for a value that is an INT64 (an ``int`` or a digit string such as ``"123"`` or
@@ -392,11 +404,11 @@ def anonymize_cell(  # noqa: PLR0911
 
     Raises:
         ValueError: If ``entity_type`` is missing or not supported, or ``method`` is unknown, not allowed for the
-            entity type, or ``"acc_num_hash"`` without ``acc_num_salt`` or ``policy.acc_num_study_id``.
+            entity type, or ``"acc_num_hash"`` without ``acc_num_salt`` or ``acc_num_study_id``.
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
-    _check_method(method, entity_type, acc_num_salt, policy)
+    _check_method(method, entity_type, acc_num_salt, acc_num_study_id, policy)
     zip_mode = policy.zip_mode
     if entity_type in ZIP_ENTITY_TYPES and zip_mode is None:
         from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE  # see _zip_operator
@@ -424,7 +436,7 @@ def anonymize_cell(  # noqa: PLR0911
         if is_null_or_blank(birth_date):
             _warn_no_birth_date()
         return anonymize_free_text(
-            text, recognizer_results, salt, key, patient_id, jitter, birth_date, acc_num_salt, policy
+            text, recognizer_results, salt, key, patient_id, jitter, birth_date, acc_num_salt, acc_num_study_id, policy
         )
 
     # process_note relabels a type equal to its own span text as ENTITY, which falls to the DEFAULT mask.
@@ -455,7 +467,7 @@ def anonymize_cell(  # noqa: PLR0911
         if patient is not None and patient.lower() in ("nan", "none", "null", ""):
             patient = None
         operator = _acc_num_hash()
-        params = {"salt": acc_num_salt, "study_id": policy.acc_num_study_id, "patient_id": patient}
+        params = {"salt": acc_num_salt, "study_id": acc_num_study_id, "patient_id": patient}
     else:
         operator, params = fpe, {"salt": salt, "key": key, "fpe_mode": policy.fpe_mode}
     params["entity_type"] = entity_type

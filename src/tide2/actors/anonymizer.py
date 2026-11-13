@@ -40,6 +40,7 @@ from tide2.anonymizers.accession_number_hash import AccessionNumberHashAnonymize
 from tide2.anonymizers.age_grouping import AgeGroupAnonymizer
 from tide2.anonymizers.cell import DEFAULT_POLICY
 from tide2.anonymizers.cell import AnonymizationPolicy
+from tide2.anonymizers.cell import check_acc_num_secrets
 from tide2.anonymizers.date_jitter import DateJitterAnonymizer
 from tide2.anonymizers.faker import FakerAnonymizer
 from tide2.anonymizers.guarded import end_note
@@ -91,6 +92,7 @@ class AnonymizerWorker:
         key: bytes,
         policy: AnonymizationPolicy = DEFAULT_POLICY,
         acc_num_salt: str | None = None,
+        acc_num_study_id: str | None = None,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -102,6 +104,7 @@ class AnonymizerWorker:
                 codes (and the ZIP inside an address) are anonymized: ``"relaxed"`` (default when ``None``; not
                 Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
             acc_num_salt: Salt for accession number hashing (a secret, not in the policy).
+            acc_num_study_id: Study ID for accession number hashing (a secret, not in the policy).
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -121,9 +124,8 @@ class AnonymizerWorker:
         self.key = key
         self.policy = policy
         self.acc_num_salt = acc_num_salt
-        self.acc_num_study_id = policy.acc_num_study_id
-        if policy.text_operator("ACC_NUM") == "acc_num_hash" and acc_num_salt is None:
-            raise ValueError("text_operators uses acc_num_hash, which needs acc_num_salt")
+        self.acc_num_study_id = acc_num_study_id
+        check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id)
         self.jitter_required = policy.jitter_required
         self.min_jitter_days = policy.min_jitter_days
         self.max_jitter_days = policy.max_jitter_days
@@ -721,6 +723,7 @@ def create_anonymizer_actor(
     key: bytes | str | os.PathLike,
     policy: AnonymizationPolicy = DEFAULT_POLICY,
     acc_num_salt: str | None = None,
+    acc_num_study_id: str | None = None,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -733,6 +736,7 @@ def create_anonymizer_actor(
         key: 32-byte key (bytes) or path to key file
         policy: Run options (see ``AnonymizationPolicy``)
         acc_num_salt: Salt for accession number hashing (a secret, not in the policy)
+        acc_num_study_id: Study ID for accession number hashing (a secret, not in the policy)
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -755,7 +759,13 @@ def create_anonymizer_actor(
         """Pre-configured AnonymizerWorker with captured key material."""
 
         def __init__(self):
-            super().__init__(salt=salt_bytes, key=key_bytes, policy=policy, acc_num_salt=acc_num_salt)
+            super().__init__(
+                salt=salt_bytes,
+                key=key_bytes,
+                policy=policy,
+                acc_num_salt=acc_num_salt,
+                acc_num_study_id=acc_num_study_id,
+            )
 
     return ConfiguredAnonymizerActor
 

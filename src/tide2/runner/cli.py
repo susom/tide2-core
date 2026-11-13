@@ -661,9 +661,11 @@ Examples:
 
     if args.command == "run":
         from tide2.anonymizers.cell import AnonymizationPolicy
+        from tide2.anonymizers.cell import check_acc_num_secrets
 
         try:
-            AnonymizationPolicy.from_mapping(vars(args))
+            policy = AnonymizationPolicy.from_mapping(vars(args))
+            check_acc_num_secrets(policy, getattr(args, "acc_num_salt", None), getattr(args, "acc_num_study_id", None))
         except ValueError as err:
             run_p.error(str(err))
     # argparse checks the flag, but a value from --config YAML bypasses its choices

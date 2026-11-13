@@ -43,13 +43,19 @@ def _fresh_workers():
 
 def _free_text(text: str = TEXT, spans=SPANS, acc_num_hash: bool = False, zip_mode: str | None = None, **kwargs):
     text_operators = {"ACC_NUM": "acc_num_hash"} if acc_num_hash else None
-    policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY, text_operators=text_operators, zip_mode=zip_mode)
-    params = {"patient_id": "FAKE-P0001", "acc_num_salt": ACC_SALT, "policy": policy, **kwargs}
+    policy = AnonymizationPolicy(text_operators=text_operators, zip_mode=zip_mode)
+    params = {
+        "patient_id": "FAKE-P0001",
+        "acc_num_salt": ACC_SALT,
+        "acc_num_study_id": ACC_STUDY,
+        "policy": policy,
+        **kwargs,
+    }
     return cell.anonymize_cell(text, "FREE_TEXT", SALT, KEY, recognizer_results=json.dumps(spans), **params)
 
 
 def _note(text: str, spans, **kwargs) -> str:
-    worker = AnonymizerWorker(SALT, KEY, policy=AnonymizationPolicy(acc_num_study_id=ACC_STUDY), acc_num_salt=ACC_SALT)
+    worker = AnonymizerWorker(SALT, KEY, acc_num_salt=ACC_SALT, acc_num_study_id=ACC_STUDY)
     return worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans), **kwargs)[
         "anonymized_note_text"
     ]
@@ -87,8 +93,9 @@ def test_acc_num_uses_accession_settings() -> None:
     worker = AnonymizerWorker(
         SALT,
         KEY,
-        policy=AnonymizationPolicy(acc_num_study_id=ACC_STUDY, text_operators={"ACC_NUM": "acc_num_hash"}),
+        policy=AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"}),
         acc_num_salt=ACC_SALT,
+        acc_num_study_id=ACC_STUDY,
     )
     expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans), "FAKE-P0001")[
         "anonymized_note_text"
@@ -106,8 +113,9 @@ def test_zip_follows_zip_mode(zip_mode: str, zip_out: str) -> None:
     worker = AnonymizerWorker(
         SALT,
         KEY,
-        policy=AnonymizationPolicy(acc_num_study_id=ACC_STUDY, zip_mode=zip_mode),
+        policy=AnonymizationPolicy(zip_mode=zip_mode),
         acc_num_salt=ACC_SALT,
+        acc_num_study_id=ACC_STUDY,
     )
     expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans))["anonymized_note_text"]
     assert expected == f"Lives in ZIP {zip_out}."
