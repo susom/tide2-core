@@ -19,11 +19,6 @@ from typing import Literal
 if TYPE_CHECKING:
     import pandas as pd
     from presidio_anonymizer.entities import RecognizerResult
-else:
-    try:
-        import pandas as pd
-    except ImportError:  # pragma: no cover
-        pd = None
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +43,8 @@ def load_llm_spans_from_dir(llm_dir: str | Path) -> pd.DataFrame:
         >>> df.columns.tolist()
         ['note_id', 'span_start', 'span_end', 'span_tag', 'score', 'recognizer_name']
     """
+    import pandas as pd
+
     llm_dir = Path(llm_dir)
 
     # Auto-detect folder structure: check for analyzer_output subfolder
@@ -952,6 +949,8 @@ def format_results(results: dict[str, dict[str, float]]) -> pd.DataFrame:
         >>> df.iloc[0]['Tag']
         'PER'
     """
+    import pandas as pd
+
     data = []
     for tag, metrics in results.items():
         data.append(
@@ -1013,6 +1012,8 @@ def spans_to_dataframe(span_metrics: list[dict[str, Any]]) -> pd.DataFrame:
         >>> len(df)
         1
     """
+    import pandas as pd
+
     return pd.DataFrame(span_metrics)
 
 
@@ -1084,6 +1085,8 @@ def resolve_dataframe_conflicts(df: pd.DataFrame, model_name: str) -> pd.DataFra
             span.pop("end", None)
         all_resolved.extend(resolved_spans)
 
+    import pandas as pd
+
     # Build final DataFrame from all resolved records (single DataFrame creation)
     if all_resolved:
         result_df = pd.DataFrame(all_resolved)
@@ -1137,6 +1140,8 @@ def generate_model_combinations_with_resolution(df: pd.DataFrame, model_column: 
 
     if df.empty:
         return df.copy()
+
+    import pandas as pd
 
     # Get unique model names
     model_names = sorted(df[model_column].unique().tolist())

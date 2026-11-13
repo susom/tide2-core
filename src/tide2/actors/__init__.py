@@ -34,18 +34,21 @@ Example:
 from tide2.actors.anonymizer import AnonymizerActor
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.actors.anonymizer import create_anonymizer_actor_class  # Backwards compatibility
-from tide2.actors.recognizer import NoOpContextEnhancer
-from tide2.actors.recognizer import RecognizerActor
 
 
 def __getattr__(name: str):
     """Lazy import for actors with heavy/optional dependencies.
 
-    Transformer actors pull in torch; the LLM recognizer pulls in the provider
-    SDKs from the optional ``[llm]`` extra (openai/anthropic/google-genai).
-    Importing them lazily keeps ``import tide2.actors`` working for non-LLM,
-    non-transformer jobs even when those extras are not installed.
+    The recognizer actor pulls in presidio_analyzer and spaCy, transformer actors
+    pull in torch, and the LLM recognizer pulls in the provider SDKs from the
+    optional ``[llm]`` extra (openai/anthropic/google-genai). Importing them
+    lazily keeps ``import tide2.actors`` working for anonymization-only jobs,
+    such as ``FREE_TEXT`` cells, when those dependencies are not installed.
     """
+    if name in {"NoOpContextEnhancer", "RecognizerActor"}:
+        from tide2.actors import recognizer as _recognizer
+
+        return getattr(_recognizer, name)
     _transformer_exports = {
         "BIOAggregationActor",
         "TransformerInferenceActor",
