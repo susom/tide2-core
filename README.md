@@ -116,6 +116,12 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 - **Date Jittering**: Deterministic, privacy-preserving date shifts derived from patient keys
 - **Age Grouping**: Age range categorization
 - **ZIP code Safe Harbor**: HIPAA Safe Harbor ZIP reduction (3-digit prefix, or `000` for small areas) from 2020 Census populations, for ZIP entities and the ZIP inside addresses; see [ZIP code anonymization](#zip-code-anonymization-hipaa-safe-harbor)
+- **Keeping entity types** (opt-in with `--keep-entities`): leave chosen entity types as they
+  are, for example `--keep-entities DATE,DATE_TIME,AGE`. Every other type is still
+  anonymized. `DATE` also covers the date part types of cells (`DATE_DAY`, `DATE_MONTH`,
+  `DATE_YEAR`); `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The
+  recognizers still find every type, and kept spans appear in `anonymizer_results_json` with
+  operator `keep`. In cells, pass `keep_entities=parse_keep_entities(...)` to `anonymize_cell`.
 
 ### Cryptographic Protection
 - **Format-Preserving Encryption (FPE)**: Maintains data format during encryption
