@@ -127,7 +127,8 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
   `"acc_num_hash"`). `keep` is not a cell method: to keep a column, do not send it to anonymization.
 - **Policy** (`AnonymizationPolicy`, `tide2.anonymizers.cell`): one frozen, checked set of options that
   `AnonymizerWorker`, `create_anonymizer_actor`, `anonymize_free_text` and `anonymize_cell` take as `policy=`.
-  Secrets (`salt`, `key`, `acc_num_salt`) stay separate arguments. The same fields apply to notes, cells and
+  Secrets (`salt`, `key`, `acc_num_salt`, `acc_num_study_id`) stay separate arguments (`--acc-num-salt`,
+  `--acc-num-study-id`); `acc_num_hash` needs both. The same fields apply to notes, cells and
   `FREE_TEXT` cells, except `text_operators` (free text only):
 
   | Field | Default | CLI |
@@ -135,7 +136,6 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
   | `min_jitter_days`, `max_jitter_days` | 3, 180 | `--min-jitter-days`, `--max-jitter-days` |
   | `max_age` | 90 | `--max-age` |
   | `text_operators` (free text only) | none | `--text-operators` |
-  | `acc_num_study_id` | none | `--acc-num-study-id` |
   | `jitter_required` | off | `--jitter-required` |
   | `fpe_mode` | `strict` | `--fpe-mode` |
   | `zip_mode` | `relaxed` (when unset) | `--zip-mode` |
@@ -897,7 +897,7 @@ The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason c
 stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
 index into `str(value)`, and no recognizer runs per cell. Dates in the text shift like the `DATE` cells of the row (same
 `patient_id`, `jitter` and `birth_date`), and `ACC_NUM` spans use HIPS alphanumeric, or the accession hash with
-`acc_num_salt` and the policy's `acc_num_study_id` when its `text_operators` uses `acc_num_hash`. The text follows the same `policy`
+`acc_num_salt` and `acc_num_study_id` when its `text_operators` uses `acc_num_hash`. The text follows the same `policy`
 as a note. The result is
 `None` when the spans are null, malformed or outside the text; an entity whose operator fails is masked (for example
 `[PERSON]`) and the rest of the text is kept. Spans of the Faker types (email, URL, organization) get random values, so

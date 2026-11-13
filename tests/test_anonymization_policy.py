@@ -7,6 +7,7 @@ import pytest
 
 from tide2.anonymizers import cell
 from tide2.anonymizers.cell import AnonymizationPolicy
+from tide2.anonymizers.cell import check_acc_num_secrets
 from tide2.anonymizers.cell import parse_text_operators
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
@@ -24,7 +25,6 @@ def test_defaults() -> None:
     assert policy.max_jitter_days == DEFAULT_MAX_JITTER_DAYS
     assert policy.max_age == DEFAULT_MAX_AGE
     assert policy.text_operators == ()
-    assert policy.acc_num_study_id is None
     assert policy.jitter_required is False
 
 
@@ -79,11 +79,14 @@ def test_unknown_text_operator() -> None:
         AnonymizationPolicy.from_mapping({"text_operators": "NOPE=keep"})
 
 
-def test_acc_num_hash_needs_study_id() -> None:
-    with pytest.raises(ValueError, match="acc_num_study_id"):
-        AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
-    policy = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"}, acc_num_study_id="S1")
-    assert policy.text_operator("ACC_NUM") == "acc_num_hash"
+@pytest.mark.parametrize(("salt", "study_id"), [(None, "S1"), ("s", None), ("s", ""), (None, None)])
+def test_acc_num_hash_needs_both_secrets(salt: str | None, study_id: str | None) -> None:
+    uses_hash = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
+    for policy, method in [(uses_hash, None), (AnonymizationPolicy(), "acc_num_hash")]:
+        with pytest.raises(ValueError, match="acc_num_salt and acc_num_study_id"):
+            check_acc_num_secrets(policy, salt, study_id, method)
+    check_acc_num_secrets(uses_hash, "s", "S1")
+    check_acc_num_secrets(AnonymizationPolicy(), None, None)
 
 
 def test_from_mapping_ignores_other_keys() -> None:
@@ -92,7 +95,7 @@ def test_from_mapping_ignores_other_keys() -> None:
 
 def test_no_secrets() -> None:
     names = [field.name for field in dataclasses.fields(AnonymizationPolicy)]
-    assert not [name for name in names if "salt" in name or "key" in name]
+    assert not [name for name in names if "salt" in name or "key" in name or "study_id" in name]
 
 
 @pytest.mark.parametrize(
@@ -110,10 +113,16 @@ def test_runners_reject_before_ray(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = local_runner.LocalJobRunner()
     init_ray = MagicMock()
     monkeypatch.setattr(runner, "_init_ray", init_ray)
-    with pytest.raises(ValueError, match="acc_num_study_id"):
+    with pytest.raises(ValueError, match="acc_num_study_id") as err:
         runner.run_anonymization(
-            "in", "out", salt_hex="00" * 32, key_hex="11" * 32, text_operators="ACC_NUM=acc_num_hash"
+            "in",
+            "out",
+            salt_hex="00" * 32,
+            key_hex="11" * 32,
+            text_operators="ACC_NUM=acc_num_hash",
+            acc_num_salt="FAKE-SECRET-SALT",
         )
+    assert "FAKE-SECRET-SALT" not in str(err.value)
     with pytest.raises(ValueError, match="acc_num_study_id"):
         runner.run_pipeline("in", "out", "model", anonymizer_kwargs={"text_operators": "ACC_NUM=acc_num_hash"})
     init_ray.assert_not_called()

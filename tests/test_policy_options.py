@@ -61,7 +61,6 @@ def test_cell_default_strict() -> None:
 
 @pytest.mark.parametrize("patient_id", ["FAKE-P0001", None])
 def test_cell_acc_num_hash(patient_id: str | None) -> None:
-    policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY)
     expected = AccessionNumberHashAnonymizer().operate(
         "ACC123456", {"salt": ACC_SALT, "study_id": ACC_STUDY, "patient_id": patient_id}
     )
@@ -72,12 +71,12 @@ def test_cell_acc_num_hash(patient_id: str | None) -> None:
         KEY,
         patient_id=patient_id,
         acc_num_salt=ACC_SALT,
+        acc_num_study_id=ACC_STUDY,
         method="acc_num_hash",
-        policy=policy,
     )
     assert out == expected
-    note_policy = AnonymizationPolicy(acc_num_study_id=ACC_STUDY, text_operators={"ACC_NUM": "acc_num_hash"})
-    worker = AnonymizerWorker(SALT, KEY, policy=note_policy, acc_num_salt=ACC_SALT)
+    note_policy = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
+    worker = AnonymizerWorker(SALT, KEY, policy=note_policy, acc_num_salt=ACC_SALT, acc_num_study_id=ACC_STUDY)
     span = [{"entity_type": "ACC_NUM", "start": 0, "end": 9, "score": 1.0}]
     note = worker.process_note("ACC123456", worker.compute_text_hash("ACC123456"), json.dumps(span), patient_id, 0)
     assert note["anonymized_note_text"] == expected

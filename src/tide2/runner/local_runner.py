@@ -1562,6 +1562,7 @@ class LocalJobRunner:
         """
         from tide2.actors import create_anonymizer_actor_class
         from tide2.anonymizers.cell import AnonymizationPolicy
+        from tide2.anonymizers.cell import check_acc_num_secrets
 
         _validate_zip_mode(zip_mode)
         _validate_id_column(_id_column)
@@ -1573,10 +1574,10 @@ class LocalJobRunner:
                 "text_operators": text_operators,
                 "fpe_mode": fpe_mode,
                 "zip_mode": zip_mode,
-                "acc_num_study_id": acc_num_study_id,
                 "jitter_required": jitter_required,
             }
         )
+        check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1650,6 +1651,7 @@ class LocalJobRunner:
             key=key,
             policy=policy,
             acc_num_salt=acc_num_salt,
+            acc_num_study_id=acc_num_study_id,
         )
 
         try:
@@ -2158,8 +2160,11 @@ class LocalJobRunner:
             if stage_kwargs and "_id_column" in stage_kwargs:
                 _validate_id_column(stage_kwargs["_id_column"])
         from tide2.anonymizers.cell import AnonymizationPolicy
+        from tide2.anonymizers.cell import check_acc_num_secrets
 
-        anon_policy = AnonymizationPolicy.from_mapping(anonymizer_kwargs or {})
+        anon_kwargs = anonymizer_kwargs or {}
+        anon_policy = AnonymizationPolicy.from_mapping(anon_kwargs)
+        check_acc_num_secrets(anon_policy, anon_kwargs.get("acc_num_salt"), anon_kwargs.get("acc_num_study_id"))
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)
@@ -2767,6 +2772,7 @@ class LocalJobRunner:
                 key=self._load_key(str(key_file)),
                 policy=AnonymizationPolicy.from_mapping(anonymizer_kwargs),
                 acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
+                acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
             )
             ds = self.build_anonymizer_stage(
                 ds,

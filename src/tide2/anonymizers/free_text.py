@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 @functools.lru_cache(maxsize=4)
-def _worker(salt: bytes, key: bytes, acc_num_salt: str | None, policy: AnonymizationPolicy) -> AnonymizerWorker:
+def _worker(
+    salt: bytes, key: bytes, acc_num_salt: str | None, acc_num_study_id: str | None, policy: AnonymizationPolicy
+) -> AnonymizerWorker:
     """Return the worker for these settings, built once per process (the engine setup is costly)."""
-    return AnonymizerWorker(salt, key, policy=policy, acc_num_salt=acc_num_salt)
+    return AnonymizerWorker(salt, key, policy=policy, acc_num_salt=acc_num_salt, acc_num_study_id=acc_num_study_id)
 
 
 def anonymize_free_text(
@@ -41,6 +43,7 @@ def anonymize_free_text(
     jitter: int | None = None,
     birth_date: Any = None,
     acc_num_salt: str | None = None,
+    acc_num_study_id: str | None = None,
     policy: AnonymizationPolicy = DEFAULT_POLICY,
 ) -> str | None:
     """Anonymize a free-text cell with the spans found by the recognition stages.
@@ -60,6 +63,7 @@ def anonymize_free_text(
         birth_date: Real birth date of the patient. Dates after the ``policy.max_age``-th birthday are
             moved to it; without it dates are not capped.
         acc_num_salt: Salt for accession number hashing.
+        acc_num_study_id: Study ID for accession number hashing.
         policy: Run options, given to the note worker.
 
     Returns:
@@ -70,7 +74,7 @@ def anonymize_free_text(
     Raises:
         ValueError: If the keys or the policy are invalid.
     """
-    worker = _worker(salt, key, acc_num_salt, policy)
+    worker = _worker(salt, key, acc_num_salt, acc_num_study_id, policy)
     text_hash = AnonymizerWorker.compute_text_hash(text)
     try:
         result = worker.process_note(text, text_hash, recognizer_results, patient_id, jitter, birth_date)
