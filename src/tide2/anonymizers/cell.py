@@ -1,8 +1,8 @@
 """Cell-level anonymization of one structured value.
 
 ``anonymize_cell`` gives the result ``AnonymizerWorker.process_note`` gives for the value as a one-span
-note of the given entity type, without a Presidio engine. This holds with ``fpe_mode="strict"``, and in
-the default relaxed mode for every value that is not an INT64 (see ``anonymize_cell``). Backends that
+note of the given entity type, without a Presidio engine. This holds in the default strict mode, and in
+``fpe_mode="relaxed"`` for every value that is not an INT64 (see ``anonymize_cell``). Backends that
 anonymize table columns (Ray,
 BigQuery) call it once per cell.
 
@@ -35,7 +35,7 @@ from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
-from tide2.cryptographic.fpe_strings import MODE_RELAXED
+from tide2.cryptographic.fpe_strings import MODE_STRICT
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
 
@@ -43,7 +43,7 @@ __docformat__ = "google"
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FPE_MODE = MODE_RELAXED
+DEFAULT_FPE_MODE = MODE_STRICT
 
 FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     {
@@ -251,7 +251,7 @@ def anonymize_cell(  # noqa: PLR0911
             alphanumeric, matching the default ``AnonymizerWorker``.
         keep_entities: Entity types left as they are, from ``parse_keep_entities``. A cell of such a
             type is returned as its text; in a ``FREE_TEXT`` cell their spans are left unchanged.
-        fpe_mode: ``"relaxed"`` (default) or ``"strict"``, for the FPE entity types. Relaxed sends a value
+        fpe_mode: ``"strict"`` (default) or ``"relaxed"``, for the FPE entity types. Relaxed sends a value
             that is an INT64 (an ``int`` or a digit string such as ``"123"`` or ``"-5"``, no leading zero)
             through a faster keyed permutation of the INT64 range: no collisions, non-negative values stay
             non-negative and negative ones negative, but not the same digit count and zero is not a fixed

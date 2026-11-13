@@ -84,8 +84,8 @@ def test_relaxed_differs_from_process_note_for_an_int64_value(worker: Anonymizer
         original_text_hash=worker.compute_text_hash(value),
         recognizer_results_json=[{"entity_type": "MRN", "start": 0, "end": len(value), "score": 1.0}],
     )["anonymized_note_text"]
-    assert cell.anonymize_cell(value, "MRN", SALT, KEY) != expected
-    assert cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="strict") == expected
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="relaxed") != expected
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY) == expected
 
 
 @pytest.mark.parametrize("value", ["00482910", "ACC123456", "AB-9021-X7", "(555) 014-8821", "900-12-3456"])
