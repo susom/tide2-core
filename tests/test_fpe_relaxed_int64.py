@@ -172,8 +172,8 @@ def test_relaxed_cross_path_injective(relaxed: FormatPreservingEncryption) -> No
 
 @pytest.mark.parametrize("value", [*EDGES, 48291037, -48291037, 604821])
 def test_relaxed_int_string_parity(value: int) -> None:
-    from_int = cell.anonymize_cell(value, "MRN", SALT, KEY)
-    assert from_int == cell.anonymize_cell(str(value), "MRN", SALT, KEY)
+    from_int = cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="relaxed")
+    assert from_int == cell.anonymize_cell(str(value), "MRN", SALT, KEY, fpe_mode="relaxed")
     assert from_int == str(FormatPreservingEncryption(SALT, KEY, "relaxed").encrypt_int(value))
 
 
