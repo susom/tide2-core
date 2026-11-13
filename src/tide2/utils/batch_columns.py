@@ -54,7 +54,7 @@ class BatchColumns:
         return name.lower() in self._lower_map
 
 
-PASSTHROUGH_COLS: tuple[str, ...] = ("patient_identifiers", "patient_id", "jitter", "row_id")
+PASSTHROUGH_COLS: tuple[str, ...] = ("patient_identifiers", "patient_id", "jitter", "birth_date", "row_id")
 
 
 def copy_passthrough(
@@ -94,6 +94,8 @@ _STRING_COLUMNS = (
     "patient_identifiers",
     "patient_id",
     "row_id",
+    # Dates of any input type become ISO strings, which the date operator parses back.
+    "birth_date",
 )
 
 

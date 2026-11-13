@@ -318,7 +318,7 @@ class RecognizerWorker:
 
         # Process note (with chunking for very long notes)
         if note_len > MAX_NOTE_CHUNK_SIZE:
-            logger.info(f"Chunking long note ({note_len:,} chars): {text_hash[:16]}...")
+            logger.info(f"Chunking long note ({note_len:,} chars)")
             analyzer_results = self._process_long_note(
                 note_text=note_text,
                 ad_hoc_recognizers=ad_hoc_recognizers,
@@ -334,8 +334,7 @@ class RecognizerWorker:
         # Log slow processing
         if elapsed > SLOW_PROCESSING_SECONDS or note_len > LONG_NOTE_CHAR_THRESHOLD:
             logger.info(
-                f"Processed note {text_hash[:16]} ({note_len:,} chars) "
-                f"in {elapsed:.2f}s, found {len(analyzer_results)} entities"
+                f"Processed a note ({note_len:,} chars) in {elapsed:.2f}s, found {len(analyzer_results)} entities"
             )
 
         # Serialize results to JSON
@@ -495,7 +494,6 @@ class RecognizerWorker:
         out_note_texts = []
         out_patient_ids = []
         out_row_ids = []
-        out_jitters = []
         results_json_list = []
         entity_counts = []
         processing_statuses = []
@@ -508,11 +506,9 @@ class RecognizerWorker:
         cached_results_col = cols.get("recognizer_results_json", [None] * batch_size)
         patient_identifiers_col = cols.get("patient_identifiers", [None] * batch_size)
         patient_ids_col = cols.get("patient_id", [None] * batch_size)
-        jitters_col = cols.get("jitter", [None] * batch_size)
         row_ids_col = cols.get("row_id", [None] * batch_size)
         upstream_status_col = cols.get("processing_status", [None] * batch_size)
         upstream_stage_col = cols.get("stage_status_json", [None] * batch_size)
-        has_jitter = "jitter" in cols
         has_row_id = "row_id" in cols
 
         for i in range(batch_size):
@@ -545,8 +541,6 @@ class RecognizerWorker:
             out_note_texts.append(note_text)
             out_patient_ids.append(p_id)
             out_row_ids.append(r_id)
-            if has_jitter:
-                out_jitters.append(jitters_col[i])
             results_json_list.append(None if result is None else result["recognizer_results_json"])
             entity_counts.append(None if result is None else result["entity_count"])
             processing_statuses.append(status)
@@ -564,8 +558,10 @@ class RecognizerWorker:
             "processing_status": processing_statuses,
             "stage_status_json": stage_statuses,
         }
-        if has_jitter:
-            res["jitter"] = out_jitters
+        # Every input row gives one output row, so these columns pass through unchanged.
+        for name in ("jitter", "birth_date"):
+            if name in cols:
+                res[name] = list(cols[name])
         return type_columns(res)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
