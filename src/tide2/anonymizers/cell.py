@@ -217,6 +217,10 @@ def _zip_text(value: Any) -> str:
 class AnonymizationPolicy:
     """Anonymization options of a run, checked one time when the policy is made.
 
+    ``transformer_score_threshold`` and ``recognizer_score_threshold`` are the lowest scores at which a free text
+    span is anonymized, for spans from transformer models and from all other recognizers. A span below its
+    threshold stays clear text. The default 0.0 anonymizes every span.
+
     Secrets (``salt``, ``key``, ``acc_num_salt``, ``acc_num_study_id``) and row context (``patient_id``,
     ``jitter``, ...) are not part of it. A frozen policy is hashable, so it can be a cache key.
 
@@ -236,6 +240,8 @@ class AnonymizationPolicy:
     jitter_required: bool = False
     fpe_mode: str = MODE_STRICT
     zip_mode: str | None = None
+    transformer_score_threshold: float = 0.0
+    recognizer_score_threshold: float = 0.0
 
     def __post_init__(self) -> None:
         """Check the options and store ``text_operators`` in parsed form."""
@@ -252,6 +258,11 @@ class AnonymizationPolicy:
             from tide2.anonymizers.zip_code import validate_zip_mode  # see _zip_operator
 
             validate_zip_mode(self.zip_mode)
+        for name in ("transformer_score_threshold", "recognizer_score_threshold"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be a number from 0.0 to 1.0, got {value!r}")
+            object.__setattr__(self, name, float(value))
 
     def text_operator(self, entity_type: str) -> str | None:
         """Return the free-text method of ``entity_type``, or ``None`` when the default applies."""

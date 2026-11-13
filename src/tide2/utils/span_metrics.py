@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Iterable
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
@@ -312,6 +314,44 @@ def _resolve_longest_wins(sorted_spans: list[dict[str, Any]]) -> list[dict[str, 
     # Sort by start position for consistent output
     kept.sort(key=lambda x: x["start"])
     return kept
+
+
+# recognizer_name of a transformer span: "TransformersRecognizer[<model>]" live, or the cached recognizer's name
+TRANSFORMER_RECOGNIZER_PREFIXES = ("TransformersRecognizer", "CachedResultsTransformerRecognizer")
+
+
+def is_transformer_span(metadata: Any) -> bool:
+    """Return True if a transformer model produced the span, as its ``recognition_metadata`` tells."""
+    name = metadata.get("recognizer_name") if isinstance(metadata, Mapping) else None
+    return isinstance(name, str) and name.startswith(TRANSFORMER_RECOGNIZER_PREFIXES)
+
+
+def dedupe_exact_spans(spans: Iterable[Any]) -> list[Any]:
+    """Keep one span per ``(entity_type, start, end)`` and threshold class: the one with the highest score.
+
+    Overlapping spans are kept, so score thresholds can still run before the overlaps are resolved. A transformer
+    span and a non-transformer span of the same type and bounds are both kept, because each is judged by its own
+    score threshold. Spans are ``RecognizerResult`` objects or dicts; the winning item is returned unchanged, with
+    its ``recognition_metadata``.
+
+    Args:
+        spans: Spans with ``entity_type``, ``start``, ``end`` and ``score``.
+
+    Returns:
+        The kept spans, ordered by ``start`` and longest first; spans with the same bounds keep their input order,
+        which decides ties in the anonymizer.
+    """
+
+    def field(span: Any, name: str) -> Any:
+        return span.get(name) if isinstance(span, Mapping) else getattr(span, name, None)
+
+    best: dict[tuple[int, int, str, bool], Any] = {}
+    for span in spans:
+        transformer = is_transformer_span(field(span, "recognition_metadata"))
+        key = (field(span, "start"), field(span, "end"), field(span, "entity_type"), transformer)
+        if key not in best or field(span, "score") > field(best[key], "score"):
+            best[key] = span
+    return sorted(best.values(), key=lambda s: (field(s, "start"), -field(s, "end")))
 
 
 def resolve_recognizer_results(

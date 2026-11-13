@@ -144,6 +144,16 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
   | `jitter_required` | off | `--jitter-required` |
   | `fpe_mode` | `strict` | `--fpe-mode` |
   | `zip_mode` | `relaxed` (when unset) | `--zip-mode` |
+  | `transformer_score_threshold` | 0.0 | `--transformer-score-threshold` |
+  | `recognizer_score_threshold` | 0.0 | `--recognizer-score-threshold` |
+
+  The two score thresholds apply to the spans of notes and `FREE_TEXT` cells: a span with a score below the
+  threshold of its recognizer type stays clear text. A span is a transformer span when its
+  `recognition_metadata["recognizer_name"]` starts with `TransformersRecognizer` or is
+  `CachedResultsTransformerRecognizer`; every other span (regex, known values, no metadata) uses
+  `recognizer_score_threshold`. The recognizer stage still records every span. The default 0.0 anonymizes all of them.
+  Overlaps are resolved once, in the anonymizer, after the thresholds.
+  A below-threshold PHI span is real PHI in the output, as with `keep` in `text_operators`.
 
   ```python
   policy = AnonymizationPolicy(fpe_mode="relaxed", text_operators="DATE=keep")

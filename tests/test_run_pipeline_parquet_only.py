@@ -300,7 +300,7 @@ def test_input_forms_resolution(tmp_path):
 
 
 def test_resolve_merged_batch_unit():
-    """_resolve_merged_batch correctly merges regex and LLM spans using longest_wins."""
+    """_resolve_merged_batch merges regex and LLM spans and keeps overlaps for the anonymizer to resolve."""
     r1 = json.dumps([{"entity_type": "PERSON", "start": 0, "end": 4, "score": 0.8}])
     l1 = json.dumps([{"entity_type": "PERSON", "start": 0, "end": 9, "score": 0.95}])
 
@@ -322,11 +322,10 @@ def test_resolve_merged_batch_unit():
     assert "text_hash" in resolved.column_names
     assert resolved["text_hash"].to_pylist() == ["h1", "h2", "h3"]
 
-    # For row 1, longest_wins keeps (0..9)
+    # For row 1, both overlapping spans are kept; the anonymizer picks the longest after the thresholds
     res_1 = json.loads(resolved["recognizer_results_json"].to_pylist()[0])
-    assert len(res_1) == 1
-    assert res_1[0]["start"] == 0 and res_1[0]["end"] == 9
-    assert resolved["entity_count"].to_pylist()[0] == 1
+    assert [(r["start"], r["end"]) for r in res_1] == [(0, 9), (0, 4)]
+    assert resolved["entity_count"].to_pylist()[0] == 2
 
 
 @pytest.mark.parametrize(
