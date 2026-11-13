@@ -3,6 +3,7 @@
 import logging
 from datetime import date
 
+import numpy as np
 import pytest
 
 from tide2.anonymizers import cell
@@ -31,6 +32,21 @@ def test_explicit_jitter_and_numeric_inputs() -> None:
     assert cell.anonymize_cell(30, "DATE_DAY", SALT, KEY, jitter=5, full_date="2023-03-30") == "4"
     assert cell.anonymize_cell(30.0, "DATE_DAY", SALT, KEY, jitter=5, full_date="2023-03-30") == "4"
     assert cell.anonymize_cell("2023", "DATE_YEAR", SALT, KEY, jitter=300, full_date="2023-03-30") == "2024"
+
+
+@pytest.mark.parametrize(
+    ("value", "entity_type", "expected"),
+    [
+        (np.float32(30), "DATE_DAY", "4"),
+        (np.float64(30), "DATE_DAY", "4"),
+        (np.float16(3), "DATE_MONTH", "4"),
+        (np.float32(2023), "DATE_YEAR", "2023"),
+        (np.float32(30.5), "DATE_DAY", "[DATE]"),
+        (np.float32("nan"), "DATE_DAY", None),
+    ],
+)
+def test_numpy_float_parts(value: object, entity_type: str, expected: str | None) -> None:
+    assert cell.anonymize_cell(value, entity_type, SALT, KEY, jitter=5, full_date="2023-03-30") == expected
 
 
 def test_null_value_stays_null() -> None:
