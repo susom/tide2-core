@@ -114,3 +114,7 @@ def test_same_patient_gets_the_same_jitter() -> None:
 def test_different_keys_give_different_output() -> None:
     other = b"\x03" * 32
     assert cell.anonymize_cell("48291037", "MRN", SALT, KEY) != cell.anonymize_cell("48291037", "MRN", SALT, other)
+
+
+def test_day_month_two_digit_year_cell_shifts_as_one_date() -> None:
+    assert cell.anonymize_cell("15 Mar 23", "DATE", SALT, KEY, jitter=5) == "20 Mar 23"

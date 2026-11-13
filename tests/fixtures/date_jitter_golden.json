@@ -1,5 +1,8 @@
 {"jitters": [-178, -3, 3, 5, 112, 178],
 "cases": {
+"15 Mar 23": ["18 Sep 22", "12 Mar 23", "18 Mar 23", "20 Mar 23", "5 Jul 23", "9 Sep 23"],
+"31 Mar 24": ["5 Oct 23", "28 Mar 24", "3 Apr 24", "5 Apr 24", "21 Jul 24", "25 Sep 24"],
+"01 Jan 23": ["07 Jul 22", "29 Dec 22", "04 Jan 23", "06 Jan 23", "23 Apr 23", "28 Jun 23"],
 "Monday": ["Friday", "Friday", "Thursday", "Saturday", "Monday", "Thursday"],
 "Mon": ["Fri", "Fri", "Thu", "Sat", "Mon", "Thu"],
 "monday": ["friday", "friday", "thursday", "saturday", "monday", "thursday"],
