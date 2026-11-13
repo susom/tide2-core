@@ -48,6 +48,9 @@ _SAMPLE_DATES = [
 ]
 # Inputs that are not dates, or that must pass through, or that cannot be parsed.
 _STATIC_INPUTS = [
+    "15 Mar 23",
+    "31 Mar 24",
+    "01 Jan 23",
     "Monday",
     "Mon",
     "monday",
