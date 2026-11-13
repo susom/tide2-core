@@ -14,7 +14,6 @@ root, and must not import heavy modules (``faker``, ``usaddress``, ``tide2.actor
 from __future__ import annotations
 
 import functools
-import secrets
 from typing import Any
 
 from presidio_anonymizer.operators import Operator
@@ -24,17 +23,13 @@ from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import mask
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
-from tide2.cryptographic.date_jitter import derive_date_jitter
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
 
 __docformat__ = "google"
-
-DEFAULT_MAX_JITTER_DAYS = 180
-DEFAULT_MIN_JITTER_DAYS = 3
-RANDOM_JITTER_SPAN = 357
-RANDOM_JITTER_OFFSET = 178
-_JITTER_CACHE_SIZE = 65536
 
 FPE_ENTITY_TYPES: frozenset[str] = frozenset(
     {
@@ -62,19 +57,13 @@ def _operators() -> tuple[Operator, Operator]:
     return guarded(HipsAlphaNumericAnonymizer)(), guarded(DateJitterAnonymizer)()
 
 
-@functools.lru_cache(maxsize=_JITTER_CACHE_SIZE)
-def _derived_jitter(patient_id: str, salt: bytes, key: bytes) -> int:
-    """Return the deterministic jitter for a patient; cached because it is a pure function."""
-    return derive_date_jitter(
-        patient_id=patient_id,
-        salt=salt,
-        key=key,
-        max_jitter_days=DEFAULT_MAX_JITTER_DAYS,
-        min_jitter_days=DEFAULT_MIN_JITTER_DAYS,
-    )
-
-
-def compute_jitter_for_patient(patient_id: Any, salt: bytes, key: bytes) -> int:
+def compute_jitter_for_patient(
+    patient_id: Any,
+    salt: bytes,
+    key: bytes,
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+) -> int:
     """Return a patient's date jitter in days, or a random one when the patient is null.
 
     Mirrors ``AnonymizerWorker._compute_jitter_for_patient``.
@@ -83,16 +72,13 @@ def compute_jitter_for_patient(patient_id: Any, salt: bytes, key: bytes) -> int:
         patient_id: Patient identifier, or a null value.
         salt: 32-byte salt.
         key: 32-byte key.
+        max_jitter_days: Maximum absolute jitter in days.
+        min_jitter_days: Minimum absolute jitter in days.
 
     Returns:
         Integer jitter in days.
     """
-    if is_null(patient_id):
-        return secrets.randbelow(RANDOM_JITTER_SPAN) - RANDOM_JITTER_OFFSET
-    patient = str(patient_id).strip()
-    if patient.lower() in ("nan", "none", "null", ""):
-        return secrets.randbelow(RANDOM_JITTER_SPAN) - RANDOM_JITTER_OFFSET
-    return _derived_jitter(patient, salt, key)
+    return resolve_date_jitter(patient_id, salt, key, max_jitter_days, min_jitter_days)
 
 
 def anonymize_cell(
@@ -102,6 +88,8 @@ def anonymize_cell(
     key: bytes,
     patient_id: Any = None,
     jitter: int | None = None,
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
 ) -> str | None:
     """Anonymize one cell as a one-span note of ``entity_type``.
 
@@ -112,6 +100,8 @@ def anonymize_cell(
         key: 32-byte key.
         patient_id: Patient identifier used to derive the date jitter.
         jitter: Explicit date jitter in days; wins over ``patient_id``.
+        max_jitter_days: Maximum absolute derived or random jitter in days.
+        min_jitter_days: Minimum absolute derived or random jitter in days.
 
     Returns:
         The anonymized string, ``None`` for a null value, or the entity mask (for example ``[DATE]``)
@@ -136,7 +126,10 @@ def anonymize_cell(
 
     fpe, date_jitter = _operators()
     if entity_type in DATE_ENTITY_TYPES:
-        resolved = compute_jitter_for_patient(patient_id, salt, key) if is_null(jitter) else int(jitter)  # type: ignore[arg-type]
+        if is_null(jitter):
+            resolved = resolve_date_jitter(patient_id, salt, key, max_jitter_days, min_jitter_days)
+        else:
+            resolved = int(jitter)  # type: ignore[arg-type]
         operator, params = date_jitter, {"jitter": resolved}
     else:
         operator, params = fpe, {"salt": salt, "key": key}

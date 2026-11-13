@@ -54,6 +54,8 @@ import ray.data.exceptions
 from ray.data.checkpoint import CheckpointConfig
 from ray.data.dataset import Dataset
 
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.utils.batch_columns import check_no_patient_uid
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
@@ -1456,6 +1458,8 @@ class LocalJobRunner:
         key_hex: str | None = None,
         dry_run: bool = False,
         _id_column: str = "row_id",
+        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1503,6 +1507,8 @@ class LocalJobRunner:
             dry_run: If True, validate setup and show plan without processing
             _id_column: Column name to use as primary key for Ray Data checkpointing
                 (default: "row_id").
+            min_jitter_days: Minimum absolute date jitter in days (at least 3)
+            max_jitter_days: Maximum absolute date jitter in days
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1582,6 +1588,8 @@ class LocalJobRunner:
             acc_num_salt=acc_num_salt,
             acc_num_study_id=acc_num_study_id,
             jitter_required=jitter_required,
+            min_jitter_days=min_jitter_days,
+            max_jitter_days=max_jitter_days,
         )
 
         try:
@@ -2690,6 +2698,8 @@ class LocalJobRunner:
                 acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
                 acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
                 jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
+                min_jitter_days=int(anonymizer_kwargs.get("min_jitter_days", DEFAULT_MIN_JITTER_DAYS)),
+                max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
             )
             ds = self.build_anonymizer_stage(
                 ds,

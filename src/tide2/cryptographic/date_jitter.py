@@ -19,14 +19,21 @@ Usage:
     # Returns an integer between -180 and +180 (excluding -2 to +2)
 """
 
+import functools
 import hashlib
 import hmac
+import secrets
 import struct
+from typing import Any
+
+from tide2.utils.nulls import is_null
 
 # Default jitter range constants
 DEFAULT_MAX_JITTER_DAYS = 180
 DEFAULT_MIN_JITTER_DAYS = 3
 ABSOLUTE_MIN_JITTER_DAYS = 3
+_JITTER_CACHE_SIZE = 65536
+_NULL_PATIENT_STRINGS = frozenset({"nan", "none", "null", ""})
 
 # Key size requirements
 REQUIRED_KEY_SIZE = 32
@@ -133,6 +140,71 @@ def derive_date_jitter(
 
     # Return the final jitter value
     return magnitude if is_positive else -magnitude
+
+
+def random_date_jitter(
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+) -> int:
+    """
+    Return a random date jitter with ``min_jitter_days <= abs(jitter) <= max_jitter_days``.
+
+    Uses ``secrets``. The magnitude is uniform in the range and the sign is uniform, the same
+    distribution ``derive_date_jitter`` produces, so no value falls below the minimum.
+
+    Args:
+        max_jitter_days: Maximum absolute jitter in days (default: 180).
+        min_jitter_days: Minimum absolute jitter in days (default: 3, the lowest allowed).
+
+    Returns:
+        Integer jitter in days.
+
+    Raises:
+        ValueError: If the range is invalid.
+    """
+    is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
+    if not is_valid:
+        raise ValueError(message)
+    magnitude = min_jitter_days + secrets.randbelow(max_jitter_days - min_jitter_days + 1)
+    return magnitude if secrets.randbelow(2) == 0 else -magnitude
+
+
+@functools.lru_cache(maxsize=_JITTER_CACHE_SIZE)
+def _cached_derive(patient_id: str, salt: bytes, key: bytes, max_jitter_days: int, min_jitter_days: int) -> int:
+    return derive_date_jitter(patient_id, salt, key, max_jitter_days, min_jitter_days)
+
+
+def resolve_date_jitter(
+    patient_id: Any,
+    salt: bytes,
+    key: bytes,
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+) -> int:
+    """
+    Return a patient's date jitter: derived when the patient is known, random when it is null.
+
+    A null patient is ``None``, NaN, or a string that is blank, ``nan``, ``none`` or ``null``
+    (case-insensitive, after stripping). Both paths use the same range.
+
+    Args:
+        patient_id: Patient identifier, or a null value.
+        salt: 32-byte salt.
+        key: 32-byte key.
+        max_jitter_days: Maximum absolute jitter in days (default: 180).
+        min_jitter_days: Minimum absolute jitter in days (default: 3).
+
+    Returns:
+        Integer jitter in days.
+
+    Raises:
+        ValueError: If the range or the keys are invalid.
+    """
+    if not is_null(patient_id):
+        patient = str(patient_id).strip()
+        if patient.lower() not in _NULL_PATIENT_STRINGS:
+            return _cached_derive(patient, salt, key, max_jitter_days, min_jitter_days)
+    return random_date_jitter(max_jitter_days, min_jitter_days)
 
 
 def derive_date_jitter_batch(
