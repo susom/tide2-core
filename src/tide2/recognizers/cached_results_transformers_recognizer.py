@@ -163,6 +163,8 @@ class CachedResultsTransformerRecognizer(EntityRecognizer):
             # to match THIS recognizer's ID (required for _enhance_using_context)
             recognition_metadata = dict(cached_entity.get("recognition_metadata") or {})
             recognition_metadata.pop("recognizer_identifier", None)
+            # The long-note path calls analyze() directly, so set the name AnalyzerEngine would set (score thresholds).
+            recognition_metadata.setdefault(RecognizerResult.RECOGNIZER_NAME_KEY, self.name)
 
             result = RecognizerResult(
                 entity_type=entity_type,
