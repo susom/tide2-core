@@ -15,6 +15,7 @@ import logging
 from typing import Any
 
 from tide2.actors.anonymizer import AnonymizerWorker
+from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
@@ -36,6 +37,7 @@ def _worker(
     min_jitter_days: int,
     max_jitter_days: int,
     max_age: int,
+    zip_mode: str,
 ) -> AnonymizerWorker:
     """Return the worker for these settings, built once per process (the engine setup is costly)."""
     return AnonymizerWorker(
@@ -46,6 +48,7 @@ def _worker(
         min_jitter_days=min_jitter_days,
         max_jitter_days=max_jitter_days,
         max_age=max_age,
+        zip_mode=zip_mode,
     )
 
 
@@ -62,6 +65,7 @@ def anonymize_free_text(
     max_age: int = DEFAULT_MAX_AGE,
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
+    zip_mode: str = DEFAULT_ZIP_MODE,
 ) -> str | None:
     """Anonymize a free-text cell with the spans found by the recognition stages.
 
@@ -84,6 +88,8 @@ def anonymize_free_text(
         max_age: Age at which dates are capped.
         acc_num_salt: Salt for accession number hashing.
         acc_num_study_id: Study ID for accession number hashing.
+        zip_mode: ``"strict"`` or ``"relaxed"``, for ZIP codes and the ZIP inside an address; see
+            ``AnonymizerWorker``.
 
     Returns:
         The anonymized text, or ``None`` when the spans are unusable (null, malformed or outside
@@ -91,9 +97,9 @@ def anonymize_free_text(
         fails is masked (for example ``[PERSON]``) and the rest of the text is kept.
 
     Raises:
-        ValueError: If the keys or the jitter range are invalid.
+        ValueError: If the keys, the jitter range or the ZIP mode are invalid.
     """
-    worker = _worker(salt, key, acc_num_salt, acc_num_study_id, min_jitter_days, max_jitter_days, max_age)
+    worker = _worker(salt, key, acc_num_salt, acc_num_study_id, min_jitter_days, max_jitter_days, max_age, zip_mode)
     text_hash = AnonymizerWorker.compute_text_hash(text)
     try:
         result = worker.process_note(text, text_hash, recognizer_results, patient_id, jitter, birth_date)

@@ -29,6 +29,11 @@ from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
 
+# Mirrors ZIP_MODES and DEFAULT_ZIP_MODE in tide2.anonymizers.zip_code, which is not imported here to keep --help
+# fast (tests/test_zip_code_anonymizer.py checks they agree).
+ZIP_MODE_CHOICES = ("strict", "relaxed")
+DEFAULT_ZIP_MODE = "relaxed"
+
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Run a job."""
@@ -117,6 +122,7 @@ def cmd_run(args: argparse.Namespace) -> None:
                 min_jitter_days=args.min_jitter_days,
                 max_jitter_days=args.max_jitter_days,
                 max_age=args.max_age,
+                zip_mode=getattr(args, "zip_mode", DEFAULT_ZIP_MODE),
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -240,6 +246,7 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw["min_jitter_days"] = args.min_jitter_days
             a_kw["max_jitter_days"] = args.max_jitter_days
             a_kw["max_age"] = args.max_age
+            a_kw["zip_mode"] = getattr(args, "zip_mode", DEFAULT_ZIP_MODE)
             for attr, key in [
                 ("num_actors", "num_actors"),
                 ("batch_size", "batch_size"),
@@ -513,6 +520,17 @@ Examples:
         help="Dates after this birthday are moved to it, for notes with a birth_date column value; without "
         "the column dates are not capped and a warning is logged (anonymizer/pipeline jobs, default: 90)",
     )
+    run_p.add_argument(
+        "--zip-mode",
+        choices=ZIP_MODE_CHOICES,
+        default=DEFAULT_ZIP_MODE,
+        help=(
+            "How ZIP codes, including the ZIP inside an address, are anonymized (anonymizer/pipeline jobs). "
+            "'strict': HIPAA Safe Harbor, the 3-digit prefix, or 000 when its area has 20,000 people or "
+            "fewer (2020 Census). 'relaxed' (default): keep all 5 digits when the area has more than "
+            "20,000 people, else the 3-digit prefix; NOT Safe Harbor compliant"
+        ),
+    )
     # Pipeline-specific arguments
     run_p.add_argument("--salt-hex", default="00" * 32, help="Hex-encoded FPE salt (pipeline jobs)")
     run_p.add_argument("--key-hex", default="11" * 32, help="Hex-encoded FPE key (pipeline jobs)")
@@ -638,6 +656,10 @@ Examples:
             validate_max_age(args.max_age)
         except ValueError as err:
             run_p.error(str(err))
+    # argparse checks the flag, but a value from --config YAML bypasses its choices
+    if args.command == "run" and getattr(args, "zip_mode", DEFAULT_ZIP_MODE) not in ZIP_MODE_CHOICES:
+        print(f"Error: invalid zip_mode {args.zip_mode!r}; choose from {', '.join(ZIP_MODE_CHOICES)}")
+        sys.exit(1)
 
     args.func(args)
 

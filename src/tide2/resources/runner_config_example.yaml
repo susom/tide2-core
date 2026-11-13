@@ -65,6 +65,7 @@ key: /mnt/gcs/tide2/arpah_prod_key.key
 # jitter_required: false
 # min_jitter_days: 3
 # max_jitter_days: 180
+# zip_mode: relaxed  # or strict (HIPAA Safe Harbor); relaxed is NOT HIPAA Safe Harbor compliant
 
 # =========================================================================
 # Transformer-specific

@@ -50,6 +50,10 @@ from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
 from tide2.anonymizers.hips_locations import HipsLocationAnonymizer
 from tide2.anonymizers.hips_names import HipsNamesAnonymizer
 from tide2.anonymizers.masking import MaskingAnonymizer
+from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE
+from tide2.anonymizers.zip_code import ZIP_ENTITY_ALIASES
+from tide2.anonymizers.zip_code import ZipCodeAnonymizer
+from tide2.anonymizers.zip_code import validate_zip_mode
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
@@ -94,6 +98,7 @@ class AnonymizerWorker:
         min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
+        zip_mode: str = DEFAULT_ZIP_MODE,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -110,6 +115,8 @@ class AnonymizerWorker:
             max_age: Age at which dates are capped for notes with a ``birth_date``.
                 Not validated here: a value outside 1 to 150 turns the cap off. The job
                 runners reject it before they start.
+            zip_mode: How ZIP codes (and the ZIP inside an address) are anonymized: ``"relaxed"``
+                (default; not Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -123,6 +130,7 @@ class AnonymizerWorker:
         is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
         if not is_valid:
             raise ValueError(message)
+        validate_zip_mode(zip_mode)
 
         # Apply Presidio patches - must be done in __init__ (not module level)
         # for Ray workers since they are separate processes.
@@ -138,6 +146,7 @@ class AnonymizerWorker:
         self.max_jitter_days = max_jitter_days
         self.max_age = max_age
         self._warned_no_birth_date = False
+        self.zip_mode = zip_mode
 
         # Initialize Presidio AnonymizerEngine
         self.anonymizer_engine = AnonymizerEngine()
@@ -150,6 +159,7 @@ class AnonymizerWorker:
             HipsAlphaNumericAnonymizer,
             HipsLocationAnonymizer,
             AgeGroupAnonymizer,
+            ZipCodeAnonymizer,
         ):
             self.anonymizer_engine.add_anonymizer(guarded(operator_cls))
         self.anonymizer_engine.add_anonymizer(MaskingAnonymizer)
@@ -166,7 +176,7 @@ class AnonymizerWorker:
 
     def _create_base_operators(self) -> dict[str, OperatorConfig]:
         """Create base operator configuration with the provided keys."""
-        return {
+        operators = {
             # Unknown entity types get a visible placeholder (recorded as a fallback), never a deletion.
             "DEFAULT": OperatorConfig("masking", {"fallback": True}),
             "OTHER": OperatorConfig("masking"),
@@ -187,23 +197,20 @@ class AnonymizerWorker:
             "ORGANIZATION": OperatorConfig("faker_anonymizer"),
             "VENDOR": OperatorConfig(
                 "hips_location",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "zip_mode": self.zip_mode},
             ),
             "US_SSN": OperatorConfig(
                 "hips_alphanumeric",
                 {"salt": self.salt, "key": self.key},
             ),
-            "ZIP_CODE": OperatorConfig(
-                "hips_location",
-                {"salt": self.salt, "key": self.key},
-            ),
+            "ZIP_CODE": OperatorConfig("zip_code_safe_harbor", {"mode": self.zip_mode}),
             "LOCATION": OperatorConfig(
                 "hips_location",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "zip_mode": self.zip_mode},
             ),
             "HOSPITAL": OperatorConfig(
                 "hips_location",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "zip_mode": self.zip_mode},
             ),
             "MEDICAL_LICENSE": OperatorConfig(
                 "hips_alphanumeric",
@@ -244,6 +251,8 @@ class AnonymizerWorker:
                 {"salt": self.salt, "key": self.key},
             ),
         }
+        operators.update(dict.fromkeys(ZIP_ENTITY_ALIASES, operators["ZIP_CODE"]))
+        return operators
 
     def _create_operators_for_note(
         self,
@@ -726,6 +735,7 @@ def create_anonymizer_actor(
     min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
     max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     max_age: int = DEFAULT_MAX_AGE,
+    zip_mode: str = DEFAULT_ZIP_MODE,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -743,6 +753,7 @@ def create_anonymizer_actor(
         min_jitter_days: Minimum absolute date jitter in days (at least 3)
         max_jitter_days: Maximum absolute date jitter in days
         max_age: Dates after this birthday are moved to it for notes with a birth_date
+        zip_mode: ``"relaxed"`` (default) or ``"strict"``; see ``AnonymizerWorker``
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -774,6 +785,7 @@ def create_anonymizer_actor(
                 min_jitter_days=min_jitter_days,
                 max_jitter_days=max_jitter_days,
                 max_age=max_age,
+                zip_mode=zip_mode,
             )
 
     return ConfiguredAnonymizerActor

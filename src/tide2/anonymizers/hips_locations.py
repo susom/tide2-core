@@ -13,6 +13,10 @@ from typing import ClassVar
 from presidio_anonymizer.operators import Operator
 from presidio_anonymizer.operators import OperatorType
 
+from tide2.anonymizers.guarded import mask
+from tide2.anonymizers.guarded import record_error
+from tide2.anonymizers.zip_code import ZIP_MODES
+from tide2.anonymizers.zip_code import anonymize_zip
 from tide2.cryptographic.string_selector import secure_string_selector
 from tide2.string_parsers.address_parsers import AddressParser
 from tide2.utils.resource_utils import CITIES_FILE
@@ -22,6 +26,7 @@ from tide2.utils.resource_utils import STATES_FILE
 from tide2.utils.resource_utils import STREET_NAMES_FILE
 from tide2.utils.resource_utils import ZIPCODES_FILE
 from tide2.utils.resource_utils import get_resource_path
+from tide2.utils.stage_status import failure_reason
 
 # Hospital length bucket thresholds
 TINY_HOSPITAL_MAX_LEN = 5
@@ -252,6 +257,11 @@ class HipsLocationAnonymizer(Operator):
             params: Operator parameters. Required keys:
                 - salt (str): Cryptographic salt for deterministic output.
                 - key (str): Encryption key.
+                Optional key:
+                - zip_mode (str): ``"strict"`` or ``"relaxed"``. The ZIP inside
+                  an address is reduced as ``ZipCodeAnonymizer`` does (a value that is not a 5-digit ZIP
+                  becomes ``[ZIP_CODE]`` and the note records an error). Without it the ZIP is replaced by
+                  a random real ZIP.
 
         Returns:
             The anonymized location string, or the original text if it is
@@ -293,7 +303,19 @@ class HipsLocationAnonymizer(Operator):
             zipcode = result_components.get("zipcode")
             new_zipcode = None
             if zipcode:
-                new_zipcode = secure_string_selector(salt, key, self.zipcodes, zipcode)
+                zip_mode = params.get("zip_mode")
+                if zip_mode is None:
+                    new_zipcode = secure_string_selector(salt, key, self.zipcodes, zipcode)
+                else:
+                    try:
+                        # Validate the parsed value as written: the cleaned one has lost its punctuation, so
+                        # "0213-9" would otherwise pass as "02139".
+                        new_zipcode = anonymize_zip(result["zipcode"], zip_mode)
+                    except ValueError as exc:
+                        # Not a 5-digit ZIP: never keep digits that may identify the person. Same outcome as a
+                        # standalone ZIP_CODE entity: the placeholder, and the note records the error.
+                        new_zipcode = mask("ZIP_CODE")
+                        record_error("ZIP_CODE", failure_reason(exc))
 
             # leave state untouched for now
             new_state = result_components.get("state")
@@ -335,6 +357,10 @@ class HipsLocationAnonymizer(Operator):
         key = params.get("key")
         if not salt or not key:
             raise ValueError("Both 'salt' and 'key' must be provided for HipsLocationAnonimizer.")
+
+        zip_mode = params.get("zip_mode")
+        if zip_mode is not None and zip_mode not in ZIP_MODES:
+            raise ValueError(f"Parameter 'zip_mode' must be one of {ZIP_MODES}, got {zip_mode!r}.")
 
     def operator_name(self) -> str:
         """Return the operator name."""
