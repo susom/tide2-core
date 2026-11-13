@@ -203,8 +203,13 @@ def anonymize_cell(
     if is_null(value):
         return None
 
-    if entity_type in DATE_PART_ENTITY_TYPES and isinstance(value, float) and value.is_integer():
-        # A nullable integer column read as float holds 3.0, not 3.
+    if (
+        entity_type in DATE_PART_ENTITY_TYPES
+        and isinstance(value, numbers.Real)
+        and not isinstance(value, numbers.Integral)
+        and float(value).is_integer()
+    ):
+        # A nullable integer column read as float holds 3.0, not 3. numbers.Real also matches NumPy floats.
         value = int(value)
     text = _zip_text(value) if entity_type in ZIP_ENTITY_TYPES else str(value)
     if text == "":

@@ -1,14 +1,15 @@
 """Tests for the collision-free FF1 format-preserving encryption in tide2.cryptographic.fpe_strings."""
 
-import importlib.util
 import itertools
 import json
 import os
 import random
+import re
 import string
 import subprocess
 import sys
 import threading
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -306,8 +307,10 @@ def test_fpe_cf_determinism_across_threads() -> None:
 
 
 def test_ff3_removed() -> None:
-    assert importlib.util.find_spec("ff3") is None
-    assert "ff3" not in sys.modules
+    # Declared dependencies, not the environment: a stale ff3 install must not fail the test.
+    project = tomllib.loads((SRC.parents[1] / "pyproject.toml").read_text())["project"]
+    declared = [*project["dependencies"], *itertools.chain(*project.get("optional-dependencies", {}).values())]
+    assert not [dep for dep in declared if re.match(r"ff3\b", dep, re.IGNORECASE)]
     offenders = [
         str(path)
         for path in SRC.rglob("*.py")
