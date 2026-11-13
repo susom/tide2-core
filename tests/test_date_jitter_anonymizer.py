@@ -793,3 +793,16 @@ class TestDateParts:
         assert _part(30, "DATE_DAY", full_date="2023-01-30", jitter=10) == "9"
         assert _part(30, "DATE_DAY", full_date="2023-03-30", birth_date="1930-06-15") == "20"
         assert _part(31, "DATE_DAY", full_date="2023-03-30") == "[DATE]"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("15 Mar 23", "20 Mar 23"),
+        ("31 Mar 24", "5 Apr 24"),
+        ("01 Jan 23", "06 Jan 23"),
+        ("1st March 23", "6th March 23"),
+    ],
+)
+def test_day_month_two_digit_year_shifts_as_one_date(text, expected):
+    assert DateJitterAnonymizer().operate(text, {"entity_type": "DATE", "jitter": 5}) == expected
