@@ -500,8 +500,8 @@ Examples:
     run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (text_operators acc_num_hash)")
     run_p.add_argument(
         "--text-operators",
-        help="TYPE=METHOD,... method per entity type in free text; methods keep, acc_num_hash, for example "
-        "DATE=keep,ACC_NUM=acc_num_hash (anonymizer/pipeline jobs)",
+        help="TYPE=METHOD,... method per entity type in free text; methods keep, hash, acc_num_hash, for example "
+        "DATE=keep,MRN=hash,ACC_NUM=acc_num_hash (anonymizer/pipeline jobs)",
     )
     run_p.add_argument(
         "--fpe-mode",

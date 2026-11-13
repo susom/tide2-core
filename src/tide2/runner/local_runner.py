@@ -1545,7 +1545,7 @@ class LocalJobRunner:
                 ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
             text_operators: Method for each entity type in the notes: a string such as
                 ``"DATE=keep,ACC_NUM=acc_num_hash"``, a mapping of type to method, or a list of ``TYPE=method``
-                strings. Methods: ``keep``, ``acc_num_hash`` (needs ``acc_num_salt`` and ``acc_num_study_id``).
+                strings. Methods: ``keep``, ``hash``, ``acc_num_hash`` (needs ``acc_num_salt`` and ``acc_num_study_id``).
                 An invalid value raises ``ValueError`` before Ray starts.
             fpe_mode: ``"strict"`` (FF1, the default) or ``"relaxed"`` (faster for INT64 values).
 

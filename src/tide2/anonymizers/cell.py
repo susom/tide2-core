@@ -32,6 +32,7 @@ from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import mask
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
+from tide2.anonymizers.keyed_hash import KeyedHashAnonymizer
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
@@ -98,10 +99,11 @@ KEEPABLE_ENTITY_TYPES: frozenset[str] = (
 )
 
 
-TEXT_METHODS: tuple[str, ...] = ("keep", "acc_num_hash")
+TEXT_METHODS: tuple[str, ...] = ("keep", "hash", "acc_num_hash")
 # Types each free-text method accepts. A date part exists only in a cell, never as a span of a note.
 _TEXT_METHOD_TYPES: dict[str, frozenset[str]] = {
     "keep": KEEPABLE_ENTITY_TYPES - DATE_PART_ENTITY_TYPES,
+    "hash": FPE_ENTITY_TYPES,
     "acc_num_hash": frozenset({"ACC_NUM"}),
 }
 
@@ -315,6 +317,12 @@ def _check_method(
 
 
 @functools.cache
+def _keyed_hash() -> Operator:
+    """Return the guarded ``keyed_hash`` operator, built once per process."""
+    return guarded(KeyedHashAnonymizer)()
+
+
+@functools.cache
 def _warn_no_birth_date() -> None:
     """Log the missing-birth-date warning once per process."""
     logger.warning("anonymize_cell called without birth_date: %s", UNCAPPED_DATES_WARNING)
@@ -384,7 +392,8 @@ def anonymize_cell(  # noqa: PLR0911
         acc_num_salt: Salt for accession number hashing (a secret, not in the policy).
         acc_num_study_id: Study ID for accession number hashing (a secret, not in the policy).
         method: Method for this cell, chosen by the caller for the column. ``None`` gives the default of the entity
-            type. ``"acc_num_hash"`` (``ACC_NUM`` only) uses ``accession_number_hash`` with ``acc_num_salt``,
+            type. ``"hash"`` (an ID type of ``FPE_ENTITY_TYPES``) uses ``keyed_hash``, and ``fpe_mode`` has no effect on it.
+            ``"acc_num_hash"`` (``ACC_NUM`` only) uses ``accession_number_hash`` with ``acc_num_salt``,
             ``acc_num_study_id`` and ``patient_id``. ``"keep"`` is not allowed: leave the column out.
             ``FREE_TEXT`` takes no method; it takes its methods from ``policy.text_operators``.
         policy: Run options (see ``AnonymizationPolicy``). It is not checked here. ``fpe_mode`` selects FF1 (``"strict"``, matches
@@ -462,6 +471,8 @@ def anonymize_cell(  # noqa: PLR0911
             params["max_age"] = policy.max_age
         if entity_type in DATE_PART_ENTITY_TYPES:
             params["full_date"] = full_date
+    elif method == "hash":
+        operator, params = _keyed_hash(), {"salt": salt, "key": key}
     elif method == "acc_num_hash":
         patient = None if is_null(patient_id) else str(patient_id).strip()
         if patient is not None and patient.lower() in ("nan", "none", "null", ""):
