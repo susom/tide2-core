@@ -110,18 +110,41 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
 
 ### Anonymization Strategies
 - **HIPS (Healthcare Identity Protection System)**: Cryptographic deterministic anonymization for names, locations, and alphanumeric identifiers
-- **Accession number hashing** (opt-in with `--acc-num-hash`): SHA256-based, compatible with BigQuery UDF. By default
-  accession numbers use HIPS alphanumeric encryption like MRN and HAR
 - **Faker Integration**: Realistic fake data generation
 - **Date Jittering**: Deterministic, privacy-preserving date shifts derived from patient keys
 - **Age Grouping**: Age range categorization
 - **ZIP code Safe Harbor**: HIPAA Safe Harbor ZIP reduction (3-digit prefix, or `000` for small areas) from 2020 Census populations, for ZIP entities and the ZIP inside addresses; see [ZIP code anonymization](#zip-code-anonymization-hipaa-safe-harbor)
-- **Keeping entity types** (opt-in with `--keep-entities`): leave chosen entity types as they
-  are, for example `--keep-entities DATE,DATE_TIME,AGE`. Every other type is still
-  anonymized. `DATE` also covers the date part types of cells (`DATE_DAY`, `DATE_MONTH`,
-  `DATE_YEAR`); `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The
-  recognizers still find every type, and kept spans appear in `anonymizer_results_json` with
-  operator `keep`. In cells, pass `keep_entities=parse_keep_entities(...)` to `anonymize_cell`.
+- **Free-text operators** (opt-in with `--text-operators TYPE=METHOD,...`): in free text, choose a method for
+  each entity type. Every other type keeps its default anonymization. Methods:
+  - `keep`: leave the type as it is, for example `--text-operators DATE=keep,DATE_TIME=keep,AGE=keep`.
+    `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The recognizers still find every type,
+    and kept spans appear in `anonymizer_results_json` with operator `keep`.
+  - `acc_num_hash` (`ACC_NUM` only): SHA256-based, compatible with BigQuery UDF; needs `--acc-num-salt` and
+    `--acc-num-study-id`. Without it, accession numbers use HIPS alphanumeric encryption like MRN and HAR.
+
+  `text_operators` applies to notes and `FREE_TEXT` cells only. A structured cell has one entity type, so the
+  caller chooses its method: the `method` argument of `anonymize_cell` (`None` for the default, or
+  `"acc_num_hash"`). `keep` is not a cell method: to keep a column, do not send it to anonymization.
+- **Policy** (`AnonymizationPolicy`, `tide2.anonymizers.cell`): one frozen, checked set of options that
+  `AnonymizerWorker`, `create_anonymizer_actor`, `anonymize_free_text` and `anonymize_cell` take as `policy=`.
+  Secrets (`salt`, `key`, `acc_num_salt`, `acc_num_study_id`) stay separate arguments (`--acc-num-salt`,
+  `--acc-num-study-id`); `acc_num_hash` needs both. The same fields apply to notes, cells and
+  `FREE_TEXT` cells, except `text_operators` (free text only):
+
+  | Field | Default | CLI |
+  |---|---|---|
+  | `min_jitter_days`, `max_jitter_days` | 3, 180 | `--min-jitter-days`, `--max-jitter-days` |
+  | `max_age` | 90 | `--max-age` |
+  | `text_operators` (free text only) | none | `--text-operators` |
+  | `jitter_required` | off | `--jitter-required` |
+  | `fpe_mode` | `strict` | `--fpe-mode` |
+  | `zip_mode` | `relaxed` (when unset) | `--zip-mode` |
+
+  ```python
+  policy = AnonymizationPolicy(fpe_mode="relaxed", text_operators="DATE=keep")
+  worker = AnonymizerWorker(salt, key, policy=policy)
+  anonymize_cell(value, "MRN", salt, key, policy=policy)
+  ```
 
 ### Cryptographic Protection
 - **Format-Preserving Encryption (FPE)**: Maintains data format during encryption
@@ -146,13 +169,13 @@ FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second publi
 
 ##### Relaxed mode for `INT64` cells
 
-`anonymize_cell(..., fpe_mode="relaxed")` (strict is the default) pseudonymizes a cell that is an `INT64` with a keyed permutation of the `INT64` range instead of FF1: an 8-round Feistel network whose round function is FarmHash (`cityhash==0.4.10`, module `farmhash`), with the sign handled outside the permutation. Measured through `anonymize_cell` (Apple Silicon, Python 3.12), it takes about 2.7 µs per value against 10 to 12 µs for FF1. An `INT64` is a Python `int` or a string of digits in the `INT64` range with no leading zero and no `-0` (for example `123456` or `-5`). Anything else (leading zeros, separators, letters, values beyond `INT64`) still uses FF1.
+`AnonymizationPolicy(fpe_mode="relaxed")` (strict is the default) pseudonymizes a cell that is an `INT64` with a keyed permutation of the `INT64` range instead of FF1: an 8-round Feistel network whose round function is FarmHash (`cityhash==0.4.10`, module `farmhash`), with the sign handled outside the permutation. Measured through `anonymize_cell` (Apple Silicon, Python 3.12), it takes about 2.7 µs per value against 10 to 12 µs for FF1. An `INT64` is a Python `int` or a string of digits in the `INT64` range with no leading zero and no `-0` (for example `123456` or `-5`). Anything else (leading zeros, separators, letters, values beyond `INT64`) still uses FF1.
 
 - **No collisions:** distinct `INT64` values always get distinct outputs, whatever the number of values. A keyed hash cut to 63 bits would give a 5% chance of a collision at 10^9 distinct values and near certainty at 10^10.
 - **Sign, but not zero:** a non-negative value stays non-negative and a negative one stays negative. Zero is not a fixed point: `0` maps to another value, and another value maps to `0`. Strict mode keeps `0` as `0`. Do not rely on `0` as a sentinel in relaxed mode.
-- **The digit count changes.** About 89% of non-negative outputs have 19 digits. A column that must keep the length uses `fpe_mode="strict"`.
-- **Cells and notes do not match in relaxed mode:** the same MRN gets a relaxed pseudonym in a cell and an FF1 pseudonym in a note, so a pseudonymized `INT64` ID no longer links a table row to a note. Keep the default `fpe_mode="strict"` when that link is needed. A dataset must use one mode throughout, because the two modes give different outputs for the same value.
-- **Notes are not affected:** free-text notes and `FREE_TEXT` cells always use strict mode.
+- **The digit count changes.** About 89% of non-negative outputs have 19 digits. A column that must keep the length uses the default `fpe_mode="strict"`.
+- **Cells and notes match only in one mode:** the same MRN gets a relaxed pseudonym in a cell and an FF1 pseudonym in a note when their policies differ. Use the same `fpe_mode` (`--fpe-mode` for the runner) for notes and cells when a pseudonymized `INT64` ID must link a table row to a note. A dataset must use one mode throughout, because the two modes give different outputs for the same value.
+- **Notes and `FREE_TEXT` cells follow the policy:** both use `fpe_mode` like any other cell.
 - **Security:** relaxed mode is keyed pseudonymization, not NIST-approved encryption. One-to-one output is guaranteed by the Feistel structure; secrecy rests on FarmHash, keyed with a 32-byte prefix, behaving like a keyed PRF, which has no proof. It protects against someone holding pseudonymized tables without the key. It does not cover an attacker with many known (input, output) pairs; use strict mode for that.
 
 ### Ray-based Batch Processing
@@ -491,7 +514,7 @@ A value that is not a 5-digit ZIP is masked and its note gets `processing_status
 - **Other labels**: the model labels `ZIP` and `ZIPCODE` use the same rule as `ZIP_CODE`.
 - **ZIP inside an address**: in a detected full address (`LOCATION`, `HOSPITAL`, `VENDOR`) the ZIP follows the same mode, for example `123 Main Street, Cambridge, MA 02139` gives `<new street>, <new city>, MA 021` in strict mode and `MA 02139` in relaxed mode. A ZIP in an address that is not a 5-digit ZIP is replaced by `[ZIP_CODE]`, like a standalone one, and the note's `processing_status` is `failed` (see [When a note fails](#when-a-note-fails)); the rest of the address is still anonymized. The street, number and city are still replaced by `hips_location`; the state is kept.
 - **Behavior change**: before `--zip-mode`, a `ZIP_CODE` entity was masked as `[ZIP_CODE]` and the ZIP inside an address was replaced by a random real ZIP. Both now follow the mode.
-- **Python**: `anonymize_zip("02139", "strict")`, or `anonymize_cell(value, "ZIP_CODE", salt, key, zip_mode=...)` for a table cell (`zip_mode` defaults to `relaxed`).
+- **Python**: `anonymize_zip("02139", "strict")`, or `anonymize_cell(value, "ZIP_CODE", salt, key, policy=AnonymizationPolicy(zip_mode=...))` for a table cell (`zip_mode` defaults to `relaxed`).
 
 ### Standalone Stage Execution (Python API)
 
@@ -765,10 +788,10 @@ shifted date later than the shifted 90th birthday (birth date plus 90 years plus
 jitter) becomes that date, so no shifted date shows an age over 89. All events after
 it land on the same day, so their order and intervals are lost. The birth date
 itself and earlier dates are only shifted. `--max-age` (default 90, 1 to 150) changes
-the birthday; the CLI and the runners reject any other value before the job starts,
-while the anonymizers themselves leave the cap off for an invalid value. The column
+the birthday; the CLI, the runners and `AnonymizationPolicy` reject any other value before the job starts.
+The column
 travels through the stages like `jitter` but is never written to the anonymizer
-output. For cells, pass `birth_date` (and `max_age`) to `anonymize_cell`.
+output. For cells, pass `birth_date` to `anonymize_cell` and `max_age` in its `policy`.
 
 This is a per-event cap, not a Safe Harbor compliance guarantee on its own. Year-only
 and yearless values are not capped, so a note that holds a shifted birth date and a
@@ -866,7 +889,7 @@ Python, call `tide2.runner.utils.write_visualizer_json(output_dir, json_dir=None
 
 Running the anonymizers on BigQuery columns through a Python UDF lives in the separate `tide2-bq` repository. It reuses
 `tide2.anonymizers.cell.anonymize_cell`, which anonymizes one table cell the way `AnonymizerWorker` anonymizes a
-one-span note. Its `ZIP_CODE` support (`zip_mode=...`) loads `tide2/anonymizers/zip_code.py` and
+one-span note. Its `ZIP_CODE` support (`AnonymizationPolicy(zip_mode=...)`) loads `tide2/anonymizers/zip_code.py` and
 `tide2/resources/zip3_population_2020.tsv` only when a ZIP is anonymized, so a bundle for other entity types does not
 need them. `FREE_TEXT` always needs them, because its location operator loads `zip_code.py`.
 
@@ -874,7 +897,8 @@ The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason c
 stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
 index into `str(value)`, and no recognizer runs per cell. Dates in the text shift like the `DATE` cells of the row (same
 `patient_id`, `jitter` and `birth_date`), and `ACC_NUM` spans use HIPS alphanumeric, or the accession hash with
-`acc_num_salt` and `acc_num_study_id` when `acc_num_hash=True`. The result is
+`acc_num_salt` and `acc_num_study_id` when its `text_operators` uses `acc_num_hash`. The text follows the same `policy`
+as a note. The result is
 `None` when the spans are null, malformed or outside the text; an entity whose operator fails is masked (for example
 `[PERSON]`) and the rest of the text is kept. Spans of the Faker types (email, URL, organization) get random values, so
 the output for such text is not deterministic. Without `presidio-analyzer` installed, the path does not load spaCy or

@@ -38,6 +38,9 @@ from presidio_anonymizer.entities import RecognizerResult
 from tide2.anonymizers import presidio_patches
 from tide2.anonymizers.accession_number_hash import AccessionNumberHashAnonymizer
 from tide2.anonymizers.age_grouping import AgeGroupAnonymizer
+from tide2.anonymizers.cell import DEFAULT_POLICY
+from tide2.anonymizers.cell import AnonymizationPolicy
+from tide2.anonymizers.cell import check_acc_num_secrets
 from tide2.anonymizers.date_jitter import DateJitterAnonymizer
 from tide2.anonymizers.faker import FakerAnonymizer
 from tide2.anonymizers.guarded import end_note
@@ -53,13 +56,8 @@ from tide2.anonymizers.masking import MaskingAnonymizer
 from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE
 from tide2.anonymizers.zip_code import ZIP_ENTITY_ALIASES
 from tide2.anonymizers.zip_code import ZipCodeAnonymizer
-from tide2.anonymizers.zip_code import validate_zip_mode
-from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
-from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
-from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
-from tide2.cryptographic.date_jitter import validate_jitter_parameters
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
 from tide2.utils.span_metrics import resolve_recognizer_results
@@ -92,15 +90,9 @@ class AnonymizerWorker:
         self,
         salt: bytes,
         key: bytes,
+        policy: AnonymizationPolicy = DEFAULT_POLICY,
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
-        jitter_required: bool = False,
-        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
-        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
-        max_age: int = DEFAULT_MAX_AGE,
-        zip_mode: str = DEFAULT_ZIP_MODE,
-        acc_num_hash: bool = False,
-        keep_entities: frozenset[str] = frozenset(),
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -108,22 +100,11 @@ class AnonymizerWorker:
         Args:
             salt: 32-byte salt for HIPS anonymizers.
             key: 32-byte key for HIPS anonymizers.
-            acc_num_salt: Salt for accession number hashing (fixed per run).
-            acc_num_study_id: Study ID for accession number hashing (fixed per run).
-            jitter_required: If True, notes without a jitter value fail instead
-                of computing one automatically.
-            min_jitter_days: Minimum absolute date jitter in days (at least 3).
-            max_jitter_days: Maximum absolute date jitter in days.
-            max_age: Age at which dates are capped for notes with a ``birth_date``.
-                Not validated here: a value outside 1 to 150 turns the cap off. The job
-                runners reject it before they start.
-            zip_mode: How ZIP codes (and the ZIP inside an address) are anonymized: ``"relaxed"``
-                (default; not Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
-            acc_num_hash: If True, ACC_NUM uses ``accession_number_hash`` (BigQuery-compatible
-                SHA256 with ``acc_num_salt``/``acc_num_study_id``/patient_id); otherwise it
-                uses ``hips_alphanumeric`` and the ``acc_num_*`` settings are ignored.
-            keep_entities: Entity types whose spans are left unchanged (Presidio ``keep``). Build it
-                with ``parse_keep_entities``; it is not validated here.
+            policy: Run options (see ``AnonymizationPolicy``); checked when it was made. ``zip_mode`` is how ZIP
+                codes (and the ZIP inside an address) are anonymized: ``"relaxed"`` (default when ``None``; not
+                Safe Harbor compliant) or ``"strict"`` (HIPAA Safe Harbor). See ``ZipCodeAnonymizer``.
+            acc_num_salt: Salt for accession number hashing (a secret, not in the policy).
+            acc_num_study_id: Study ID for accession number hashing (a secret, not in the policy).
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -134,11 +115,6 @@ class AnonymizerWorker:
         if len(key) != REQUIRED_KEY_SIZE:
             raise ValueError(f"key must be {REQUIRED_KEY_SIZE} bytes, got {len(key)}")
 
-        is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
-        if not is_valid:
-            raise ValueError(message)
-        validate_zip_mode(zip_mode)
-
         # Apply Presidio patches - must be done in __init__ (not module level)
         # for Ray workers since they are separate processes.
         presidio_patches.disable_whitespace_merging()
@@ -146,16 +122,16 @@ class AnonymizerWorker:
 
         self.salt = salt
         self.key = key
+        self.policy = policy
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
-        self.acc_num_hash = acc_num_hash
-        self.keep_entities = frozenset(keep_entities)
-        self.jitter_required = jitter_required
-        self.min_jitter_days = min_jitter_days
-        self.max_jitter_days = max_jitter_days
-        self.max_age = max_age
+        check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id)
+        self.jitter_required = policy.jitter_required
+        self.min_jitter_days = policy.min_jitter_days
+        self.max_jitter_days = policy.max_jitter_days
+        self.max_age = policy.max_age
         self._warned_no_birth_date = False
-        self.zip_mode = zip_mode
+        self.zip_mode = DEFAULT_ZIP_MODE if policy.zip_mode is None else policy.zip_mode
 
         # Initialize Presidio AnonymizerEngine
         self.anonymizer_engine = AnonymizerEngine()
@@ -197,11 +173,11 @@ class AnonymizerWorker:
             "URL": OperatorConfig("faker_anonymizer"),
             "PHONE_NUMBER": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "PHONE": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "ORGANIZATION": OperatorConfig("faker_anonymizer"),
             "VENDOR": OperatorConfig(
@@ -210,7 +186,7 @@ class AnonymizerWorker:
             ),
             "US_SSN": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "ZIP_CODE": OperatorConfig("zip_code_safe_harbor", {"mode": self.zip_mode}),
             "LOCATION": OperatorConfig(
@@ -223,7 +199,7 @@ class AnonymizerWorker:
             ),
             "MEDICAL_LICENSE": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "PERSON": OperatorConfig(
                 "hips_names",
@@ -243,24 +219,24 @@ class AnonymizerWorker:
             ),
             "MRN": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "HAR": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
-            # Overridden per note in _create_operators_for_note() when acc_num_hash is set
+            # Overridden per note in _create_operators_for_note() when text_operators sets acc_num_hash
             "ACC_NUM": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "ID": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
             "CSN_ID": OperatorConfig(
                 "hips_alphanumeric",
-                {"salt": self.salt, "key": self.key},
+                {"salt": self.salt, "key": self.key, "fpe_mode": self.policy.fpe_mode},
             ),
         }
         operators.update(dict.fromkeys(ZIP_ENTITY_ALIASES, operators["ZIP_CODE"]))
@@ -308,18 +284,19 @@ class AnonymizerWorker:
             if val_str.lower() not in ("nan", "none", "null", ""):
                 clean_patient_id = val_str
 
-        # Opt-in: ACC_NUM uses accession_number_hash with per-note patient_id as SQL entity
-        if self.acc_num_hash:
-            operators["ACC_NUM"] = OperatorConfig(
-                "accession_number_hash",
-                {
-                    "salt": self.acc_num_salt,
-                    "study_id": self.acc_num_study_id,
-                    "patient_id": clean_patient_id,
-                },
-            )
-
-        operators.update({entity_type: OperatorConfig("keep") for entity_type in self.keep_entities})
+        for entity_type, method in self.policy.text_operators:
+            if method == "keep":
+                operators[entity_type] = OperatorConfig("keep")
+            elif method == "acc_num_hash":
+                # accession_number_hash takes the per-note patient_id as its SQL entity
+                operators[entity_type] = OperatorConfig(
+                    "accession_number_hash",
+                    {
+                        "salt": self.acc_num_salt,
+                        "study_id": self.acc_num_study_id,
+                        "patient_id": clean_patient_id,
+                    },
+                )
         return operators
 
     def _parse_recognizer_results(self, results_json: str | list | None, note_text: str) -> list[RecognizerResult]:
@@ -536,7 +513,7 @@ class AnonymizerWorker:
             if is_null(jitter):
                 if self.jitter_required:
                     mask_dates = True
-                    if not {"DATE", "DATE_TIME"} <= self.keep_entities:
+                    if not all(self.policy.text_operator(t) == "keep" for t in ("DATE", "DATE_TIME")):
                         record_error("DATE", "jitter_required")
                 else:
                     jitter = self._compute_jitter_for_patient(patient_id)
@@ -744,15 +721,9 @@ def _load_key_material(key_material: bytes | str | os.PathLike) -> bytes:
 def create_anonymizer_actor(
     salt: bytes | str | os.PathLike,
     key: bytes | str | os.PathLike,
+    policy: AnonymizationPolicy = DEFAULT_POLICY,
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
-    jitter_required: bool = False,
-    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
-    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
-    max_age: int = DEFAULT_MAX_AGE,
-    zip_mode: str = DEFAULT_ZIP_MODE,
-    acc_num_hash: bool = False,
-    keep_entities: frozenset[str] = frozenset(),
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -763,16 +734,9 @@ def create_anonymizer_actor(
     Args:
         salt: 32-byte salt (bytes) or path to salt file
         key: 32-byte key (bytes) or path to key file
-        acc_num_salt: Salt for accession number hashing (fixed per run)
-        acc_num_study_id: Study ID for accession number hashing (fixed per run)
-        jitter_required: If True, notes without a jitter value fail instead
-            of computing one automatically
-        min_jitter_days: Minimum absolute date jitter in days (at least 3)
-        max_jitter_days: Maximum absolute date jitter in days
-        max_age: Dates after this birthday are moved to it for notes with a birth_date
-        zip_mode: ``"relaxed"`` (default) or ``"strict"``; see ``AnonymizerWorker``
-        acc_num_hash: If True, hash ACC_NUM with accession_number_hash instead of hips_alphanumeric
-        keep_entities: Entity types whose spans are left unchanged
+        policy: Run options (see ``AnonymizationPolicy``)
+        acc_num_salt: Salt for accession number hashing (a secret, not in the policy)
+        acc_num_study_id: Study ID for accession number hashing (a secret, not in the policy)
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -798,15 +762,9 @@ def create_anonymizer_actor(
             super().__init__(
                 salt=salt_bytes,
                 key=key_bytes,
+                policy=policy,
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
-                jitter_required=jitter_required,
-                min_jitter_days=min_jitter_days,
-                max_jitter_days=max_jitter_days,
-                max_age=max_age,
-                zip_mode=zip_mode,
-                acc_num_hash=acc_num_hash,
-                keep_entities=keep_entities,
             )
 
     return ConfiguredAnonymizerActor

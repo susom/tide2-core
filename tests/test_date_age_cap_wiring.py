@@ -11,6 +11,7 @@ from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.actors.anonymizer import create_anonymizer_actor
 from tide2.actors.recognizer import RecognizerWorker
 from tide2.anonymizers import cell
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.runner import cli
 from tide2.runner import local_runner
 from tide2.runner.local_runner import ANONYMIZER_STAGE_COLUMNS
@@ -33,7 +34,7 @@ SPANS = [{"entity_type": "DATE", "start": 5, "end": 15, "score": 1.0}]
 
 
 def _worker(**kwargs) -> AnonymizerWorker:
-    return AnonymizerWorker(salt=SALT, key=KEY, **kwargs)
+    return AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(**kwargs))
 
 
 def _batch(birth_dates: list | None, jitters: list | None = None) -> dict:
@@ -53,7 +54,12 @@ def _batch(birth_dates: list | None, jitters: list | None = None) -> dict:
 
 def test_cell_caps_with_birth_date() -> None:
     assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB) == "2020-06-20"
-    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=80) == "2010-06-20"
+    assert (
+        cell.anonymize_cell(
+            "2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, policy=AnonymizationPolicy(max_age=80)
+        )
+        == "2010-06-20"
+    )
 
 
 def test_cell_matches_process_note_with_birth_date() -> None:
@@ -69,13 +75,8 @@ def test_cell_matches_process_note_with_birth_date() -> None:
         assert cell.anonymize_cell(value, entity_type, SALT, KEY, patient_id="FAKE-P0001", birth_date=DOB) == expected
 
 
-def test_cell_invalid_max_age_turns_the_cap_off() -> None:
-    # The anonymizers do not check max_age; the job runners reject an invalid value before they start.
-    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, max_age=0) == "2023-03-20"
-    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=0) == "2023-03-20"
-    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=-3) == "2023-03-20"
-    # A fractional age is truncated, not rejected.
-    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5, birth_date=DOB, max_age=90.9) == "2020-06-20"
+def test_cell_without_birth_date_does_not_cap() -> None:
+    assert cell.anonymize_cell("2023-03-15", "DATE", SALT, KEY, jitter=5) == "2023-03-20"
 
 
 def test_cell_fpe_ignores_birth_date() -> None:
@@ -154,14 +155,15 @@ def test_worker_without_column_is_unchanged() -> None:
 
 def test_worker_max_age_and_factory() -> None:
     assert _worker(max_age=80).process_batch(_batch([DOB]))["anonymized_note_text"] == ["Seen 2010-06-20."]
-    actor_cls = create_anonymizer_actor(SALT, KEY, max_age=80)
+    actor_cls = create_anonymizer_actor(SALT, KEY, policy=AnonymizationPolicy(max_age=80))
     worker_cls = getattr(getattr(actor_cls, "__ray_metadata__", None), "modified_class", actor_cls)
     assert worker_cls().max_age == 80
 
 
 @pytest.mark.parametrize("max_age", [0, -1, 151])
-def test_worker_invalid_max_age_turns_the_cap_off(max_age: int) -> None:
-    assert _worker(max_age=max_age).process_batch(_batch([DOB]))["anonymized_note_text"] == ["Seen 2023-03-20."]
+def test_worker_invalid_max_age_raises(max_age: int) -> None:
+    with pytest.raises(ValueError, match="max_age"):
+        _worker(max_age=max_age)
 
 
 @pytest.mark.parametrize("max_age", [0, -1, 151])

@@ -39,6 +39,7 @@ import math
 import os
 import time
 from collections.abc import Iterable
+from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
@@ -58,7 +59,6 @@ from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
-from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.utils.batch_columns import check_no_patient_uid
 from tide2.utils.nulls import row_id_patient_part
 from tide2.utils.stage_status import FAILED
@@ -1486,8 +1486,8 @@ class LocalJobRunner:
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
         zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
-        acc_num_hash: bool = False,
-        keep_entities: str | Iterable[str] | None = None,
+        text_operators: str | Mapping[str, str] | Iterable[str | tuple[str, str]] | None = None,
+        fpe_mode: str | None = None,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1543,29 +1543,41 @@ class LocalJobRunner:
                 is logged.
             zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
                 ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
-            acc_num_hash: If True, hash ACC_NUM with accession_number_hash
-                (``acc_num_salt``/``acc_num_study_id``); otherwise use hips_alphanumeric.
-            keep_entities: Entity types left as they are, as a comma-separated string or a list
-                (for example ``DATE,AGE``). ``DATE`` also covers the date part types of cells.
-                An unknown name raises ``ValueError`` before Ray starts.
+            text_operators: Method for each entity type in the notes: a string such as
+                ``"DATE=keep,ACC_NUM=acc_num_hash"``, a mapping of type to method, or a list of ``TYPE=method``
+                strings. Methods: ``keep``, ``acc_num_hash`` (needs ``acc_num_salt`` and ``acc_num_study_id``).
+                An invalid value raises ``ValueError`` before Ray starts.
+            fpe_mode: ``"strict"`` (FF1, the default) or ``"relaxed"`` (faster for INT64 values).
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
             of rows written) so a successful run is observable.
 
         Raises:
-            ValueError: If the keys are not given as both paths or both hex strings.
+            ValueError: If the options do not make a valid ``AnonymizationPolicy``, or the keys are not given
+                as both paths or both hex strings.
             RuntimeError: If a non-empty input produces zero output rows. The
                 actors emit one row per input row, so this indicates a defect; the
                 guard surfaces it as a hard error.
         """
         from tide2.actors import create_anonymizer_actor_class
-        from tide2.anonymizers.cell import parse_keep_entities
+        from tide2.anonymizers.cell import AnonymizationPolicy
+        from tide2.anonymizers.cell import check_acc_num_secrets
 
         _validate_zip_mode(zip_mode)
         _validate_id_column(_id_column)
-        validate_max_age(max_age)
-        keep_entity_types = parse_keep_entities(keep_entities)
+        policy = AnonymizationPolicy.from_mapping(
+            {
+                "min_jitter_days": min_jitter_days,
+                "max_jitter_days": max_jitter_days,
+                "max_age": max_age,
+                "text_operators": text_operators,
+                "fpe_mode": fpe_mode,
+                "zip_mode": zip_mode,
+                "jitter_required": jitter_required,
+            }
+        )
+        check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id)
         self._init_ray()
 
         # Override DataContext with job-specific streaming params
@@ -1637,15 +1649,9 @@ class LocalJobRunner:
         AnonymizerActor = create_anonymizer_actor_class(  # noqa: N806 # its a type
             salt=salt,
             key=key,
+            policy=policy,
             acc_num_salt=acc_num_salt,
             acc_num_study_id=acc_num_study_id,
-            jitter_required=jitter_required,
-            min_jitter_days=min_jitter_days,
-            max_jitter_days=max_jitter_days,
-            max_age=max_age,
-            zip_mode=zip_mode,
-            acc_num_hash=acc_num_hash,
-            keep_entities=keep_entity_types,
         )
 
         try:
@@ -2153,10 +2159,12 @@ class LocalJobRunner:
         for stage_kwargs in (transformer_kwargs, recognizer_kwargs, anonymizer_kwargs, llm_recognizer_kwargs):
             if stage_kwargs and "_id_column" in stage_kwargs:
                 _validate_id_column(stage_kwargs["_id_column"])
-        validate_max_age((anonymizer_kwargs or {}).get("max_age", DEFAULT_MAX_AGE))
-        from tide2.anonymizers.cell import parse_keep_entities
+        from tide2.anonymizers.cell import AnonymizationPolicy
+        from tide2.anonymizers.cell import check_acc_num_secrets
 
-        keep_entity_types = parse_keep_entities((anonymizer_kwargs or {}).get("keep_entities"))
+        anon_kwargs = anonymizer_kwargs or {}
+        anon_policy = AnonymizationPolicy.from_mapping(anon_kwargs)
+        check_acc_num_secrets(anon_policy, anon_kwargs.get("acc_num_salt"), anon_kwargs.get("acc_num_study_id"))
         start_time = time.time()
         output_path = output_location(output_dir)
         make_output_dir(output_path)
@@ -2216,9 +2224,9 @@ class LocalJobRunner:
         r_kw = dict(recognizer_kwargs or {})
         a_kw = dict(anonymizer_kwargs or {})
         _validate_zip_mode(a_kw.get("zip_mode", "relaxed"))
-        if "keep_entities" in a_kw:
-            # A one-shot iterable was consumed by the validation above; forward the parsed set.
-            a_kw["keep_entities"] = keep_entity_types
+        if "text_operators" in a_kw:
+            # A one-shot iterable was consumed by the validation above; forward the parsed pairs.
+            a_kw["text_operators"] = anon_policy.text_operators
         llm_kw = llm_recognizer_kwargs or {}
 
         # ------------------------------------------------------------------
@@ -2573,7 +2581,7 @@ class LocalJobRunner:
         trade-offs. This method assumes the fallback checks have already run.
         """
         from tide2.actors import create_anonymizer_actor_class
-        from tide2.anonymizers.cell import parse_keep_entities
+        from tide2.anonymizers.cell import AnonymizationPolicy
 
         logger.info(
             "streamed mode: only the final sink is checkpointed, so a rerun of the same input into the same "
@@ -2762,15 +2770,9 @@ class LocalJobRunner:
             anonymizer_actor = create_anonymizer_actor_class(
                 salt=self._load_key(str(salt_file)),
                 key=self._load_key(str(key_file)),
+                policy=AnonymizationPolicy.from_mapping(anonymizer_kwargs),
                 acc_num_salt=anonymizer_kwargs.get("acc_num_salt"),
                 acc_num_study_id=anonymizer_kwargs.get("acc_num_study_id"),
-                jitter_required=bool(anonymizer_kwargs.get("jitter_required", False)),
-                min_jitter_days=int(anonymizer_kwargs.get("min_jitter_days", DEFAULT_MIN_JITTER_DAYS)),
-                max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
-                max_age=int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE)),
-                zip_mode=anonymizer_kwargs.get("zip_mode", "relaxed"),
-                acc_num_hash=bool(anonymizer_kwargs.get("acc_num_hash", False)),
-                keep_entities=parse_keep_entities(anonymizer_kwargs.get("keep_entities")),
             )
             ds = self.build_anonymizer_stage(
                 ds,

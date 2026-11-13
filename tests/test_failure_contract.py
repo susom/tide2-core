@@ -12,6 +12,7 @@ from tide2.actors.recognizer import RecognizerWorker
 from tide2.actors.transformer import BIOAggregationActor
 from tide2.actors.transformer import TransformerInferenceActor
 from tide2.anonymizers import presidio_patches
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
@@ -401,7 +402,7 @@ def test_an_invalid_jitter_masks_only_the_dates(anonymizer):
 
 
 def test_a_missing_required_jitter_masks_the_dates_and_fails_the_note():
-    worker = AnonymizerWorker(salt=SALT, key=KEY, jitter_required=True)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(jitter_required=True))
     out = worker.process_note(
         note_text=TEXT,
         original_text_hash="h" * 64,
@@ -433,7 +434,7 @@ def test_the_applied_jitter_is_written_for_every_row(anonymizer):
 
 
 def test_the_jitter_is_null_when_the_dates_are_masked():
-    worker = AnonymizerWorker(salt=SALT, key=KEY, jitter_required=True)
+    worker = AnonymizerWorker(salt=SALT, key=KEY, policy=AnonymizationPolicy(jitter_required=True))
     out = worker.process_batch(
         {"text_hash": ["a"], "note_text": [TEXT], "recognizer_results_json": ["[]"], "patient_id": ["p1"]}
     )
