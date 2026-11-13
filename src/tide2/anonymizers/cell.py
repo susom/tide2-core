@@ -68,7 +68,7 @@ def _zip_operator() -> Operator:
     """Return the guarded ZIP operator, built once per process.
 
     ``zip_code`` is imported here, not at module level, so a bundle that has no ZIP module or population file
-    still runs every other entity type.
+    still runs every other entity type except ``FREE_TEXT``.
     """
     from tide2.anonymizers.zip_code import ZipCodeAnonymizer
 

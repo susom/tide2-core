@@ -850,7 +850,7 @@ Running the anonymizers on BigQuery columns through a Python UDF lives in the se
 `tide2.anonymizers.cell.anonymize_cell`, which anonymizes one table cell the way `AnonymizerWorker` anonymizes a
 one-span note. Its `ZIP_CODE` support (`zip_mode=...`) loads `tide2/anonymizers/zip_code.py` and
 `tide2/resources/zip3_population_2020.tsv` only when a ZIP is anonymized, so a bundle for other entity types does not
-need them.
+need them. `FREE_TEXT` always needs them, because its location operator loads `zip_code.py`.
 
 The entity type `FREE_TEXT` anonymizes a free-text cell (a comment or a reason column) with spans that the recognition
 stages found earlier. Pass them as `recognizer_results` (the `recognizer_results_json` of the notes pipeline); the spans
