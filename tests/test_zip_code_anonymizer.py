@@ -440,7 +440,9 @@ def test_cli_and_runner_defaults_match_the_operator_constants() -> None:
     ids=["run_anonymization", "AnonymizerWorker", "create_anonymizer_actor", "anonymize_cell"],
 )
 def test_zip_mode_is_the_last_parameter_so_positional_calls_keep_their_meaning(func: Any) -> None:
-    assert list(inspect.signature(func).parameters)[-1] == "zip_mode"
+    params = list(inspect.signature(func).parameters)
+    # acc_num_hash was added after zip_mode, so positional calls that end at zip_mode keep their meaning.
+    assert params[params.index("zip_mode") :] == ["zip_mode", "acc_num_hash"]
 
 
 def test_run_anonymization_positional_cpu_arguments_are_unchanged() -> None:
