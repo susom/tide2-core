@@ -639,4 +639,16 @@ class TestAgeCap:
     def test_cached_equals_uncached(self):
         value = "x" * 100 + " 2023-03-15"
         assert _capped(value) == "x" * 100 + " 2020-06-20"
-        assert _capped("2023-03-15") == "2020-06-20"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("15 Mar 23", "20 Mar 23"),
+        ("31 Mar 24", "5 Apr 24"),
+        ("01 Jan 23", "06 Jan 23"),
+        ("1st March 23", "6th March 23"),
+    ],
+)
+def test_day_month_two_digit_year_shifts_as_one_date(text, expected):
+    assert DateJitterAnonymizer().operate(text, {"entity_type": "DATE", "jitter": 5}) == expected

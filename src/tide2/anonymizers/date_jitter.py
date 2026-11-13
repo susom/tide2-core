@@ -203,6 +203,8 @@ class DateJitterAnonymizer(Operator):
             f"{_START}{_DAY}{_SEP}{_MONTH}(?P=sep){_YEAR}{_END}",
             # dd Month yyyy, dd Mon yyyy, 1st March, 2023
             f"{_START}{_DAY}{_DAY_SUFFIX}\\s+{_MONTH},?\\s+{_YEAR}{_END}",
+            # dd Mon yy, 1st March 23 (before the yearless "March 23", which would take the year as the day)
+            f"{_START}{_DAY}{_DAY_SUFFIX}\\s+{_MONTH},?\\s+(?P<year>[0-9]{{2}}){_END}",
             # dd/mm/yyyy or dd-mm-yyyy (numeric, day-first): only when the leading number is 13-31
             f"{_START}{_DAY_FIRST}{_SEP}{_MON}(?P=sep){_YEAR}{_END}",
             # yyyy-mm-dd or yyyy/mm/dd, also followed by "T" and a time
