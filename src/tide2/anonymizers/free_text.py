@@ -87,8 +87,10 @@ def anonymize_free_text(
 
     Returns:
         The anonymized text, or ``None`` when the spans are unusable (null, malformed or outside
-        the text); the failure is logged by text hash, never the text. An entity whose operator
-        fails is masked (for example ``[PERSON]``) and the rest of the text is kept.
+        the text); the failure is logged at ERROR by text hash and exception class, never the
+        text. As for notes, the DEBUG log also has the traceback, which can contain input. An
+        entity whose operator fails is masked (for example ``[PERSON]``) and the rest of the
+        text is kept.
 
     Raises:
         ValueError: If the keys or the jitter range are invalid.
