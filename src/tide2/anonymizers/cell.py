@@ -1,7 +1,11 @@
 """Cell-level anonymization of one structured value.
 
 ``anonymize_cell`` gives the result ``AnonymizerWorker.process_note`` gives for the value as a one-span
-note of the given entity type, without a Presidio engine. This holds for any policy that is given to both.
+note of the given entity type, without a Presidio engine, when both get the same policy, secrets,
+``patient_id`` and ``jitter``, and the cell ``method`` is the method that the note uses for that type.
+``policy.text_operators`` applies only to free text: for example, with ``"MRN=keep"`` a note keeps the MRN,
+but an ``MRN`` cell is still encrypted (``keep`` is not a cell method), and ``"ACC_NUM=acc_num_hash"``
+needs ``method="acc_num_hash"`` on the cell.
 Backends that anonymize table columns (Ray, BigQuery) call it once per cell.
 
 This module is shipped on its own in the BigQuery UDF bundle, where ``tide2`` and ``tide2.anonymizers``
