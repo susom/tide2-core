@@ -914,6 +914,15 @@ class TestResolveConflicts:
         starts = [s["start"] for s in result]
         assert starts == sorted(starts)
 
+    def test_keeps_span_freed_by_a_displaced_winner(self):
+        """A span that only a later-removed span overlapped is kept."""
+        spans = [
+            {"start": 4, "end": 12, "entity_type": "MRN"},
+            {"start": 4, "end": 25, "entity_type": "PATIENT"},
+            {"start": 13, "end": 40, "entity_type": "HOSPITAL"},
+        ]
+        assert [s["entity_type"] for s in resolve_conflicts(spans)] == ["MRN", "HOSPITAL"]
+
 
 class TestResolveRecognizerResults:
     """Test cases for the resolve_recognizer_results function."""
@@ -921,6 +930,17 @@ class TestResolveRecognizerResults:
     def test_empty_input(self):
         """Test with empty list returns empty list."""
         assert resolve_recognizer_results([]) == []
+
+    def test_keeps_span_freed_by_a_displaced_winner(self):
+        """A span that only a later-removed span overlapped is kept."""
+        from presidio_anonymizer.entities import RecognizerResult
+
+        results = [
+            RecognizerResult(entity_type="MRN", start=4, end=12, score=0.9),
+            RecognizerResult(entity_type="PATIENT", start=4, end=25, score=0.9),
+            RecognizerResult(entity_type="HOSPITAL", start=13, end=40, score=0.9),
+        ]
+        assert [r.entity_type for r in resolve_recognizer_results(results)] == ["MRN", "HOSPITAL"]
 
     def test_filters_zero_score(self):
         """Test that zero-score results are filtered out."""

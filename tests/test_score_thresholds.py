@@ -191,6 +191,20 @@ def test_llm_parser_orders_equal_bound_spans_by_score() -> None:
     assert "6505550199" not in out
 
 
+def test_chained_llm_overlap_does_not_leave_mrn_clear() -> None:
+    text = "MRN 48291037 Rhea Orleans Marlowe Clinic is far away"
+    llm = _llm_spans(
+        text,
+        {
+            "PATIENT": [{"text": "48291037 Rhea Orleans", "confidence": 0.9}],
+            "HOSPITAL": [{"text": "Rhea Orleans Marlowe Clinic", "confidence": 0.9}],
+        },
+    )
+    spans = _merged_row([_span("MRN", (4, 12), 0.9, REGEX)], llm)
+    out = _run(AnonymizationPolicy(), spans, text)
+    assert "48291037" not in out
+
+
 def _merged_row(regex: list[dict], llm: list[dict]) -> list[dict]:
     batch = pa.table({"results_regex": [json.dumps(regex)], "results_llm": [json.dumps(llm)]})
     return json.loads(local_runner._resolve_merged_batch(batch).to_pydict()["recognizer_results_json"][0])
