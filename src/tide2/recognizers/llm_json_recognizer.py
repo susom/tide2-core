@@ -478,7 +478,8 @@ class LlmJsonRecognizer(RemoteRecognizer):
         1.  Deduplicate entities from the LLM output; keep the highest confidence for each text and type.
         2.  Find all occurrences of each unique entity text in the original text.
         3.  Remove exact copies; keep overlapping spans, which the anonymizer resolves after the score
-            thresholds.
+            thresholds. Spans with the same bounds are ordered by descending score, so the anonymizer
+            keeps the highest score, as before the thresholds.
         4.  Create a RecognizerResult for each span.
 
         Args:
@@ -531,7 +532,7 @@ class LlmJsonRecognizer(RemoteRecognizer):
         if not all_spans:
             return []
 
-        final_spans = dedupe_exact_spans(all_spans)
+        final_spans = sorted(dedupe_exact_spans(all_spans), key=lambda s: (s["start"], -s["end"], -s["score"]))
 
         # 4. Create RecognizerResult objects from the final spans
         results: list[RecognizerResult] = []

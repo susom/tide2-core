@@ -178,6 +178,19 @@ def test_llm_parser_keeps_the_highest_confidence_of_a_repeated_entity() -> None:
     assert "Rhea Orleans" not in out
 
 
+def test_llm_parser_orders_equal_bound_spans_by_score() -> None:
+    text = "Call 6505550199 today"
+    spans = _llm_spans(
+        text,
+        {
+            "PHONE_NUMBER": [{"text": "6505550199", "confidence": 0.7}],
+            "ID": [{"text": "6505550199", "confidence": 0.9}],
+        },
+    )
+    out = _run(AnonymizationPolicy(text_operators="PHONE_NUMBER=keep,ID=hash"), spans, text)
+    assert "6505550199" not in out
+
+
 def _merged_row(regex: list[dict], llm: list[dict]) -> list[dict]:
     batch = pa.table({"results_regex": [json.dumps(regex)], "results_llm": [json.dumps(llm)]})
     return json.loads(local_runner._resolve_merged_batch(batch).to_pydict()["recognizer_results_json"][0])
