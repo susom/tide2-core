@@ -134,7 +134,7 @@ Identifier entity types (`MRN`, `HAR`, `ID`, `CSN_ID`, `US_SSN`, `PHONE_NUMBER`,
 
 Content shorter than FF1's minimum domain (fewer than 6 digits or 4 alphanumeric characters) is permuted with keyed tables built on first use; longer content uses FF1 with cycle-walking back into the same class. `FormatPreservingEncryption.encrypt_int` and `decrypt_int` apply the same mapping to `INT64` values. How collision-freeness is tested, and the results for `INT64`, are in the [FPE verification guide](guides/fpe_collision_free_verification.md).
 
-FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **Every FPE pseudonym differs from releases that used FF3**, in notes and in tables, so outputs from before and after this change do not join. Re-run from source data to regenerate them.
+FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **FPE pseudonyms are not compatible with releases that used FF3**, in notes and in tables. The two mappings share the same output values, so an old pseudonym can be equal to a new pseudonym of a different identifier. Do not mix or join outputs from before and after this change: such a join can link unrelated records. Re-run from source data to regenerate them.
 
 ### Ray-based Batch Processing
 - **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
