@@ -782,9 +782,9 @@ compute one jitter per row and pass it as `jitter` to every call. Without a
 not line up. Unlike a year in free text, a year column is
 shifted, because it can change across 1 January and with the cap. A value that is
 not that part of `full_date`, or a null `full_date`, becomes `[DATE]`; a
-`full_date` that is not a date becomes `[DATE_DAY]` (and so on) and the error is
-logged; `anonymize_cell` returns only the value, so it does not mark a row as
-failed. These types are for structured cells only; the note pipeline does not
+`full_date` that is not a date becomes `[DATE_DAY]` (and so on).
+`anonymize_cell` returns only the value: it does not log the error and does not
+mark a row as failed. These types are for structured cells only; the note pipeline does not
 produce them. A four-digit year below 1000 is not zero padded, which is outside the
 supported range (the date patterns cover 1900 to 2099).
 
