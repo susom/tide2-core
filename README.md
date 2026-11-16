@@ -135,7 +135,7 @@ Identifier entity types (`MRN`, `HAR`, `ID`, `CSN_ID`, `US_SSN`, `PHONE_NUMBER`,
 
 Content shorter than FF1's minimum domain (fewer than 6 digits or 4 alphanumeric characters) is permuted with keyed tables built on first use; longer content uses FF1 with cycle-walking back into the same class. `FormatPreservingEncryption.encrypt_int` and `decrypt_int` apply the same mapping to `INT64` values. How collision-freeness is tested, and the results for `INT64`, are in the [FPE verification guide](guides/fpe_collision_free_verification.md).
 
-FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **Every FPE pseudonym differs from releases that used FF3**, in notes and in tables, so outputs from before and after this change do not join. Re-run from source data to regenerate them.
+FF1 replaces FF3, which NIST withdrew; FF3-1 is also removed in the second public draft of NIST SP 800-38G Rev. 1 (2025). **FPE pseudonyms are not compatible with releases that used FF3**, in notes and in tables. The two mappings share the same output values, so an old pseudonym can be equal to a new pseudonym of a different identifier. Do not mix or join outputs from before and after this change: such a join can link unrelated records. Re-run from source data to regenerate them.
 
 ### Ray-based Batch Processing
 - **Runner module**: Single-node job runner with local and VM modes via `tide2-runner` CLI
@@ -782,8 +782,9 @@ compute one jitter per row and pass it as `jitter` to every call. Without a
 not line up. Unlike a year in free text, a year column is
 shifted, because it can change across 1 January and with the cap. A value that is
 not that part of `full_date`, or a null `full_date`, becomes `[DATE]`; a
-`full_date` that is not a date becomes `[DATE_DAY]` (and so on) and the row is
-`failed`. These types are for structured cells only; the note pipeline does not
+`full_date` that is not a date becomes `[DATE_DAY]` (and so on) and the error is
+logged; `anonymize_cell` returns only the value, so it does not mark a row as
+failed. These types are for structured cells only; the note pipeline does not
 produce them. A four-digit year below 1000 is not zero padded, which is outside the
 supported range (the date patterns cover 1900 to 2099).
 
