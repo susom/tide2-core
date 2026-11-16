@@ -1,6 +1,7 @@
 """Tests for AnonymizationPolicy and its use in the CLI and the runner."""
 
 import dataclasses
+import math
 from unittest.mock import MagicMock
 
 import pytest
@@ -49,8 +50,8 @@ def test_bad_jitter() -> None:
         AnonymizationPolicy(min_jitter_days=1)
 
 
-@pytest.mark.parametrize("max_age", [0, 151])
-def test_bad_max_age(max_age: int) -> None:
+@pytest.mark.parametrize("max_age", [0, 151, 90.9, True, None, {}, math.inf])
+def test_bad_max_age(max_age: object) -> None:
     with pytest.raises(ValueError, match="max_age"):
         AnonymizationPolicy(max_age=max_age)
 

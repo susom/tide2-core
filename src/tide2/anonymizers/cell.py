@@ -242,7 +242,7 @@ class AnonymizationPolicy:
         is_valid, message = validate_jitter_parameters(self.max_jitter_days, self.min_jitter_days)
         if not is_valid:
             raise ValueError(message)
-        object.__setattr__(self, "max_age", validate_max_age(self.max_age))
+        object.__setattr__(self, "max_age", validate_max_age(_as_int("max_age", self.max_age)))
         object.__setattr__(self, "text_operators", parse_text_operators(self.text_operators))
         if self.fpe_mode not in FPE_MODES:
             raise ValueError(f"Unknown fpe_mode {self.fpe_mode!r}; valid modes: {list(FPE_MODES)}")
