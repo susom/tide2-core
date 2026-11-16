@@ -95,7 +95,7 @@ def test_relaxed_matches_process_note_for_a_value_that_is_not_an_int64(worker: A
         original_text_hash=worker.compute_text_hash(value),
         recognizer_results_json=[{"entity_type": "MRN", "start": 0, "end": len(value), "score": 1.0}],
     )["anonymized_note_text"]
-    assert cell.anonymize_cell(value, "MRN", SALT, KEY) == expected
+    assert cell.anonymize_cell(value, "MRN", SALT, KEY, fpe_mode="relaxed") == expected
 
 
 def test_null_patient_gets_a_random_shift() -> None:
