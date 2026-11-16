@@ -475,7 +475,7 @@ class LlmJsonRecognizer(RemoteRecognizer):
         Extract entities using exact string matching.
 
         For each entity in the JSON response:
-        1.  Deduplicate entities from the LLM output.
+        1.  Deduplicate entities from the LLM output; keep the highest confidence for each text and type.
         2.  Find all occurrences of each unique entity text in the original text.
         3.  Remove exact copies; keep overlapping spans, which the anonymizer resolves after the score
             thresholds.
@@ -509,7 +509,8 @@ class LlmJsonRecognizer(RemoteRecognizer):
 
                 # Store under a tuple of (text, type) to handle cases where the same text is tagged with different types
                 entity_key = (entity_text, entity_type)
-                if entity_key not in unique_entities:
+                # Keep the highest confidence: a low first copy must not hide a high one from the threshold
+                if entity_key not in unique_entities or entity["confidence"] > unique_entities[entity_key]:
                     unique_entities[entity_key] = entity["confidence"]
 
         # 2. Find all occurrences of each unique entity

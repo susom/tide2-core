@@ -142,25 +142,40 @@ def test_dedupe_keeps_input_order_for_equal_bounds() -> None:
     assert dedupe_exact_spans([bare, mrn]) == [mrn]  # both are non-transformer spans: the higher score wins
 
 
-def test_llm_parser_keeps_overlaps_so_a_dropped_span_cannot_hide_another() -> None:
+def _llm_spans(text: str, entities: dict) -> list[dict]:
     from tide2.recognizers.llm_json_recognizer import LlmJsonRecognizer
 
-    text = "Seen by John 03/04/2023 today"
-    prompt = {"prompt_template": "{clinical_text}", "supported_entities": ["PATIENT", "DATE"]}
+    prompt = {"prompt_template": "{clinical_text}", "supported_entities": list(entities)}
     with (
         patch("tide2.recognizers.llm_json_recognizer.load_llm_prompt", return_value=prompt),
         patch("tide2.recognizers.llm_json_recognizer.LlmModel"),
     ):
         recognizer = LlmJsonRecognizer(project_id="fake-project", provider_type="google", model_name="fake-model")
-    entities = {
-        "PATIENT": [{"text": "John 03/04/2023", "confidence": 0.3}],
-        "DATE": [{"text": "03/04/2023", "confidence": 0.9}],
-    }
-    results = recognizer._extract_entities_with_exact_matching(entities, ["PATIENT", "DATE"], text)
-    spans = [{"entity_type": r.entity_type, "start": r.start, "end": r.end, "score": r.score} for r in results]
+    results = recognizer._extract_entities_with_exact_matching(entities, list(entities), text)
+    return [{"entity_type": r.entity_type, "start": r.start, "end": r.end, "score": r.score} for r in results]
+
+
+def test_llm_parser_keeps_overlaps_so_a_dropped_span_cannot_hide_another() -> None:
+    text = "Seen by John 03/04/2023 today"
+    spans = _llm_spans(
+        text,
+        {
+            "PATIENT": [{"text": "John 03/04/2023", "confidence": 0.3}],
+            "DATE": [{"text": "03/04/2023", "confidence": 0.9}],
+        },
+    )
     assert {s["entity_type"] for s in spans} == {"PATIENT", "DATE"}
     out = _run(AnonymizationPolicy(recognizer_score_threshold=0.5), spans, text)
     assert "03/04/2023" not in out
+
+
+def test_llm_parser_keeps_the_highest_confidence_of_a_repeated_entity() -> None:
+    text = "Seen by Rhea Orleans today"
+    spans = _llm_spans(
+        text, {"PATIENT": [{"text": "Rhea Orleans", "confidence": 0.3}, {"text": "Rhea Orleans", "confidence": 0.9}]}
+    )
+    out = _run(AnonymizationPolicy(recognizer_score_threshold=0.5), spans, text)
+    assert "Rhea Orleans" not in out
 
 
 def _merged_row(regex: list[dict], llm: list[dict]) -> list[dict]:
