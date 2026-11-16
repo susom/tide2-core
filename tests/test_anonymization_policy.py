@@ -80,7 +80,10 @@ def test_unknown_text_operator() -> None:
         AnonymizationPolicy.from_mapping({"text_operators": "NOPE=keep"})
 
 
-@pytest.mark.parametrize(("salt", "study_id"), [(None, "S1"), ("s", None), ("s", ""), (None, None)])
+@pytest.mark.parametrize(
+    ("salt", "study_id"),
+    [(None, "S1"), ("s", None), ("s", ""), (None, None), ("<NA>", "S1"), (float("nan"), "S1"), ("s", "<NA>")],
+)
 def test_acc_num_hash_needs_both_secrets(salt: str | None, study_id: str | None) -> None:
     uses_hash = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
     for policy, method in [(uses_hash, None), (AnonymizationPolicy(), "acc_num_hash")]:

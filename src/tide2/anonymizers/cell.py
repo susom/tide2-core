@@ -289,7 +289,7 @@ def check_acc_num_secrets(
 ) -> None:
     """Raise ``ValueError`` if ``acc_num_hash`` is used (``method`` or ``policy.text_operators``) without both secrets."""
     uses_acc_num_hash = method == "acc_num_hash" or "acc_num_hash" in dict(policy.text_operators).values()
-    if uses_acc_num_hash and (acc_num_salt is None or not acc_num_study_id):
+    if uses_acc_num_hash and (is_null(acc_num_salt) or is_null(acc_num_study_id) or not acc_num_study_id):
         raise ValueError("acc_num_hash needs acc_num_salt and acc_num_study_id")
 
 
