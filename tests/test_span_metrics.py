@@ -923,6 +923,19 @@ class TestResolveConflicts:
         ]
         assert [s["entity_type"] for s in resolve_conflicts(spans)] == ["MRN", "HOSPITAL"]
 
+    def test_many_disjoint_spans_of_mixed_length_stay_fast(self):
+        """Disjoint spans keep the linear path; sorted-list inserts made this quadratic (about 8 s)."""
+        import time
+
+        spans, pos = [], 0
+        for i in range(200_000):
+            length = 1 + (i * 7919) % 30
+            spans.append({"start": pos, "end": pos + length, "entity_type": "ID"})
+            pos += length + 1
+        started = time.perf_counter()
+        assert len(resolve_conflicts(spans)) == len(spans)
+        assert time.perf_counter() - started < 2
+
 
 class TestResolveRecognizerResults:
     """Test cases for the resolve_recognizer_results function."""

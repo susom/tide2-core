@@ -264,6 +264,10 @@ def _nms_longest_wins(items: list[Any], bounds: Callable[[Any], tuple[int, int]]
     processing order. Ties keep the input order: with input sorted by ``(start, -length)`` the earlier start
     wins, and items with the same bounds keep their input order.
 
+    Spans in different overlap clusters cannot suppress each other, so a span that overlaps nothing is kept
+    directly and only clusters go through ``_nms_cluster``. The cost is O(n) plus O(k log k) per cluster of k
+    spans, so O(n log n) at most.
+
     Args:
         items: Items sorted by ``(start, -length)``.
         bounds: Returns the ``(start, end)`` of an item.
@@ -271,19 +275,72 @@ def _nms_longest_wins(items: list[Any], bounds: Callable[[Any], tuple[int, int]]
     Returns:
         The kept, non-overlapping items, sorted by start.
     """
-    starts: list[int] = []
-    ends: list[int] = []
     kept: list[Any] = []
-    for item in sorted(items, key=lambda it: bounds(it)[0] - bounds(it)[1]):
+    cluster: list[Any] = []
+    cluster_end = 0
+    for item in items:
         start, end = bounds(item)
-        i = bisect.bisect_left(starts, start)
-        # Kept spans do not overlap, so only the two neighbours can overlap this span
-        if (i > 0 and ends[i - 1] > start) or (i < len(starts) and starts[i] < end):
-            continue
-        starts.insert(i, start)
-        ends.insert(i, end)
-        kept.insert(i, item)
+        if cluster and start >= cluster_end:
+            kept.extend(cluster if len(cluster) == 1 else _nms_cluster(cluster, bounds))
+            cluster = []
+        if not cluster:
+            cluster_end = end
+        cluster.append(item)
+        cluster_end = max(cluster_end, end)
+    if cluster:
+        kept.extend(cluster if len(cluster) == 1 else _nms_cluster(cluster, bounds))
     return kept
+
+
+def _nms_cluster(items: list[Any], bounds: Callable[[Any], tuple[int, int]]) -> list[Any]:
+    """Run ``_nms_longest_wins`` on one overlap cluster in O(k log k).
+
+    The kept spans do not overlap, so a span overlaps a kept span if a kept span starts in ``[start, end)``,
+    or if the last kept span that starts before ``start`` ends after it. A Fenwick tree over the distinct
+    starts counts the kept starts and finds that last one.
+    """
+    spans = [bounds(item) for item in items]
+    coords = sorted({start for start, _ in spans})
+    size = len(coords)
+    tree = [0] * (size + 1)
+    kept_end = [0] * size
+    top_bit = 1 << size.bit_length()
+
+    def count_below(i: int) -> int:
+        total = 0
+        while i > 0:
+            total += tree[i]
+            i &= i - 1
+        return total
+
+    def kth_start(k: int) -> int:
+        pos, step = 0, top_bit
+        while step:
+            if pos + step <= size and tree[pos + step] < k:
+                pos += step
+                k -= tree[pos]
+            step >>= 1
+        return pos
+
+    kept: list[int] = []
+    for i in sorted(range(len(items)), key=lambda i: spans[i][0] - spans[i][1]):
+        start, end = spans[i]
+        lo = bisect.bisect_left(coords, start)
+        hi = bisect.bisect_left(coords, end)
+        before = count_below(lo)
+        if hi > lo and count_below(hi) > before:
+            continue
+        if before and kept_end[kth_start(before)] > start:
+            continue
+        kept.append(i)
+        if end > start:  # an empty span cannot suppress another span
+            kept_end[lo] = end
+            j = lo + 1
+            while j <= size:
+                tree[j] += 1
+                j += j & -j
+    kept.sort(key=lambda i: (spans[i][0], i))
+    return [items[i] for i in kept]
 
 
 def _resolve_longest_wins(sorted_spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
