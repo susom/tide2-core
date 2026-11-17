@@ -82,7 +82,17 @@ def test_unknown_text_operator() -> None:
 
 @pytest.mark.parametrize(
     ("salt", "study_id"),
-    [(None, "S1"), ("s", None), ("s", ""), (None, None), ("<NA>", "S1"), (float("nan"), "S1"), ("s", "<NA>")],
+    [
+        (None, "S1"),
+        ("s", None),
+        ("s", ""),
+        (None, None),
+        ("<NA>", "S1"),
+        (float("nan"), "S1"),
+        ("s", "<NA>"),
+        ("s", "   "),
+        ("s", "\t\n"),
+    ],
 )
 def test_acc_num_hash_needs_both_secrets(salt: str | None, study_id: str | None) -> None:
     uses_hash = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
@@ -90,6 +100,7 @@ def test_acc_num_hash_needs_both_secrets(salt: str | None, study_id: str | None)
         with pytest.raises(ValueError, match="acc_num_salt and acc_num_study_id"):
             check_acc_num_secrets(policy, salt, study_id, method)
     check_acc_num_secrets(uses_hash, "s", "S1")
+    check_acc_num_secrets(uses_hash, "", "S1")
     check_acc_num_secrets(AnonymizationPolicy(), None, None)
 
 
