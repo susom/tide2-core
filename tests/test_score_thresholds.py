@@ -17,6 +17,7 @@ from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.runner import cli
 from tide2.runner import local_runner
 from tide2.utils.span_metrics import dedupe_exact_spans
+from tide2.utils.span_metrics import is_transformer_span
 
 SALT = b"\x01" * 32
 KEY = b"\x02" * 32
@@ -82,6 +83,28 @@ def test_transformer_threshold_keeps_score_at_or_above() -> None:
     policy = AnonymizationPolicy(transformer_score_threshold=0.6)
     assert "Rhea Orleans" not in _run(policy, [_span("PERSON", PERSON, 0.8, TRANSFORMER)])
     assert "Rhea Orleans" not in _run(policy, [_span("PERSON", PERSON, 0.6, TRANSFORMER)])
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("CachedResultsTransformerRecognizer", True),
+        ("TransformersRecognizer[SOME_MODEL]", True),
+        ("CachedResultsTransformerRecognizerRegex", False),
+        ("PatternRecognizer", False),
+        (None, False),
+        (7, False),
+    ],
+)
+def test_cached_name_matches_exactly_and_live_name_by_prefix(name: object, expected: bool) -> None:
+    assert is_transformer_span({"recognizer_name": name}) is expected
+    assert is_transformer_span(None) is False
+
+
+def test_cached_name_plus_suffix_uses_the_recognizer_threshold() -> None:
+    policy = AnonymizationPolicy(transformer_score_threshold=0.9, recognizer_score_threshold=0.5)
+    meta = {"recognizer_name": "CachedResultsTransformerRecognizerRegex"}
+    assert "Rhea Orleans" not in _run(policy, [_span("PERSON", PERSON, 0.8, meta)])
 
 
 def test_recognizer_threshold_drops_low_score_regex() -> None:

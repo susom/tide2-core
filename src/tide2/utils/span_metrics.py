@@ -359,14 +359,15 @@ def _resolve_longest_wins(sorted_spans: list[dict[str, Any]]) -> list[dict[str, 
     return _nms_longest_wins(sorted_spans, lambda s: (s["start"], s["end"]))
 
 
-# recognizer_name of a transformer span: "TransformersRecognizer[<model>]" live, or the cached recognizer's name
-TRANSFORMER_RECOGNIZER_PREFIXES = ("TransformersRecognizer", "CachedResultsTransformerRecognizer")
+# recognizer_name of a transformer span: "TransformersRecognizer[<model>]" live, or exactly the cached recognizer's name
+TRANSFORMER_RECOGNIZER_PREFIX = "TransformersRecognizer"
+CACHED_RECOGNIZER_NAME = "CachedResultsTransformerRecognizer"
 
 
 def is_transformer_span(metadata: Any) -> bool:
     """Return True if a transformer model produced the span, as its ``recognition_metadata`` tells."""
     name = metadata.get("recognizer_name") if isinstance(metadata, Mapping) else None
-    return isinstance(name, str) and name.startswith(TRANSFORMER_RECOGNIZER_PREFIXES)
+    return isinstance(name, str) and (name.startswith(TRANSFORMER_RECOGNIZER_PREFIX) or name == CACHED_RECOGNIZER_NAME)
 
 
 def dedupe_exact_spans(spans: Iterable[Any]) -> list[Any]:
