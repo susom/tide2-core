@@ -302,13 +302,7 @@ def check_acc_num_secrets(
         raise ValueError("acc_num_hash needs acc_num_salt and acc_num_study_id")
 
 
-def _check_method(
-    method: str | None,
-    entity_type: str,
-    acc_num_salt: str | None,
-    acc_num_study_id: str | None,
-    policy: AnonymizationPolicy,
-) -> None:
+def _check_method(method: str | None, entity_type: str, acc_num_salt: str | None, acc_num_study_id: str | None) -> None:
     """Raise ``ValueError`` if ``method`` cannot apply to a cell of ``entity_type``."""
     if method is None:
         return
@@ -320,7 +314,9 @@ def _check_method(
         raise ValueError("A FREE_TEXT cell takes its methods from policy.text_operators, not from method")
     if entity_type not in _TEXT_METHOD_TYPES[method]:
         raise ValueError(f"Method {method!r} does not accept entity_type {entity_type!r}")
-    check_acc_num_secrets(policy, acc_num_salt, acc_num_study_id, method)
+    # policy.text_operators applies to free text only, so it must not demand secrets of a structured cell
+    if method == "acc_num_hash":
+        check_acc_num_secrets(AnonymizationPolicy(), acc_num_salt, acc_num_study_id, method)
 
 
 @functools.cache
@@ -424,7 +420,7 @@ def anonymize_cell(  # noqa: PLR0911
     """
     if not isinstance(entity_type, str) or entity_type not in SUPPORTED_ENTITY_TYPES:
         raise ValueError(f"Unsupported entity_type: {entity_type!r}")
-    _check_method(method, entity_type, acc_num_salt, acc_num_study_id, policy)
+    _check_method(method, entity_type, acc_num_salt, acc_num_study_id)
     zip_mode = policy.zip_mode
     if entity_type in ZIP_ENTITY_TYPES and zip_mode is None:
         from tide2.anonymizers.zip_code import DEFAULT_ZIP_MODE  # see _zip_operator

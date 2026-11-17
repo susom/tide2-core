@@ -57,6 +57,15 @@ def test_cell_text_operators_do_not_hash_a_structured_cell() -> None:
     assert cell.anonymize_cell("123456", "MRN", SALT, KEY, policy=HASH_MRN) != _hash("123456")
 
 
+@pytest.mark.parametrize("entity_type", ["MRN", "HAR", "ACC_NUM"])
+def test_cell_hash_needs_no_accession_secrets_for_a_free_text_policy(entity_type: str) -> None:
+    free_text_hash = AnonymizationPolicy(text_operators="ACC_NUM=acc_num_hash")
+    expected = cell.anonymize_cell("48291037", entity_type, SALT, KEY, method="hash")
+    assert cell.anonymize_cell("48291037", entity_type, SALT, KEY, method="hash", policy=free_text_hash) == expected
+    with pytest.raises(ValueError, match="acc_num_salt and acc_num_study_id"):
+        cell.anonymize_cell("48291037", "FREE_TEXT", SALT, KEY, jitter=5, recognizer_results=[], policy=free_text_hash)
+
+
 def test_cell_hash_rejects_a_non_id_type() -> None:
     with pytest.raises(ValueError, match="does not accept"):
         cell.anonymize_cell("2024-03-15", "DATE", SALT, KEY, method="hash")
