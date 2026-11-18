@@ -13,6 +13,8 @@ Available utilities:
 
 from .date_jitter import derive_date_jitter
 from .date_jitter import derive_date_jitter_batch
+from .date_jitter import random_date_jitter
+from .date_jitter import resolve_date_jitter
 from .date_jitter import validate_jitter_parameters
 from .fpe_strings import FormatPreservingEncryption
 from .keys_utils import derive_key
@@ -37,6 +39,8 @@ __all__ = [
     "key_from_hex_string",
     "load_key",
     "load_salt",
+    "random_date_jitter",
+    "resolve_date_jitter",
     "save_key",
     "save_salt",
     "secure_string_selector",

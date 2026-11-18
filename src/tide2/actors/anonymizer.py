@@ -24,7 +24,6 @@ results; a failure in one entity masks that entity as ``[ENTITY_TYPE]``.
 import hashlib
 import logging
 import os
-import secrets
 from datetime import UTC
 from datetime import datetime
 from functools import partial
@@ -51,7 +50,10 @@ from tide2.anonymizers.guarded import record_error
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
-from tide2.cryptographic.date_jitter import derive_date_jitter
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import resolve_date_jitter
+from tide2.cryptographic.date_jitter import validate_jitter_parameters
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.batch_columns import BatchColumns
 from tide2.utils.batch_columns import type_columns
@@ -89,6 +91,8 @@ class AnonymizerWorker:
         acc_num_salt: str | None = None,
         acc_num_study_id: str | None = None,
         jitter_required: bool = False,
+        min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+        max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
     ) -> None:
         """
         Initialize the worker with an AnonymizerEngine.
@@ -100,6 +104,8 @@ class AnonymizerWorker:
             acc_num_study_id: Study ID for accession number hashing (fixed per run).
             jitter_required: If True, notes without a jitter value fail instead
                 of computing one automatically.
+            min_jitter_days: Minimum absolute date jitter in days (at least 3).
+            max_jitter_days: Maximum absolute date jitter in days.
         """
         if salt is None or key is None:
             raise ValueError("Both salt and key must be provided")
@@ -109,6 +115,10 @@ class AnonymizerWorker:
 
         if len(key) != REQUIRED_KEY_SIZE:
             raise ValueError(f"key must be {REQUIRED_KEY_SIZE} bytes, got {len(key)}")
+
+        is_valid, message = validate_jitter_parameters(max_jitter_days, min_jitter_days)
+        if not is_valid:
+            raise ValueError(message)
 
         # Apply Presidio patches - must be done in __init__ (not module level)
         # for Ray workers since they are separate processes.
@@ -120,6 +130,8 @@ class AnonymizerWorker:
         self.acc_num_salt = acc_num_salt
         self.acc_num_study_id = acc_num_study_id
         self.jitter_required = jitter_required
+        self.min_jitter_days = min_jitter_days
+        self.max_jitter_days = max_jitter_days
 
         # Suppress short input warnings in batch processing (reduces log noise)
         FormatPreservingEncryption.suppress_short_input_warnings = True
@@ -240,7 +252,7 @@ class AnonymizerWorker:
         Create operators including per-note parameters.
 
         Args:
-            date_jitter: Jitter value for date anonymization.
+            date_jitter: Jitter value for date anonymization; required unless ``mask_dates``.
             patient_id: Patient ID used as entity param for ACC_NUM hashing.
             mask_dates: Replace dates with the entity mask instead of shifting them.
 
@@ -248,10 +260,6 @@ class AnonymizerWorker:
             Dictionary of operator configurations for this note.
         """
         operators = self._base_operators.copy()
-
-        # Random jitter between 4-60 days if not provided
-        if date_jitter is None:
-            date_jitter = secrets.randbelow(57) + 4
 
         if mask_dates:
             operators.update({"DATE_TIME": OperatorConfig("masking"), "DATE": OperatorConfig("masking")})
@@ -342,23 +350,17 @@ class AnonymizerWorker:
 
         Args:
             patient_id: Patient identifier. If None, NaN, or empty,
-                generates a random jitter.
+                generates a random jitter within the configured range.
 
         Returns:
             Integer jitter value in days.
         """
-        if is_null(patient_id):
-            return secrets.randbelow(357) - 178  # Random between -178 and +178
-        val_str = str(patient_id).strip()
-        if val_str.lower() in ("nan", "none", "null", ""):
-            return secrets.randbelow(357) - 178  # Random between -178 and +178
-
-        return derive_date_jitter(
-            patient_id=val_str,
-            salt=self.salt,
-            key=self.key,
-            max_jitter_days=180,
-            min_jitter_days=3,
+        return resolve_date_jitter(
+            patient_id,
+            self.salt,
+            self.key,
+            max_jitter_days=self.max_jitter_days,
+            min_jitter_days=self.min_jitter_days,
         )
 
     def _anonymize_chunked(
@@ -688,6 +690,8 @@ def create_anonymizer_actor(
     acc_num_salt: str | None = None,
     acc_num_study_id: str | None = None,
     jitter_required: bool = False,
+    min_jitter_days: int = DEFAULT_MIN_JITTER_DAYS,
+    max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
 ) -> type[AnonymizerWorker]:
     """
     Factory function to create an AnonymizerWorker subclass with specific keys.
@@ -702,6 +706,8 @@ def create_anonymizer_actor(
         acc_num_study_id: Study ID for accession number hashing (fixed per run)
         jitter_required: If True, notes without a jitter value fail instead
             of computing one automatically
+        min_jitter_days: Minimum absolute date jitter in days (at least 3)
+        max_jitter_days: Maximum absolute date jitter in days
 
     Returns:
         A class that can be used with Ray Data's map_batches()
@@ -730,6 +736,8 @@ def create_anonymizer_actor(
                 acc_num_salt=acc_num_salt,
                 acc_num_study_id=acc_num_study_id,
                 jitter_required=jitter_required,
+                min_jitter_days=min_jitter_days,
+                max_jitter_days=max_jitter_days,
             )
 
     return ConfiguredAnonymizerActor

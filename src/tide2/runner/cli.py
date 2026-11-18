@@ -20,6 +20,9 @@ import logging
 import sys
 from pathlib import Path
 
+from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
+from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
+from tide2.cryptographic.date_jitter import validate_jitter_parameters
 from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 acc_num_salt=args.acc_num_salt,
                 acc_num_study_id=args.acc_num_study_id,
                 jitter_required=getattr(args, "jitter_required", False),
+                min_jitter_days=args.min_jitter_days,
+                max_jitter_days=args.max_jitter_days,
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -229,6 +234,8 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw: dict = {}
             if getattr(args, "jitter_required", False):
                 a_kw["jitter_required"] = True
+            a_kw["min_jitter_days"] = args.min_jitter_days
+            a_kw["max_jitter_days"] = args.max_jitter_days
             for attr, key in [
                 ("num_actors", "num_actors"),
                 ("batch_size", "batch_size"),
@@ -483,6 +490,18 @@ Examples:
         action="store_true",
         help="Fail notes that have no jitter value instead of computing one (anonymizer/pipeline jobs)",
     )
+    run_p.add_argument(
+        "--min-jitter-days",
+        type=int,
+        default=DEFAULT_MIN_JITTER_DAYS,
+        help="Minimum absolute date shift in days, at least 3 (anonymizer/pipeline jobs, default: 3)",
+    )
+    run_p.add_argument(
+        "--max-jitter-days",
+        type=int,
+        default=DEFAULT_MAX_JITTER_DAYS,
+        help="Maximum absolute date shift in days (anonymizer/pipeline jobs, default: 180)",
+    )
     # Pipeline-specific arguments
     run_p.add_argument("--salt-hex", default="00" * 32, help="Hex-encoded FPE salt (pipeline jobs)")
     run_p.add_argument("--key-hex", default="11" * 32, help="Hex-encoded FPE key (pipeline jobs)")
@@ -599,6 +618,11 @@ Examples:
     # If --config provided on the 'run' command, load YAML and backfill unset args
     if args.command == "run" and getattr(args, "config", None):
         _apply_config(args, run_p, argv)
+
+    if args.command == "run":
+        is_valid, message = validate_jitter_parameters(args.max_jitter_days, args.min_jitter_days)
+        if not is_valid:
+            run_p.error(message)
 
     args.func(args)
 
