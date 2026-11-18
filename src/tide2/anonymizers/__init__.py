@@ -12,6 +12,7 @@ Available anonymizers:
 - HipsAlphaNumericAnonymizer: HIPS-based alphanumeric anonymization
 - HipsLocationAnonymizer: HIPS-based location anonymization
 - HipsNamesAnonymizer: HIPS-based name anonymization
+- ZipCodeAnonymizer: HIPAA Safe Harbor ZIP code reduction (3-digit prefix or 000)
 
 All anonymizers use class-level caching for optimal performance.
 For Ray-based batch processing, use the runner module:
@@ -26,6 +27,7 @@ from .hips_alphanumeric import HipsAlphaNumericAnonymizer
 from .hips_locations import HipsLocationAnonymizer
 from .hips_names import HipsNamesAnonymizer
 from .masking import MaskingAnonymizer
+from .zip_code import ZipCodeAnonymizer
 
 __all__ = [
     "AccessionNumberHashAnonymizer",
@@ -36,4 +38,5 @@ __all__ = [
     "HipsLocationAnonymizer",
     "HipsNamesAnonymizer",
     "MaskingAnonymizer",
+    "ZipCodeAnonymizer",
 ]

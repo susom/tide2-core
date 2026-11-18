@@ -86,6 +86,21 @@ def test_acc_num_uses_accession_settings() -> None:
     assert "ACC123456" not in expected
 
 
+@pytest.mark.parametrize(("zip_mode", "zip_out"), [("relaxed", "94305"), ("strict", "943")])
+def test_zip_follows_zip_mode(zip_mode: str, zip_out: str) -> None:
+    text = "Lives in ZIP 94305."
+    spans = [_span(text, "94305", "ZIP_CODE")]
+    worker = AnonymizerWorker(SALT, KEY, acc_num_salt=ACC_SALT, acc_num_study_id=ACC_STUDY, zip_mode=zip_mode)
+    expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans))["anonymized_note_text"]
+    assert expected == f"Lives in ZIP {zip_out}."
+    assert _free_text(text, spans, zip_mode=zip_mode) == expected
+
+
+def test_invalid_zip_mode_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="zip mode"):
+        _free_text(zip_mode="loose")
+
+
 def test_empty_spans_leave_text_unchanged() -> None:
     assert _free_text(spans=[]) == TEXT
     assert cell.anonymize_cell(TEXT, "FREE_TEXT", SALT, KEY, recognizer_results=[]) == TEXT
