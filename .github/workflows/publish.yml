@@ -294,6 +294,15 @@ jobs:
           else
             echo "No changelog section found for $ver; will fall back to --generate-notes."
           fi
+          # Append the hand-written release guide for this version, when it exists.
+          guide="guides/release_notes_${ver}.md"
+          if [ -f "$guide" ]; then
+            if [ -s release-notes.md ]; then
+              printf '\n---\n\n' >> release-notes.md
+            fi
+            cat "$guide" >> release-notes.md
+            echo "Appended $guide to the release notes."
+          fi
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
