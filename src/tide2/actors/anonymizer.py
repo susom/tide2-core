@@ -35,21 +35,21 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 from presidio_anonymizer.entities import RecognizerResult
 
-from tide2.anonymizers import AccessionNumberHashAnonymizer
-from tide2.anonymizers import AgeGroupAnonymizer
-from tide2.anonymizers import DateJitterAnonymizer
-from tide2.anonymizers import FakerAnonymizer
-from tide2.anonymizers import HipsAlphaNumericAnonymizer
-from tide2.anonymizers import HipsLocationAnonymizer
-from tide2.anonymizers import HipsNamesAnonymizer
-from tide2.anonymizers import MaskingAnonymizer
 from tide2.anonymizers import presidio_patches
+from tide2.anonymizers.accession_number_hash import AccessionNumberHashAnonymizer
+from tide2.anonymizers.age_grouping import AgeGroupAnonymizer
+from tide2.anonymizers.date_jitter import DateJitterAnonymizer
+from tide2.anonymizers.faker import FakerAnonymizer
 from tide2.anonymizers.guarded import end_note
 from tide2.anonymizers.guarded import guarded
 from tide2.anonymizers.guarded import record_error
 from tide2.anonymizers.guarded import safe_entity_type
 from tide2.anonymizers.guarded import start_note
 from tide2.anonymizers.guarded import summarize
+from tide2.anonymizers.hips_alphanumeric import HipsAlphaNumericAnonymizer
+from tide2.anonymizers.hips_locations import HipsLocationAnonymizer
+from tide2.anonymizers.hips_names import HipsNamesAnonymizer
+from tide2.anonymizers.masking import MaskingAnonymizer
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
@@ -57,8 +57,6 @@ from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.date_jitter import validate_jitter_parameters
 from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
-from tide2.utils.batch_columns import BatchColumns
-from tide2.utils.batch_columns import type_columns
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
 from tide2.utils.span_metrics import resolve_recognizer_results
@@ -619,7 +617,10 @@ class AnonymizerWorker:
         stage_statuses = []
         row_ids = []
 
-        cols = BatchColumns(batch)
+        # Deferred: batch_columns needs pyarrow, which the single-cell path does not load.
+        from tide2.utils import batch_columns
+
+        cols = batch_columns.BatchColumns(batch)
         batch_size = len(cols["note_text"])
         jitters = cols.get("jitter", [None] * batch_size)
         has_birth_date = "birth_date" in cols
@@ -693,7 +694,7 @@ class AnonymizerWorker:
         # Preserve row_id for checkpointing when input batch has the column
         if "row_id" in cols:
             out["row_id"] = row_ids
-        return type_columns(out)
+        return batch_columns.type_columns(out)
 
     def __call__(self, batch: dict[str, Any]) -> dict[str, list[Any]]:
         """Process a batch of notes directly under Ray Data map_batches."""
