@@ -73,7 +73,7 @@ def test_null_note_text_passes_through_recognizer_to_anonymizer():
     anon_worker = anon_worker_cls.__new__(anon_worker_cls)
 
     def dummy_anon_process_note(
-        note_text, original_text_hash, recognizer_results_json=None, patient_id=None, jitter=None
+        note_text, original_text_hash, recognizer_results_json=None, patient_id=None, jitter=None, birth_date=None
     ):
         return {
             "text_hash": original_text_hash,
@@ -97,7 +97,7 @@ def test_anonymizer_worker_preserves_uppercase_row_id():
     anon_worker = anon_worker_cls.__new__(anon_worker_cls)
 
     def dummy_anon_process_note(
-        note_text, original_text_hash, recognizer_results_json=None, patient_id=None, jitter=None
+        note_text, original_text_hash, recognizer_results_json=None, patient_id=None, jitter=None, birth_date=None
     ):
         return {
             "text_hash": original_text_hash,
