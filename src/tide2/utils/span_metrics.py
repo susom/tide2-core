@@ -8,9 +8,13 @@ conflict resolution for overlapping spans.
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 from collections import defaultdict
+from collections.abc import Callable
+from collections.abc import Iterable
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
@@ -253,12 +257,98 @@ def _resolve_contained(sorted_spans: list[dict[str, Any]]) -> list[dict[str, Any
     return kept
 
 
+def _nms_longest_wins(items: list[Any], bounds: Callable[[Any], tuple[int, int]]) -> list[Any]:
+    """Keep the longest spans with non-maximum suppression; only a kept span can suppress another span.
+
+    Items are taken longest first and kept if they overlap no kept item, so the result does not depend on the
+    processing order. Ties keep the input order: with input sorted by ``(start, -length)`` the earlier start
+    wins, and items with the same bounds keep their input order.
+
+    Spans in different overlap clusters cannot suppress each other, so a span that overlaps nothing is kept
+    directly and only clusters go through ``_nms_cluster``. The cost is O(n) plus O(k log k) per cluster of k
+    spans, so O(n log n) at most.
+
+    Args:
+        items: Items sorted by ``(start, -length)``.
+        bounds: Returns the ``(start, end)`` of an item.
+
+    Returns:
+        The kept, non-overlapping items, sorted by start.
+    """
+    kept: list[Any] = []
+    cluster: list[Any] = []
+    cluster_end = 0
+    for item in items:
+        start, end = bounds(item)
+        if cluster and start >= cluster_end:
+            kept.extend(cluster if len(cluster) == 1 else _nms_cluster(cluster, bounds))
+            cluster = []
+        if not cluster:
+            cluster_end = end
+        cluster.append(item)
+        cluster_end = max(cluster_end, end)
+    if cluster:
+        kept.extend(cluster if len(cluster) == 1 else _nms_cluster(cluster, bounds))
+    return kept
+
+
+def _nms_cluster(items: list[Any], bounds: Callable[[Any], tuple[int, int]]) -> list[Any]:
+    """Run ``_nms_longest_wins`` on one overlap cluster in O(k log k).
+
+    The kept spans do not overlap, so a span overlaps a kept span if a kept span starts in ``[start, end)``,
+    or if the last kept span that starts before ``start`` ends after it. A Fenwick tree over the distinct
+    starts counts the kept starts and finds that last one.
+    """
+    spans = [bounds(item) for item in items]
+    coords = sorted({start for start, _ in spans})
+    size = len(coords)
+    tree = [0] * (size + 1)
+    kept_end = [0] * size
+    top_bit = 1 << size.bit_length()
+
+    def count_below(i: int) -> int:
+        total = 0
+        while i > 0:
+            total += tree[i]
+            i &= i - 1
+        return total
+
+    def kth_start(k: int) -> int:
+        pos, step = 0, top_bit
+        while step:
+            if pos + step <= size and tree[pos + step] < k:
+                pos += step
+                k -= tree[pos]
+            step >>= 1
+        return pos
+
+    kept: list[int] = []
+    for i in sorted(range(len(items)), key=lambda i: spans[i][0] - spans[i][1]):
+        start, end = spans[i]
+        lo = bisect.bisect_left(coords, start)
+        hi = bisect.bisect_left(coords, end)
+        before = count_below(lo)
+        if hi > lo and count_below(hi) > before:
+            continue
+        if before and kept_end[kth_start(before)] > start:
+            continue
+        kept.append(i)
+        if end > start:  # an empty span cannot suppress another span
+            kept_end[lo] = end
+            j = lo + 1
+            while j <= size:
+                tree[j] += 1
+                j += j & -j
+    kept.sort(key=lambda i: (spans[i][0], i))
+    return [items[i] for i in kept]
+
+
 def _resolve_longest_wins(sorted_spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Resolve all overlaps by keeping the longer span.
 
-    For any two overlapping spans, the longer one wins. This uses an
-    interval-based approach where we track non-overlapping intervals.
+    For any two overlapping spans, the longer one wins. Only a kept span can suppress another span, so a span
+    that only a removed span overlapped is kept.
 
     Args:
         sorted_spans: Spans sorted by (start, -length)
@@ -266,52 +356,46 @@ def _resolve_longest_wins(sorted_spans: list[dict[str, Any]]) -> list[dict[str, 
     Returns:
         Non-overlapping spans where longer spans won conflicts
     """
-    if not sorted_spans:
-        return []
+    return _nms_longest_wins(sorted_spans, lambda s: (s["start"], s["end"]))
 
-    # We'll use a greedy approach: process spans by start position,
-    # and for each span check if it overlaps with any kept span.
-    # If it does, keep the longer one.
 
-    kept: list[dict[str, Any]] = []
+# recognizer_name of a transformer span: "TransformersRecognizer[<model>]" live, or exactly the cached recognizer's name
+TRANSFORMER_RECOGNIZER_PREFIX = "TransformersRecognizer"
+CACHED_RECOGNIZER_NAME = "CachedResultsTransformerRecognizer"
 
-    for span in sorted_spans:
-        start, end = span["start"], span["end"]
-        span_len = end - start
 
-        # Find any overlapping spans in kept
-        overlapping_indices = []
-        for i, k in enumerate(kept):
-            k_start, k_end = k["start"], k["end"]
-            # Check for overlap: spans overlap if start < k_end and end > k_start
-            if start < k_end and end > k_start:
-                overlapping_indices.append(i)
+def is_transformer_span(metadata: Any) -> bool:
+    """Return True if a transformer model produced the span, as its ``recognition_metadata`` tells."""
+    name = metadata.get("recognizer_name") if isinstance(metadata, Mapping) else None
+    return isinstance(name, str) and (name.startswith(TRANSFORMER_RECOGNIZER_PREFIX) or name == CACHED_RECOGNIZER_NAME)
 
-        if not overlapping_indices:
-            # No overlap, add this span
-            kept.append(span)
-        else:
-            # Check if this span is longer than all overlapping spans
-            # If so, remove overlapping spans and add this one
-            all_shorter = True
-            for i in overlapping_indices:
-                k = kept[i]
-                k_len = k["end"] - k["start"]
-                if k_len >= span_len:
-                    all_shorter = False
-                    break
 
-            if all_shorter:
-                # Remove all overlapping (shorter) spans and add this one
-                # Remove in reverse order to maintain indices
-                for i in sorted(overlapping_indices, reverse=True):
-                    kept.pop(i)
-                kept.append(span)
-            # else: this span is shorter than at least one overlapping span, discard it
+def dedupe_exact_spans(spans: Iterable[Any]) -> list[Any]:
+    """Keep one span per ``(entity_type, start, end)`` and threshold class: the one with the highest score.
 
-    # Sort by start position for consistent output
-    kept.sort(key=lambda x: x["start"])
-    return kept
+    Overlapping spans are kept, so score thresholds can still run before the overlaps are resolved. A transformer
+    span and a non-transformer span of the same type and bounds are both kept, because each is judged by its own
+    score threshold. Spans are ``RecognizerResult`` objects or dicts; the winning item is returned unchanged, with
+    its ``recognition_metadata``.
+
+    Args:
+        spans: Spans with ``entity_type``, ``start``, ``end`` and ``score``.
+
+    Returns:
+        The kept spans, ordered by ``start`` and longest first; spans with the same bounds keep their input order,
+        which decides ties in the anonymizer.
+    """
+
+    def field(span: Any, name: str) -> Any:
+        return span.get(name) if isinstance(span, Mapping) else getattr(span, name, None)
+
+    best: dict[tuple[int, int, str, bool], Any] = {}
+    for span in spans:
+        transformer = is_transformer_span(field(span, "recognition_metadata"))
+        key = (field(span, "start"), field(span, "end"), field(span, "entity_type"), transformer)
+        if key not in best or field(span, "score") > field(best[key], "score"):
+            best[key] = span
+    return sorted(best.values(), key=lambda s: (field(s, "start"), -field(s, "end")))
 
 
 def resolve_recognizer_results(
@@ -487,63 +571,10 @@ def _resolve_longest_wins_with_refs(
 ) -> list[tuple[dict[str, Any], RecognizerResult]]:
     """Resolve overlaps keeping longest span, preserving RecognizerResult references.
 
-    Input must be sorted by start ascending, then by length descending.
-    Uses a backwards scan on ``kept`` so that only recent (overlapping)
-    entries are examined, giving O(n) for non-pathological inputs.
+    Input must be sorted by start ascending, then by length descending. Only a kept span can suppress another
+    span, so the result does not depend on the processing order.
     """
-    if not sorted_spans:
-        return []
-
-    kept: list[tuple[dict[str, Any], RecognizerResult]] = []
-    # Track the running maximum end position across kept spans so we can
-    # quickly skip spans that are fully contained within an already-kept span.
-    max_end = -1
-
-    for span_tuple in sorted_spans:
-        span_dict = span_tuple[0]
-        start, end = span_dict["start"], span_dict["end"]
-        span_len = end - start
-
-        # Fast path: no overlap with any kept span
-        if start >= max_end:
-            kept.append(span_tuple)
-            max_end = end
-            continue
-
-        # Scan backwards to find overlapping kept spans.
-        # Because kept is sorted by start, we only need to look at entries
-        # whose start < current end (guaranteed for recent entries).
-        overlapping_indices = []
-        for i in range(len(kept) - 1, -1, -1):
-            k = kept[i][0]
-            k_start, k_end = k["start"], k["end"]
-            # Since kept is sorted by start and we scan backwards,
-            # once k_end <= start there can be no more overlaps.
-            if k_end <= start:
-                break
-            if start < k_end and end > k_start:
-                overlapping_indices.append(i)
-
-        if not overlapping_indices:
-            kept.append(span_tuple)
-            max_end = max(max_end, end)
-        else:
-            all_shorter = True
-            for i in overlapping_indices:
-                k = kept[i][0]
-                k_len = k["end"] - k["start"]
-                if k_len >= span_len:
-                    all_shorter = False
-                    break
-
-            if all_shorter:
-                for i in sorted(overlapping_indices, reverse=True):
-                    kept.pop(i)
-                kept.append(span_tuple)
-                max_end = max(max_end, end)
-
-    kept.sort(key=lambda x: x[0]["start"])
-    return kept
+    return _nms_longest_wins(sorted_spans, lambda t: (t[0]["start"], t[0]["end"]))
 
 
 class SpanCollection:

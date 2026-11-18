@@ -33,7 +33,7 @@ from tenacity import wait_exponential
 
 from tide2.utils.llm_model import LlmModel
 from tide2.utils.resource_utils import load_llm_prompt
-from tide2.utils.span_metrics import resolve_overlapping_spans
+from tide2.utils.span_metrics import dedupe_exact_spans
 
 logger = logging.getLogger(__name__)
 
@@ -472,13 +472,15 @@ class LlmJsonRecognizer(RemoteRecognizer):
         self, entities_dict: dict[str, Any], requested_entities: list[str], original_text: str
     ) -> list[RecognizerResult]:
         """
-        Extract entities using exact string matching with non-maximum suppression.
+        Extract entities using exact string matching.
 
         For each entity in the JSON response:
-        1.  Deduplicate entities from the LLM output.
+        1.  Deduplicate entities from the LLM output; keep the highest confidence for each text and type.
         2.  Find all occurrences of each unique entity text in the original text.
-        3.  Resolve overlapping spans by keeping the longest one.
-        4.  Create a RecognizerResult for each non-overlapping, longest span.
+        3.  Remove exact copies; keep overlapping spans, which the anonymizer resolves after the score
+            thresholds. Spans with the same bounds are ordered by descending score, so the anonymizer
+            keeps the highest score, as before the thresholds.
+        4.  Create a RecognizerResult for each span.
 
         Args:
             entities_dict: Dictionary from JSON with entity types as keys and entity lists as values
@@ -508,7 +510,8 @@ class LlmJsonRecognizer(RemoteRecognizer):
 
                 # Store under a tuple of (text, type) to handle cases where the same text is tagged with different types
                 entity_key = (entity_text, entity_type)
-                if entity_key not in unique_entities:
+                # Keep the highest confidence: a low first copy must not hide a high one from the threshold
+                if entity_key not in unique_entities or entity["confidence"] > unique_entities[entity_key]:
                     unique_entities[entity_key] = entity["confidence"]
 
         # 2. Find all occurrences of each unique entity
@@ -525,13 +528,13 @@ class LlmJsonRecognizer(RemoteRecognizer):
                     }
                 )
 
-        # 3. Resolve overlapping spans using non-maximum suppression
+        # 3. Remove exact copies; overlaps are resolved by the anonymizer after the score thresholds
         if not all_spans:
             return []
 
-        final_spans = resolve_overlapping_spans(all_spans)
+        final_spans = sorted(dedupe_exact_spans(all_spans), key=lambda s: (s["start"], -s["end"], -s["score"]))
 
-        # 4. Create RecognizerResult objects from the final non-overlapping spans
+        # 4. Create RecognizerResult objects from the final spans
         results: list[RecognizerResult] = []
         for span in final_spans:
             explanation = AnalysisExplanation(
