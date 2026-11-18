@@ -63,7 +63,6 @@ dependencies = [
     "pyarrow>=14,<25",
     # Cryptography and anonymization
     "faker>=40.19,<41",
-    "ff3>=1.0,<2",
     "pyahocorasick>=2.3,<3",
     "usaddress>=0.5,<0.6",
     # Orchestration
@@ -84,6 +83,7 @@ dependencies = [
     "psutil>=7.2,<8",
     "pyyaml>=6.0,<7",
     "tenacity>=9.1,<10",
+    "fastfpe==0.2.1",
 ]
 
 [project.optional-dependencies]
@@ -314,6 +314,7 @@ exclude = [
 [tool.pytest.ini_options]
 markers = [
     "integration: marks tests as integration tests (may be slower than unit tests)",
+    "slow: marks exhaustive tests that take tens of seconds (deselect with -m \"not slow\")",
 ]
 testpaths = ["tests"]
 addopts = "--cov=tide2 --cov-report=term-missing --cov-report=html --cov-report=xml"

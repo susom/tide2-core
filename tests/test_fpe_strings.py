@@ -24,8 +24,7 @@ class TestFormatPreservingEncryptionInitialization:
 
         assert fpe.salt == salt
         assert fpe.key == key
-        assert len(fpe.encryption_key) == 16  # FF3 requires 16-byte key
-        assert fpe.encryption_key_hex == fpe.encryption_key.hex()
+        assert len(fpe.encryption_key) == 32  # AES-256 key for FF1
 
     def test_initialization_with_invalid_salt_length(self):
         """Test that initialization fails with invalid salt length."""
@@ -312,74 +311,34 @@ class TestSpecialCharacterHandling:
 
 
 class TestShortStrings:
-    """Test behavior with short strings that require padding."""
+    """Test content shorter than the FF1 minimum domain, which uses keyed tables."""
 
     @pytest.fixture
     def fpe(self):
-        # Reset class-level flag to ensure warnings are generated
-        # (other tests may have set this to True via AnonymizeActor)
-        FormatPreservingEncryption.suppress_short_input_warnings = False
         salt = b"0" * 32
         key = b"1" * 32
         return FormatPreservingEncryption(salt, key)
 
-    def test_short_numeric_warning(self, fpe):
-        """Test that short numeric strings generate warnings."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            plaintext = "12345"  # Too short for secure FPE (min 6 for numeric)
-            encrypted, format_type = fpe.encrypt(plaintext)
-            fpe.decrypt(encrypted)
-
-            # Should generate a warning about padding
-            assert len(w) > 0
-            assert "too short" in str(w[0].message).lower()
-            assert format_type == "numeric"
-
-    def test_short_alphanumeric_warning(self, fpe):
-        """Test that short alphanumeric strings generate warnings."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            plaintext = "ab1"  # Too short for secure FPE (min 4 for alphanumeric)
-            encrypted, format_type = fpe.encrypt(plaintext)
-            fpe.decrypt(encrypted)
-
-            # Should generate a warning about padding
-            assert len(w) > 0
-            assert "too short" in str(w[0].message).lower()
-            assert format_type == "alphanumeric"
-
-    def test_minimum_length_numeric_no_warning(self, fpe):
-        """Test that numeric strings of minimum length don't generate warnings."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            plaintext = "123456"  # Exactly min length for numeric
+    @pytest.mark.parametrize(("plaintext", "expected_format"), [("12345", "numeric"), ("ab1", "alphanumeric")])
+    def test_short_content_roundtrips_without_warnings(self, fpe, plaintext, expected_format):
+        """Short content is permuted without padding, truncation or warnings."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             encrypted, format_type = fpe.encrypt(plaintext)
             decrypted = fpe.decrypt(encrypted)
 
-            # Should not generate padding warnings
-            padding_warnings = [warning for warning in w if "too short" in str(warning.message).lower()]
-            assert len(padding_warnings) == 0
+        assert format_type == expected_format
+        assert len(encrypted) == len(plaintext)
+        assert decrypted == plaintext
 
-            assert format_type == "numeric"
-            assert encrypted != plaintext
-            assert decrypted == plaintext
+    @pytest.mark.parametrize(("plaintext", "expected_format"), [("123456", "numeric"), ("abcd", "alphanumeric")])
+    def test_minimum_ff1_length_roundtrips(self, fpe, plaintext, expected_format):
+        """Content of exactly the FF1 minimum length goes through FF1."""
+        encrypted, format_type = fpe.encrypt(plaintext)
 
-    def test_minimum_length_alphanumeric_no_warning(self, fpe):
-        """Test that alphanumeric strings of minimum length don't generate warnings."""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            plaintext = "abcd"  # Exactly min length for alphanumeric
-            encrypted, format_type = fpe.encrypt(plaintext)
-            decrypted = fpe.decrypt(encrypted)
-
-            # Should not generate padding warnings
-            padding_warnings = [warning for warning in w if "too short" in str(warning.message).lower()]
-            assert len(padding_warnings) == 0
-
-            assert format_type == "alphanumeric"
-            assert encrypted != plaintext
-            assert decrypted == plaintext
+        assert format_type == expected_format
+        assert encrypted != plaintext
+        assert fpe.decrypt(encrypted) == plaintext
 
 
 class TestDeterministicBehavior:
@@ -474,18 +433,14 @@ class TestEdgeCases:
         assert encrypted == plaintext
         assert decrypted == plaintext
 
-    def test_cipher_caching(self, fpe):
-        """Test that cipher instances are cached for performance."""
-        plaintext1 = "1234567890"
-        plaintext2 = "9876543210"
+    def test_short_content_tables_are_cached(self, fpe):
+        """Test that a short-content table is built once per class and length."""
+        fpe.encrypt("123")
+        table = fpe._tables[("N", 3)]
 
-        # Encrypt both (same format, should use cached cipher)
-        fpe.encrypt(plaintext1)
-        initial_cache_size = len(fpe._cipher_cache)
-
-        fpe.encrypt(plaintext2)
-        # Cache size shouldn't grow for same format
-        assert len(fpe._cipher_cache) == initial_cache_size
+        fpe.encrypt("456")
+        assert fpe._tables[("N", 3)] is table
+        assert len(fpe._tables) == 1
 
     def test_only_special_chars(self, fpe):
         """Test string with only special characters."""

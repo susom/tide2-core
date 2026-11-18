@@ -56,7 +56,6 @@ from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
 from tide2.cryptographic.date_jitter import UNCAPPED_DATES_WARNING
 from tide2.cryptographic.date_jitter import resolve_date_jitter
 from tide2.cryptographic.date_jitter import validate_jitter_parameters
-from tide2.cryptographic.fpe_strings import FormatPreservingEncryption
 from tide2.utils.nulls import is_null
 from tide2.utils.nulls import is_null_or_blank
 from tide2.utils.span_metrics import resolve_recognizer_results
@@ -139,9 +138,6 @@ class AnonymizerWorker:
         self.max_jitter_days = max_jitter_days
         self.max_age = max_age
         self._warned_no_birth_date = False
-
-        # Suppress short input warnings in batch processing (reduces log noise)
-        FormatPreservingEncryption.suppress_short_input_warnings = True
 
         # Initialize Presidio AnonymizerEngine
         self.anonymizer_engine = AnonymizerEngine()

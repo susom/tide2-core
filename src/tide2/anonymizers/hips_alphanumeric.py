@@ -1,6 +1,6 @@
 """Format-preserving encryption operator for alphanumeric identifiers.
 
-Uses FF3-based FPE to deterministically encrypt identifiers (MRNs, accession
+Uses collision-free FF1-based FPE to deterministically encrypt identifiers (MRNs, accession
 numbers, etc.) while preserving their character format and length.
 """
 
@@ -42,20 +42,18 @@ class HipsAlphaNumericAnonymizer(Operator):
         """Initialize the HIPS alphanumeric anonymizer."""
         super().__init__()
 
-        self.entities_supported = set(
-            [
-                "DEFAULT",
-                "PHONE",
-                "PHONE_NUMBER",
-                "US_SSN",
-                "MEDICAL_LICENSE",
-                "MRN",
-                "HAR",
-                "ACC_NUM",
-                "ID",
-                "CSN_ID",
-            ]
-        )
+        self.entities_supported = {
+            "DEFAULT",
+            "PHONE",
+            "PHONE_NUMBER",
+            "US_SSN",
+            "MEDICAL_LICENSE",
+            "MRN",
+            "HAR",
+            "ACC_NUM",
+            "ID",
+            "CSN_ID",
+        }
 
     def operate(self, text: str, params: dict) -> str:
         """Anonymize the input text using format-preserving encryption.
