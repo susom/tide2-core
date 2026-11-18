@@ -23,8 +23,6 @@ from pathlib import Path
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_AGE
 from tide2.cryptographic.date_jitter import DEFAULT_MAX_JITTER_DAYS
 from tide2.cryptographic.date_jitter import DEFAULT_MIN_JITTER_DAYS
-from tide2.cryptographic.date_jitter import validate_jitter_parameters
-from tide2.cryptographic.date_jitter import validate_max_age
 from tide2.runner.fault_tolerance import configure_data_context
 
 logger = logging.getLogger(__name__)
@@ -123,8 +121,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 max_jitter_days=args.max_jitter_days,
                 max_age=args.max_age,
                 zip_mode=getattr(args, "zip_mode", DEFAULT_ZIP_MODE),
-                acc_num_hash=getattr(args, "acc_num_hash", False),
-                keep_entities=getattr(args, "keep_entities", None),
+                text_operators=getattr(args, "text_operators", None),
+                fpe_mode=args.fpe_mode,
                 dry_run=dry_run,
                 **optional_kwargs,
             )
@@ -245,8 +243,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             a_kw: dict = {}
             if getattr(args, "jitter_required", False):
                 a_kw["jitter_required"] = True
-            if getattr(args, "acc_num_hash", False):
-                a_kw["acc_num_hash"] = True
             a_kw["min_jitter_days"] = args.min_jitter_days
             a_kw["max_jitter_days"] = args.max_jitter_days
             a_kw["max_age"] = args.max_age
@@ -256,7 +252,8 @@ def cmd_run(args: argparse.Namespace) -> None:
                 ("batch_size", "batch_size"),
                 ("acc_num_salt", "acc_num_salt"),
                 ("acc_num_study_id", "acc_num_study_id"),
-                ("keep_entities", "keep_entities"),
+                ("text_operators", "text_operators"),
+                ("fpe_mode", "fpe_mode"),
                 ("read_cpus", "read_cpus"),
                 ("worker_num_cpus", "worker_num_cpus"),
                 ("write_cpus", "write_cpus"),
@@ -499,18 +496,16 @@ Examples:
     )
     run_p.add_argument("--salt", help="Path to salt file (required for anonymizer jobs)")
     run_p.add_argument("--key", help="Path to key file (required for anonymizer jobs)")
+    run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (text_operators acc_num_hash)")
+    run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (text_operators acc_num_hash)")
     run_p.add_argument(
-        "--acc-num-hash",
-        action="store_true",
-        help="Hash ACC_NUM with the BigQuery-compatible SHA256 instead of the default hips_alphanumeric "
-        "(anonymizer/pipeline jobs)",
+        "--text-operators",
+        help="TYPE=METHOD,... method per entity type in free text; methods keep, acc_num_hash, for example "
+        "DATE=keep,ACC_NUM=acc_num_hash (anonymizer/pipeline jobs)",
     )
-    run_p.add_argument("--acc-num-salt", help="Salt for accession number hashing (requires --acc-num-hash)")
-    run_p.add_argument("--acc-num-study-id", help="Study ID for accession number hashing (requires --acc-num-hash)")
     run_p.add_argument(
-        "--keep-entities",
-        help="Comma-separated entity types left as they are, for example DATE,DATE_TIME,AGE; DATE also covers "
-        "the date part types of cells. Kept text is not anonymized (anonymizer/pipeline jobs)",
+        "--fpe-mode",
+        help="strict (FF1, default) or relaxed (faster for INT64 IDs) (anonymizer/pipeline jobs)",
     )
     run_p.add_argument(
         "--jitter-required",
@@ -665,14 +660,12 @@ Examples:
         _apply_config(args, run_p, argv)
 
     if args.command == "run":
-        from tide2.anonymizers.cell import parse_keep_entities
+        from tide2.anonymizers.cell import AnonymizationPolicy
+        from tide2.anonymizers.cell import check_acc_num_secrets
 
-        is_valid, message = validate_jitter_parameters(args.max_jitter_days, args.min_jitter_days)
-        if not is_valid:
-            run_p.error(message)
         try:
-            validate_max_age(args.max_age)
-            parse_keep_entities(args.keep_entities)
+            policy = AnonymizationPolicy.from_mapping(vars(args))
+            check_acc_num_secrets(policy, getattr(args, "acc_num_salt", None), getattr(args, "acc_num_study_id", None))
         except ValueError as err:
             run_p.error(str(err))
     # argparse checks the flag, but a value from --config YAML bypasses its choices

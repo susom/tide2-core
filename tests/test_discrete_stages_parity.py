@@ -30,6 +30,7 @@ from tide2.actors.recognizer import RecognizerWorker
 from tide2.actors.recognizer import _DeduplicateLogFilter
 from tide2.actors.transformer import BIOAggregationActor
 from tide2.actors.transformer import TransformerInferenceActor
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.runner.cli import main as cli_main
 from tide2.runner.hardware import Machine
 from tide2.transformers.core import TransformerCore
@@ -366,8 +367,7 @@ def test_anonymizer_worker_patient_id_normalization():
     worker.key = b"\x11" * 32
     worker.acc_num_salt = "salt"
     worker.acc_num_study_id = "study"
-    worker.acc_num_hash = True
-    worker.keep_entities = frozenset()
+    worker.policy = AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"})
     worker._base_operators = {}
 
     # Valid patient_id

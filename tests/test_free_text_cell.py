@@ -9,6 +9,7 @@ import pytest
 from tide2.actors.anonymizer import AnonymizerWorker
 from tide2.anonymizers import cell
 from tide2.anonymizers import free_text
+from tide2.anonymizers.cell import AnonymizationPolicy
 from tide2.anonymizers.hips_names import HipsNamesAnonymizer
 
 SALT = b"\x01" * 32
@@ -40,8 +41,16 @@ def _fresh_workers():
     free_text._worker.cache_clear()
 
 
-def _free_text(text: str = TEXT, spans=SPANS, **kwargs):
-    params = {"patient_id": "FAKE-P0001", "acc_num_salt": ACC_SALT, "acc_num_study_id": ACC_STUDY, **kwargs}
+def _free_text(text: str = TEXT, spans=SPANS, acc_num_hash: bool = False, zip_mode: str | None = None, **kwargs):
+    text_operators = {"ACC_NUM": "acc_num_hash"} if acc_num_hash else None
+    policy = AnonymizationPolicy(text_operators=text_operators, zip_mode=zip_mode)
+    params = {
+        "patient_id": "FAKE-P0001",
+        "acc_num_salt": ACC_SALT,
+        "acc_num_study_id": ACC_STUDY,
+        "policy": policy,
+        **kwargs,
+    }
     return cell.anonymize_cell(text, "FREE_TEXT", SALT, KEY, recognizer_results=json.dumps(spans), **params)
 
 
@@ -81,7 +90,13 @@ def test_date_is_capped_at_max_age() -> None:
 def test_acc_num_uses_accession_settings() -> None:
     text = "Accession ACC123456 reviewed."
     spans = [_span(text, "ACC123456", "ACC_NUM")]
-    worker = AnonymizerWorker(SALT, KEY, acc_num_salt=ACC_SALT, acc_num_study_id=ACC_STUDY, acc_num_hash=True)
+    worker = AnonymizerWorker(
+        SALT,
+        KEY,
+        policy=AnonymizationPolicy(text_operators={"ACC_NUM": "acc_num_hash"}),
+        acc_num_salt=ACC_SALT,
+        acc_num_study_id=ACC_STUDY,
+    )
     expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans), "FAKE-P0001")[
         "anonymized_note_text"
     ]
@@ -95,7 +110,13 @@ def test_acc_num_uses_accession_settings() -> None:
 def test_zip_follows_zip_mode(zip_mode: str, zip_out: str) -> None:
     text = "Lives in ZIP 94305."
     spans = [_span(text, "94305", "ZIP_CODE")]
-    worker = AnonymizerWorker(SALT, KEY, acc_num_salt=ACC_SALT, acc_num_study_id=ACC_STUDY, zip_mode=zip_mode)
+    worker = AnonymizerWorker(
+        SALT,
+        KEY,
+        policy=AnonymizationPolicy(zip_mode=zip_mode),
+        acc_num_salt=ACC_SALT,
+        acc_num_study_id=ACC_STUDY,
+    )
     expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans))["anonymized_note_text"]
     assert expected == f"Lives in ZIP {zip_out}."
     assert _free_text(text, spans, zip_mode=zip_mode) == expected
