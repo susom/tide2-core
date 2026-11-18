@@ -81,8 +81,13 @@ def test_date_is_capped_at_max_age() -> None:
 def test_acc_num_uses_accession_settings() -> None:
     text = "Accession ACC123456 reviewed."
     spans = [_span(text, "ACC123456", "ACC_NUM")]
-    expected = _note(text, spans, patient_id="FAKE-P0001")
-    assert _free_text(text, spans) == expected
+    worker = AnonymizerWorker(SALT, KEY, acc_num_salt=ACC_SALT, acc_num_study_id=ACC_STUDY, acc_num_hash=True)
+    expected = worker.process_note(text, worker.compute_text_hash(text), json.dumps(spans), "FAKE-P0001")[
+        "anonymized_note_text"
+    ]
+    assert _free_text(text, spans, acc_num_hash=True) == expected
+    assert _free_text(text, spans) == _note(text, spans, patient_id="FAKE-P0001")
+    assert _free_text(text, spans) != expected
     assert "ACC123456" not in expected
 
 

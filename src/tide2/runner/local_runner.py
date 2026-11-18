@@ -1486,6 +1486,7 @@ class LocalJobRunner:
         max_jitter_days: int = DEFAULT_MAX_JITTER_DAYS,
         max_age: int = DEFAULT_MAX_AGE,
         zip_mode: str = "relaxed",  # DEFAULT_ZIP_MODE, not imported here to keep this module light; last so existing positional calls keep their meaning
+        acc_num_hash: bool = False,
     ) -> dict[str, Any]:
         """
         Run anonymization job with Ray Data checkpointing for resume.
@@ -1541,6 +1542,8 @@ class LocalJobRunner:
                 is logged.
             zip_mode: ``"relaxed"`` (default; not Safe Harbor compliant) or
                 ``"strict"`` (HIPAA Safe Harbor; see ``ZipCodeAnonymizer``)
+            acc_num_hash: If True, hash ACC_NUM with accession_number_hash
+                (``acc_num_salt``/``acc_num_study_id``); otherwise use hips_alphanumeric.
 
         Returns:
             Processing statistics dictionary, including ``output_rows`` (the number
@@ -1635,6 +1638,7 @@ class LocalJobRunner:
             max_jitter_days=max_jitter_days,
             max_age=max_age,
             zip_mode=zip_mode,
+            acc_num_hash=acc_num_hash,
         )
 
         try:
@@ -2751,6 +2755,7 @@ class LocalJobRunner:
                 max_jitter_days=int(anonymizer_kwargs.get("max_jitter_days", DEFAULT_MAX_JITTER_DAYS)),
                 max_age=int(anonymizer_kwargs.get("max_age", DEFAULT_MAX_AGE)),
                 zip_mode=anonymizer_kwargs.get("zip_mode", "relaxed"),
+                acc_num_hash=bool(anonymizer_kwargs.get("acc_num_hash", False)),
             )
             ds = self.build_anonymizer_stage(
                 ds,
