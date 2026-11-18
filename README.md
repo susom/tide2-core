@@ -119,12 +119,17 @@ TIDE 2.0 is a Python package for anonymizing sensitive data in healthcare and re
   - `keep`: leave the type as it is, for example `--text-operators DATE=keep,DATE_TIME=keep,AGE=keep`.
     `DATE_TIME` is listed on its own. Kept text is real PHI in the output. The recognizers still find every type,
     and kept spans appear in `anonymizer_results_json` with operator `keep`.
+  - `hash` (the ID types `MRN`, `HAR`, `ACC_NUM`, `ID`, `CSN_ID`, `US_SSN`, `PHONE_NUMBER`, `PHONE`,
+    `MEDICAL_LICENSE`): replace the value with `HMAC-SHA256(key, salt | value)` instead of FPE, for example
+    `--text-operators MRN=hash,CSN_ID=hash`. The output is 64 uppercase hex characters and cannot be reversed. The
+    same value, `salt` and `key` give the same hash in every table and note of a run. Case and outer spaces of the
+    value do not matter. `fpe_mode` has no effect on a hashed type. A cell uses it with `method="hash"`.
   - `acc_num_hash` (`ACC_NUM` only): SHA256-based, compatible with BigQuery UDF; needs `--acc-num-salt` and
     `--acc-num-study-id`. Without it, accession numbers use HIPS alphanumeric encryption like MRN and HAR.
 
   `text_operators` applies to notes and `FREE_TEXT` cells only. A structured cell has one entity type, so the
   caller chooses its method: the `method` argument of `anonymize_cell` (`None` for the default, or
-  `"acc_num_hash"`). `keep` is not a cell method: to keep a column, do not send it to anonymization.
+  `"hash"`, or `"acc_num_hash"`). `keep` is not a cell method: to keep a column, do not send it to anonymization.
 - **Policy** (`AnonymizationPolicy`, `tide2.anonymizers.cell`): one frozen, checked set of options that
   `AnonymizerWorker`, `create_anonymizer_actor`, `anonymize_free_text` and `anonymize_cell` take as `policy=`.
   Secrets (`salt`, `key`, `acc_num_salt`, `acc_num_study_id`) stay separate arguments (`--acc-num-salt`,
