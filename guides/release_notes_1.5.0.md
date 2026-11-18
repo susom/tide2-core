@@ -147,7 +147,14 @@ Version 1.4.0 adds parameters to `LocalJobRunner` and `tide2-runner`.
 - When you give no value, Ray selects a limit from the system.
 
 ```python
+from pathlib import Path
+
 from tide2.runner.local_runner import LocalJobRunner
+
+# Load your own salt and key from protected storage.
+# If you omit them, run_pipeline uses public default values. Never use those values for real data.
+salt_hex = Path("/secure/keys/salt.hex").read_text().strip()
+key_hex = Path("/secure/keys/key.hex").read_text().strip()
 
 runner = LocalJobRunner(
     num_cpus=32,
@@ -160,6 +167,8 @@ runner.run_pipeline(
     input_path="gs://my-bucket/shards/shard_01.parquet",
     output_dir="gs://my-bucket/runs/shard_01",
     model_name="stanford-med-hdr/tide2-sentry-clinical-ner",
+    salt_hex=salt_hex,
+    key_hex=key_hex,
     execution_mode="discrete",
 )
 ```
@@ -870,12 +879,18 @@ No recognizer runs for each cell.
   Use the same `patient_id`, `jitter` and `birth_date`.
 - The text follows the same `policy` as a note.
 - The result is `None` when the spans are null, are malformed or are not in the text.
-  The job records the text hash only, and not the text.
+  With `ERROR` logs, the job records the text hash and the exception class, and not the text.
+  With `DEBUG` logs, the job also records more data about the error. This data can have input text.
+  Do not use `DEBUG` logs with PHI.
 - When an operator fails, the anonymizer masks its entity only, for example `[PERSON]`.
 - The Faker entity types (`EMAIL_ADDRESS`, `WEB`, `URL`, `ORGANIZATION`, `GENETIC_SEQUENCE`) give random values.
   The output for such text is not deterministic.
-- The anonymizer reads only `entity_type`, `start`, `end` and `score` from a span.
-  Callers can remove `recognition_metadata` and `analysis_explanation` to make the input smaller.
+- The anonymizer reads `entity_type`, `start`, `end` and `score` from a span.
+  It also reads `recognizer_name` in `recognition_metadata` to select the score threshold.
+  Keep `recognition_metadata`.
+  If you remove it, the anonymizer uses `recognizer_score_threshold` for transformer spans.
+  When the two thresholds are different, a span can stay as clear text.
+  You can remove `analysis_explanation` to make the input smaller.
 - The path does not load `presidio_analyzer`, spaCy, torch, pandas, pyarrow or Ray.
 - Each process has one `AnonymizerWorker` for each set of settings (`functools.lru_cache(maxsize=4)`).
   There is no batch API.
