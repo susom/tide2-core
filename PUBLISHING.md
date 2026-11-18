@@ -120,6 +120,13 @@ That's it — merging the release PR and clicking Run workflow are decoupled on
 purpose, so you can merge the notes now and ship later (e.g. a coordinated
 announcement).
 
+**Detailed release notes (optional).** To add a hand-written guide to a release,
+commit `guides/release_notes_<version>.md` (for example
+`guides/release_notes_1.5.0.md`) before you run Phase 2. The `github-release` job
+appends it to the GitHub Release body, after the `CHANGELOG.md` section for that
+version. Write it in the ASD-STE100 style, like the other guides. Do not edit
+`CHANGELOG.md` for this: release-please owns that file.
+
 ### TestPyPI dry-run (optional, non-blocking)
 
 Run **Actions ▸ Publish Release ▸ Run workflow** with **`dry_run` checked** to
