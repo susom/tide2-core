@@ -2,6 +2,38 @@
 
 <!-- version list -->
 
+## [1.5.0](https://github.com/susom/tide2-core/compare/v1.4.0...v1.5.0) (2026-11-18)
+
+
+### Features
+
+* **anonymizer:** add anonymization policy and apply it to notes and cells ([#119](https://github.com/susom/tide2-core/issues/119)) ([24e2bba](https://github.com/susom/tide2-core/commit/24e2bba5d568023be00ac48a49a4b072396b3ec0))
+* **anonymizer:** add keep_entities to leave chosen entity types unanonymized ([#116](https://github.com/susom/tide2-core/issues/116)) ([2cb9f44](https://github.com/susom/tide2-core/commit/2cb9f445e30faa0ba0d5ebb7973fbe187fe58cf4))
+* **anonymizer:** add keyed hash method for id entity types ([#120](https://github.com/susom/tide2-core/issues/120)) ([79f90a0](https://github.com/susom/tide2-core/commit/79f90a03f32910b05b5b7b673371b89089c38bad))
+* **anonymizer:** add score thresholds for transformer and other recognizers ([#123](https://github.com/susom/tide2-core/issues/123)) ([a2b6992](https://github.com/susom/tide2-core/commit/a2b6992b521d493554c6f082a280c86889a51f05))
+* **anonymizer:** add strict and relaxed zip code anonymizer ([#113](https://github.com/susom/tide2-core/issues/113)) ([ceb0ad5](https://github.com/susom/tide2-core/commit/ceb0ad566cb71488676d3e2d40dbdc1da186aea6))
+* **anonymizer:** anonymize free-text cells with precomputed spans ([#114](https://github.com/susom/tide2-core/issues/114)) ([b55f40b](https://github.com/susom/tide2-core/commit/b55f40b87864a059bceaeec0e1df10c30fd46922))
+* **anonymizer:** cap shifted dates at the 90th birthday ([#111](https://github.com/susom/tide2-core/issues/111)) ([4b27470](https://github.com/susom/tide2-core/commit/4b2747077b1964e879c0c16130d4b46ca4759501))
+* **anonymizer:** fix date jitter parsing and add a configurable jitter range ([#107](https://github.com/susom/tide2-core/issues/107)) ([22ff87a](https://github.com/susom/tide2-core/commit/22ff87a45634cc5c9a19fc03f82eb7e1456a08b7))
+* **anonymizer:** make accession number hashing opt-in ([#115](https://github.com/susom/tide2-core/issues/115)) ([ff203d3](https://github.com/susom/tide2-core/commit/ff203d3cb7b677456e1a190597fcd1dde938e73d))
+* **anonymizers:** add cell-level anonymization function ([#106](https://github.com/susom/tide2-core/issues/106)) ([2df9bc7](https://github.com/susom/tide2-core/commit/2df9bc7de12bb14a11a301b0c315105e62f2a36c))
+* **anonymizer:** shift day, month and year parts with their full date ([#112](https://github.com/susom/tide2-core/issues/112)) ([bd2e99e](https://github.com/susom/tide2-core/commit/bd2e99e4559c1c42a81b2fa35ba8e0d6d348282c))
+* **cryptographic:** add relaxed fpe mode for int64 cells ([#117](https://github.com/susom/tide2-core/issues/117)) ([a608131](https://github.com/susom/tide2-core/commit/a608131b3a60d3c77499e02a2a916a8545794d4e))
+* **runner:** default standalone stage checkpointing to row_id and expose --id-column ([#101](https://github.com/susom/tide2-core/issues/101)) ([370d954](https://github.com/susom/tide2-core/commit/370d954bef552bcf5907bd6fe4d5d313e58317cd)), closes [#98](https://github.com/susom/tide2-core/issues/98)
+* **visualizer:** simplify visualizer with parquet ingestion and streamlined ui ([#102](https://github.com/susom/tide2-core/issues/102)) ([58508cb](https://github.com/susom/tide2-core/commit/58508cb36331d4c01358ab5e60a39a31c6592f7a))
+
+
+### Bug Fixes
+
+* **anonymizers:** preserve casing in hospital and institution replacements ([#95](https://github.com/susom/tide2-core/issues/95)) ([5630680](https://github.com/susom/tide2-core/commit/563068059206cf239d95f2b75561f136aca6b9b0))
+* **cryptographic:** replace FF3 with collision-free FPE on FF1 ([#108](https://github.com/susom/tide2-core/issues/108)) ([2fb52a8](https://github.com/susom/tide2-core/commit/2fb52a8b55baee0f20348a21008c6a938a2414c2))
+
+
+### Documentation
+
+* **notebooks:** use write_visualizer_json in pipeline notebook ([#93](https://github.com/susom/tide2-core/issues/93)) ([c023d93](https://github.com/susom/tide2-core/commit/c023d93dad2edd106ba21b9791910bcf01e9b86a))
+* update documentation, add distributed guide, and resolve doc gaps ([#97](https://github.com/susom/tide2-core/issues/97)) ([68aae8a](https://github.com/susom/tide2-core/commit/68aae8ad8cb7bfb11968f3f3767ab8fd96839eeb))
+
 ## [1.4.0](https://github.com/susom/tide2-core/compare/v1.3.1...v1.4.0) (2026-10-13)
 
 
