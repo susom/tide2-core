@@ -11,6 +11,7 @@ name: Release PR
 on:
   push:
     branches: [main] # refresh the single release PR as commits land
+  workflow_dispatch: # allow manual refresh of the release PR
 
 # Restrict all jobs to read-only by default (satisfies the Token-Permissions
 # scorecard check). The release-please job restates the writes it needs.
